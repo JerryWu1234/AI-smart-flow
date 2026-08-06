@@ -297,7 +297,7 @@ interface PiWorkerAttemptState {
 - 形式 Candidate 是 Baseline 到最新 Result Tree 的累计变化；相邻 Tree diff 只作为本轮 repair evidence。
 - 每个 Run 使用独立 append-only Git object store，每个 Revision 使用独立 index/workspace/snapshot。
 - Pi 不接触用户仓库 index、refs 或 Worktree；SmartFlow 不使用 `git worktree add`。
-- Git LFS、自定义 `clean`/`smudge`/`process` filter 和其他未支持仓库能力在物化前暂停。
+- Git capability probe 不检测或阻断 Git LFS、`.gitattributes` 与自定义 `clean`/`smudge`/`process` filter；workspace 内容按普通文件流程读写。
 - Publish 只检查累计 Candidate paths，要求 expected-old-hash、稳定 operationId、结果查询和支持的 batch mode。
 - 冲突返回 `0/N` 与 DeliveryBundle；PARTIAL/UNKNOWN 进入 `PUBLISH_RECOVERY_BLOCKED`。
 

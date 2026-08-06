@@ -58,7 +58,7 @@
 
 ## Decision 8: Capture one immutable Baseline and chain Revisions
 
-**Decision**: Run Baseline `A` is captured once. Revision 1 produces `B`; Revision 2 consumes `B` and produces `C`. Formal Candidate is cumulative `A → C`; adjacent `B → C` is repair evidence only. Git LFS and custom filters pause before execution, with no legacy scanner fallback.
+**Decision**: Run Baseline `A` is captured once. Revision 1 produces `B`; Revision 2 consumes `B` and produces `C`. Formal Candidate is cumulative `A → C`; adjacent `B → C` is repair evidence only. Git LFS, `.gitattributes`, and custom filters do not affect capability probing; workspace bytes follow the normal file flow.
 
 **Rationale**: Review/Publish need the complete final result while repair needs the current-round delta. Replacing Baseline would lose earlier changes.
 

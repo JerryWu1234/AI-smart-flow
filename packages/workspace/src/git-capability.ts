@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 
 import { runGitCommand } from "./git-command.js";
@@ -7,8 +7,6 @@ import { runGitCommand } from "./git-command.js";
 export type GitPauseCode =
   | "GIT_UNAVAILABLE"
   | "GIT_REPOSITORY_REQUIRED"
-  | "GIT_LFS_UNSUPPORTED"
-  | "GIT_FILTER_UNSUPPORTED"
   | "GIT_SUBMODULE_UNSUPPORTED"
   | "GIT_NESTED_REPOSITORY_UNSUPPORTED";
 
@@ -91,32 +89,6 @@ async function booleanConfig(
   return result.stdout.toString("utf8").trim() === "true";
 }
 
-async function attributeFiles(gitBinary: string, root: string): Promise<string[]> {
-  const result = await runGitCommand(
-    gitBinary,
-    ["-C", root, "ls-files", "-c", "-o", "--exclude-standard", "-z"]
-  );
-  return nulPaths(result.stdout).filter((path) => path === ".gitattributes" || path.endsWith("/.gitattributes"));
-}
-
-async function findUnsupportedAttribute(
-  gitBinary: string,
-  root: string
-): Promise<GitPauseCode | undefined> {
-  for (const relativePath of await attributeFiles(gitBinary, root)) {
-    const source = await readFile(resolve(root, relativePath), "utf8").catch(() => "");
-    for (const rawLine of source.split(/\r?\n/u)) {
-      const line = rawLine.replace(/#.*$/u, "").trim();
-      if (line.length === 0) continue;
-      if (/(?:^|\s)filter=lfs(?:\s|$)/u.test(line)) return "GIT_LFS_UNSUPPORTED";
-      if (/(?:^|\s)(?:-?filter|filter=[^\s]+)(?:\s|$)/u.test(line)) {
-        return "GIT_FILTER_UNSUPPORTED";
-      }
-    }
-  }
-  return undefined;
-}
-
 async function hasNestedRepository(gitBinary: string, root: string): Promise<boolean> {
   const listed = await runGitCommand(
     gitBinary,
@@ -191,27 +163,6 @@ export async function probeGitRepository(
     );
   }
 
-  const configuredFilters = await runGitCommand(
-    gitBinary,
-    ["-C", root, "config", "--get-regexp", "^filter\\..*\\.(clean|smudge|process)$"],
-    { allowExitCodes: [1] }
-  );
-  if (configuredFilters.exitCode === 0 && configuredFilters.stdout.length > 0) {
-    const text = configuredFilters.stdout.toString("utf8");
-    return paused(
-      /filter\.lfs\./iu.test(text) ? "GIT_LFS_UNSUPPORTED" : "GIT_FILTER_UNSUPPORTED",
-      "Git clean, smudge, process, and LFS filters are unsupported",
-      repositoryDetails
-    );
-  }
-  const attributePause = await findUnsupportedAttribute(gitBinary, root);
-  if (attributePause !== undefined) {
-    return paused(
-      attributePause,
-      "Git attributes request an unsupported content filter",
-      repositoryDetails
-    );
-  }
   const staged = await runGitCommand(gitBinary, ["-C", root, "ls-files", "--stage", "-z"]);
   if (nulPaths(staged.stdout).some((entry) => entry.startsWith("160000 ")) ||
     await lstat(resolve(root, ".gitmodules")).then(() => true).catch(() => false)) {
