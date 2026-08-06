@@ -1,0 +1,31 @@
+{
+  "name": "@smartflow/mcp-server",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown --config ../../tsdown.workspace.config.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --root ../.. --passWithNoTests apps/mcp-server/src"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@smartflow/daemon": "workspace:*",
+    "@smartflow/protocol": "workspace:*",
+    "zod": "4.4.3"
+  }
+}

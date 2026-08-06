@@ -1,0 +1,28 @@
+{
+  "name": "@smartflow/publish",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown --config ../../tsdown.workspace.config.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --root ../.. --passWithNoTests packages/publish/src"
+  },
+  "dependencies": {
+    "@smartflow/protocol": "workspace:*"
+  }
+}

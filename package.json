@@ -1,0 +1,53 @@
+{
+  "name": "smartflow",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "packageManager": "pnpm@10.14.0",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "smartflow": "dist/smartflow.mjs"
+  },
+  "main": "./dist/smartflow.mjs",
+  "exports": {
+    ".": "./dist/smartflow.mjs",
+    "./host-skill": "./dist/host-skill.mjs"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "pnpm run build:workspaces && pnpm run build:package",
+    "build:workspaces": "pnpm -r --if-present build",
+    "build:package": "tsdown --config tsdown.config.mjs",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.tests.json --noEmit",
+    "test": "vitest run packages apps tests/helpers tests/unit",
+    "test:contract": "vitest run --passWithNoTests tests/contract",
+    "test:integration": "vitest run --passWithNoTests tests/integration",
+    "test:e2e": "pnpm build && vitest run --no-file-parallelism --passWithNoTests tests/e2e",
+    "test:security": "vitest run --passWithNoTests tests/security",
+    "test:crash": "vitest run --passWithNoTests tests/crash",
+    "test:provider:pi": "pnpm build && vitest run --no-file-parallelism --passWithNoTests packages/provider-pi/src tests/integration/pi-runner.test.ts tests/security/pi-containment.test.ts",
+    "test:installed": "vitest run --passWithNoTests tests/installed tests/e2e/installed-package.test.ts",
+    "smartflow": "node dist/smartflow.mjs",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.83.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "yaml": "2.9.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "26.1.1",
+    "eslint": "10.7.0",
+    "tsdown": "0.22.13",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.65.0",
+    "vitest": "4.1.10"
+  }
+}

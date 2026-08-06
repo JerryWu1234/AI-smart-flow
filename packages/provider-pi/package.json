@@ -1,0 +1,39 @@
+{
+  "name": "@smartflow/provider-pi",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./worker-entry": {
+      "import": "./dist/worker-entry.js"
+    },
+    "./mcp-model-extension": {
+      "types": "./dist/mcp-model-extension.d.ts",
+      "import": "./dist/mcp-model-extension.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown --config ../../tsdown.workspace.config.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --root ../.. --passWithNoTests packages/provider-pi/src"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.83.0",
+    "@smartflow/provider-core": "workspace:*",
+    "@smartflow/protocol": "workspace:*",
+    "@smartflow/task-manifest": "workspace:*",
+    "@smartflow/workspace": "workspace:*"
+  }
+}

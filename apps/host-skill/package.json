@@ -1,0 +1,30 @@
+{
+  "name": "@smartflow/host-skill",
+  "version": "0.1.0",
+  "description": "Host-owned planning and review actions for sandboxed SmartFlow Pi runs",
+  "private": false,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown --config ../../tsdown.workspace.config.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --root ../.. --passWithNoTests apps/host-skill/src"
+  },
+  "dependencies": {
+    "@smartflow/protocol": "workspace:*",
+    "@smartflow/review": "workspace:*"
+  }
+}

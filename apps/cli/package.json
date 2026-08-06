@@ -1,0 +1,36 @@
+{
+  "name": "@smartflow/cli",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown --config ../../tsdown.workspace.config.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --root ../.. --passWithNoTests apps/cli/src"
+  },
+  "dependencies": {
+    "@smartflow/daemon": "workspace:*",
+    "@smartflow/mcp-server": "workspace:*",
+    "@smartflow/observability": "workspace:*",
+    "@smartflow/provider-core": "workspace:*",
+    "@smartflow/provider-pi": "workspace:*",
+    "@smartflow/publish": "workspace:*",
+    "@smartflow/state-store": "workspace:*",
+    "@smartflow/task-manifest": "workspace:*",
+    "@smartflow/workspace": "workspace:*"
+  }
+}

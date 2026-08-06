@@ -1,0 +1,8 @@
+.agents/
+.specify/
+specs/
+tests/
+coverage/
+node_modules/
+*.log
+.env*

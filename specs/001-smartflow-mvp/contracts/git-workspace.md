@@ -1,0 +1,72 @@
+# Git Workspace Adapter Contract
+
+## Purpose
+
+Provide Git-backed snapshots, Pi-visible isolated materialization, Candidate evidence and publish preflight while preserving SmartFlow's state machine and Artifact boundaries.
+
+## G0 frozen decisions
+
+These rules must be frozen before Git Adapter implementation begins:
+
+1. **Unsupported Git execution features pause the Run**
+   - Git LFS and custom `clean`, `smudge` or `process` filters are unsupported in the first version.
+   - The capability probe must enter `PAUSED` before snapshot or materialization and must not execute a filter process or filter-triggered network access.
+2. **Candidate identity covers all Git evidence**
+   - The Candidate hash must bind the baseline snapshot hash, result snapshot hash, canonical operations and the SHA-256 of the Git evidence Artifact.
+   - Git tree/blob object IDs are evidence references and must not replace SmartFlow's SHA-256 integrity bindings.
+3. **Automatic publish requires a conflict-checked batch adapter**
+   - A preflight conflict must return before publishing starts and must cause zero writes.
+   - Automatic publish is allowed when the Apply Adapter supports expected-old-hash checks, stable operation IDs, result queries, and either strict `atomicBatchCas` or local `preflightBatchWrite`.
+   - `preflightBatchWrite` checks every Candidate path before writing, then replaces files one by one. A process or machine failure after writing starts may produce PARTIAL or UNKNOWN and must enter `PUBLISH_RECOVERY_BLOCKED`.
+   - Without either supported batch mode, SmartFlow produces a DeliveryBundle and does not write the Active Workspace.
+4. **There is no legacy fallback**
+   - Missing Git or any unsupported repository capability enters `PAUSED` with a durable reason.
+   - SmartFlow must not silently fall back to the legacy Baseline/Candidate scanner.
+5. **Revision trees form an immutable chain**
+   - The Run Baseline is captured once and never replaced.
+   - Revision 1 uses the Run Baseline as input; every later Revision uses the previous Revision's Result Tree.
+   - Review and Publish use the cumulative diff from the Run Baseline to the current Result Tree. The adjacent-tree diff is retained only as evidence of the current repair round.
+   - All Revisions share one append-only Run object store, but use separate indexes, Workspaces, Snapshot Artifacts and Candidate Artifacts.
+   - Git `gc` and `prune` are forbidden while any Revision snapshot is referenced.
+6. **Task-path concurrency and Git state are Run-scoped**
+   - The canonical absolute task-file path permits only one Active Run; different task files may run concurrently in one Project.
+   - Every Run owns a separate task Artifact, fence/generation, object store and Revision directory. Git state must never be shared across Runs.
+   - Project Publish is serialized; execution and Review are not path-reserved.
+
+G0 is complete only when these decisions are represented by the capability result, Candidate hash contract, Publish capability contract and acceptance scenarios.
+
+## Design surface
+
+```ts
+interface GitWorkspaceAdapter {
+  probeRepository(input: { projectRoot: string }): Promise<GitCapabilities>;
+  captureBaseline(input: CaptureInput): Promise<GitWorkspaceSnapshot>;
+  materialize(input: MaterializeInput): Promise<GitRevisionWorkspaceRef>;
+  captureResult(input: CaptureResultInput): Promise<GitWorkspaceSnapshot>;
+  buildCandidate(input: BuildCandidateInput): Promise<GitCandidateEvidence>;
+  preflight(input: PublishPreflightInput): Promise<GitPublishConflict[]>;
+  cleanup(input: CleanupInput): Promise<void>;
+}
+```
+
+The exact TypeScript names can change during implementation, but each operation must be represented by durable Artifacts and a state transition in `state.json`.
+
+## Safety invariants
+
+- Commands use explicit argv and an explicit working directory; no shell interpolation.
+- `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` and any alternates point into the current Run Data Dir.
+- The adapter never changes the user's normal index, refs, branch, worktree files or Git configuration.
+- The adapter never invokes `commit`, `push`, `reset`, `clean`, `checkout`, `merge`, `rollback` or an equivalent destructive operation against the active workspace.
+- Every snapshot is deterministic for the same effective file view and inclusion policy.
+- Candidate operations are sorted canonically and carry expected old blob/mode values.
+- A new Revision never overwrites an earlier Revision's Snapshot or Candidate Artifacts.
+- A preflight-detected conflict returns before publish starts and causes zero writes.
+- Preflight inspects only cumulative Candidate paths. A conflict result includes conflict paths, `0/N`, `activeWorkspaceChanged=false` and a Patch/DeliveryBundle.
+- PARTIAL or UNKNOWN apply results enter `PUBLISH_RECOVERY_BLOCKED`; they never become `COMPLETED` and are not automatically rolled back.
+- Temporary state is retained until referenced Artifacts and publish/recovery reconciliation are durable; cleanup is idempotent.
+- Pi receives only the materialized Revision workspace. The Run object store, temporary index, original project path and other Revision/Run directories are not inside Pi's project-data sandbox policy.
+- `.smartflow-runtime/` is excluded or removed before Result Snapshot and Candidate generation.
+
+## Capability result
+
+The probe must report repository identity, Git version, worktree support, symlink/mode behavior, LFS/submodule/filter signals, and the effective inclusion policy. Git LFS, custom `clean`/`smudge`/`process` filters and other unsupported capabilities pause the Run before any filter process or filter-triggered network access instead of changing semantics silently.
