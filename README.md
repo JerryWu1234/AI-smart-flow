@@ -1,5 +1,10 @@
 # SmartFlow
 
+```sh
+npm install --global @jerrywu1234/smartflow
+smartflow doctor --json
+```
+
 SmartFlow runs `@earendil-works/pi-coding-agent` in an isolated per-Run Git workspace. Pi uses its official read, search, edit, write and Shell tools directly; SmartFlow does not provide a custom file Broker or pass its MCP/Host Skills into Pi.
 
 Shell commands and network access are allowed inside the sandbox. Project and user data are readable and writable only through the isolated workspace; Node, system and Pi SDK bootstrap paths are read-only. The original project is changed only by the reviewed Publish stage.

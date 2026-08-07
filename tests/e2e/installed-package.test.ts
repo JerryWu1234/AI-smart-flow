@@ -175,10 +175,18 @@ describe("installed SmartFlow package", () => {
           ? installError
           : new Error(typeof installError === "string" ? installError : "npm install failed");
       }
-      const entry = resolve(installRoot, "node_modules", "smartflow", "dist", "smartflow.mjs");
+      const entry = resolve(
+        installRoot,
+        "node_modules",
+        "@jerrywu1234",
+        "smartflow",
+        "dist",
+        "smartflow.mjs"
+      );
       const hostSkillEntry = resolve(
         installRoot,
         "node_modules",
+        "@jerrywu1234",
         "smartflow",
         "dist",
         "host-skill.mjs"
