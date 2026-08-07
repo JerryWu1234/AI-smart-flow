@@ -11,12 +11,10 @@ export interface RepairRound {
 export interface RepairTaskContext {
   parentManifest: TaskManifest;
   firstTaskNumber?: number;
-  noProgressThreshold?: number;
 }
 
 export interface RepairAssessment {
   noProgressCount: number;
-  pauseRequired: boolean;
   repairTasks: string[];
   authorizedCriterionIds: string[];
 }
@@ -116,7 +114,6 @@ export function assessRepairProgress(
   )].sort();
   return {
     noProgressCount,
-    pauseRequired: noProgressCount >= (context.noProgressThreshold ?? 15),
     repairTasks,
     authorizedCriterionIds
   };
