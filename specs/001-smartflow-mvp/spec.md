@@ -213,7 +213,7 @@ Reviewer 来源必须指向当前 Review finding。Leader 来源必须绑定当�
 - **FR-030**：发布冲突 MUST 对全部 Candidate 路径原子零写入，并返回冲突路径、`0/N`、`activeWorkspaceChanged=false` 和 Patch/DeliveryBundle。
 - **FR-031**：PARTIAL 或 UNKNOWN MUST 进入 `PUBLISH_RECOVERY_BLOCKED`；不得转换为 completed 或自动重试。
 - **FR-032**：SmartFlow MAY 在自身 Data Dir 中执行 Git object/index/tree 操作，但 MUST NOT 自动 commit、push、merge、reset、clean、checkout、回滚或删除用户改动。
-- **FR-033**：Git LFS 或自定义 `clean`、`smudge`、`process` filter 被检测到时 MUST 在执行 filter 前暂停，不回退到旧扫描逻辑。
+- **FR-033**：Git capability probe MUST NOT 检测或阻断 Git LFS、`.gitattributes` 或自定义 `clean`、`smudge`、`process` filter；workspace 内容 MUST 按普通文件流程读写。
 - **FR-034**：终态对账后 MUST 清理临时 workspace、Pi runtime/session 临时内容、index 和 object store，同时保留可验证的审计 Artifact、Patch/DeliveryBundle 和结果事实。
 - **FR-035**：运行中的 workspace、SmartFlow 状态和 Pi session 真实绝对路径 MUST NOT 通过 MCP、API、UI 或日志暴露；对外只允许逻辑 ID、项目相对路径与受控 Artifact 引用，Finalize 后的 Artifact 仍不得泄露内部绝对路径。
 - **FR-036**：每个 Pi Attempt MUST 使用 MCP server 环境配置中冻结的运行时限；超时 MUST 终止 Pi 及全部子进程、持久化 `TIMED_OUT` 并进入可恢复 `PAUSED`，且在进程停止得到证明前不得生成 Candidate 或启动替代 Attempt。

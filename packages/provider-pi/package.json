@@ -1,7 +1,7 @@
 {
   "name": "@smartflow/provider-pi",
   "version": "0.1.0",
-  "private": false,
+  "private": true,
   "type": "module",
   "engines": {
     "node": ">=22.19.0"

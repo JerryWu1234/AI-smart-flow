@@ -8,9 +8,9 @@ Provide Git-backed snapshots, Pi-visible isolated materialization, Candidate evi
 
 These rules must be frozen before Git Adapter implementation begins:
 
-1. **Unsupported Git execution features pause the Run**
-   - Git LFS and custom `clean`, `smudge` or `process` filters are unsupported in the first version.
-   - The capability probe must enter `PAUSED` before snapshot or materialization and must not execute a filter process or filter-triggered network access.
+1. **Content filters do not block the Run**
+   - The capability probe does not inspect or block Git LFS, `.gitattributes`, or custom `clean`, `smudge` or `process` filters.
+   - Snapshot and materialization use the current worktree bytes through the normal file flow.
 2. **Candidate identity covers all Git evidence**
    - The Candidate hash must bind the baseline snapshot hash, result snapshot hash, canonical operations and the SHA-256 of the Git evidence Artifact.
    - Git tree/blob object IDs are evidence references and must not replace SmartFlow's SHA-256 integrity bindings.
@@ -69,4 +69,4 @@ The exact TypeScript names can change during implementation, but each operation 
 
 ## Capability result
 
-The probe must report repository identity, Git version, worktree support, symlink/mode behavior, LFS/submodule/filter signals, and the effective inclusion policy. Git LFS, custom `clean`/`smudge`/`process` filters and other unsupported capabilities pause the Run before any filter process or filter-triggered network access instead of changing semantics silently.
+The probe must report repository identity, Git version, worktree support, symlink/mode behavior, submodule/nested-repository signals, and the effective inclusion policy. It does not inspect or block Git LFS, `.gitattributes`, or custom `clean`/`smudge`/`process` filters.

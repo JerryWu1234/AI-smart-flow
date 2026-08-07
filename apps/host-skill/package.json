@@ -2,7 +2,7 @@
   "name": "@smartflow/host-skill",
   "version": "0.1.0",
   "description": "Host-owned planning and review actions for sandboxed SmartFlow Pi runs",
-  "private": false,
+  "private": true,
   "type": "module",
   "engines": {
     "node": ">=22.19.0"

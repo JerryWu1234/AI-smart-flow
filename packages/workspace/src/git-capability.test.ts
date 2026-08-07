@@ -25,7 +25,7 @@ async function repository(): Promise<string> {
 }
 
 describe("Git repository capability probe", () => {
-  it("reports a normal repository without changing its configured filters", async () => {
+  it("reports a normal repository as ready", async () => {
     const root = await repository();
     await expect(probeGitRepository(root)).resolves.toMatchObject({
       status: "READY",
@@ -35,20 +35,24 @@ describe("Git repository capability probe", () => {
     });
   });
 
-  it("pauses before unsupported filters, LFS, submodules, or nested repositories are used", async () => {
-    const filterRoot = await repository();
-    await execute("git", ["-C", filterRoot, "config", "filter.demo.clean", "must-not-run"]);
-    await expect(probeGitRepository(filterRoot)).resolves.toMatchObject({
-      status: "PAUSED",
-      pause: { code: "GIT_FILTER_UNSUPPORTED" }
-    });
+  it("does not block repositories that configure LFS or custom filters", async () => {
+    const root = await repository();
+    await execute("git", ["-C", root, "config", "filter.demo.clean", "must-not-run"]);
+    await execute("git", ["-C", root, "config", "filter.lfs.process", "must-not-run"]);
+    await writeFile(
+      resolve(root, ".gitattributes"),
+      "*.bin filter=lfs diff=lfs\n*.generated filter=demo\n",
+      "utf8"
+    );
 
-    const lfsRoot = await repository();
-    await writeFile(resolve(lfsRoot, ".gitattributes"), "*.bin filter=lfs diff=lfs\n", "utf8");
-    await expect(probeGitRepository(lfsRoot)).resolves.toMatchObject({
-      status: "PAUSED",
-      pause: { code: "GIT_LFS_UNSUPPORTED" }
+    await expect(probeGitRepository(root)).resolves.toMatchObject({
+      status: "READY",
+      repositoryRoot: await realpath(root),
+      worktreeSupported: true
     });
+  });
+
+  it("pauses before submodules or nested repositories are used", async () => {
 
     const submoduleRoot = await repository();
     await writeFile(resolve(submoduleRoot, ".gitmodules"), "[submodule \"child\"]\n", "utf8");
