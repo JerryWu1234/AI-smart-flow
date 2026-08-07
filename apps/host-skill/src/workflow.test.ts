@@ -30,13 +30,13 @@ class WorkflowGateway implements HostGateway {
       this.stateVersion += 1;
       return Promise.resolve({
         claimId: `claim-${String(this.reviewNumber + 1)}`,
-        action: this.action(),
+        action: { ...this.action(), worktreePath: "/tmp/worktree" },
         stateVersion: this.stateVersion,
         expiresAt: "2026-07-20T00:05:00Z"
       });
     }
     if (toolName === "smartflow_submit_review") {
-      const result = request.result as Record<string, unknown>;
+      const result = this.normalizedReview(request.result);
       this.reviewerSessionId = String(request.reviewerSessionId);
       this.phase = "LEADER_DECISION";
       this.stateVersion += 1;
@@ -116,24 +116,39 @@ class WorkflowGateway implements HostGateway {
     };
   }
 
+  private normalizedReview(value: unknown): Record<string, unknown> {
+    const review = value as Record<string, unknown>;
+    if (!Array.isArray(review.tasks)) return review;
+    const incomplete = (review.tasks as Array<Record<string, unknown>>).filter(
+      (task) => Number(task.completionPercentage) < 100
+    );
+    return {
+      verdict: incomplete.length === 0 ? "APPROVE" : "REQUEST_CHANGES",
+      completionPercentage: review.completionPercentage,
+      convergeFindings: incomplete.map((task) => ({
+        fingerprint: digest,
+        code: "TASK_INCOMPLETE",
+        criterionId: task.id,
+        path: null,
+        severity: "P1",
+        blocking: true,
+        summary: `Reason: ${String(task.reason)}; Suggestion: ${String(task.suggestion)}`,
+        evidence: [`Task ${String(task.id)} is ${String(task.completionPercentage)}% complete`]
+      })),
+      adversarialFindings: [],
+      pathCoverage: { "src/a.ts": "FULL" },
+      residualRisks: []
+    };
+  }
+
   private action(): object {
     return {
       type: "REVIEW",
       actionId: `review-action-${String(this.reviewNumber + 1)}`,
       revision: this.revision,
-      reviewBundle: {
-        relativePath: `runs/job-1/revision-${String(this.revision)}/review.json`,
-        sha256: digest,
-        size: 100
-      },
-      reviewBundleHash: digest,
+      taskSourceHash: digest,
+      candidateHash: digest,
       reviewAttemptId: `review-attempt-${String(this.reviewNumber + 1)}`,
-      taskSource: {
-        relativePath: `runs/job-1/revision-${String(this.revision)}/task-source.md`,
-        sha256: digest,
-        size: 100
-      },
-      approvedSourceHash: digest,
       changedPaths: ["src/a.ts"],
       reviewerSession: this.reviewerSessionId === undefined
         ? { mode: "CREATE" }

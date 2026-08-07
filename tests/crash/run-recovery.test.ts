@@ -133,14 +133,14 @@ describe("Pi crash recovery", () => {
     harnesses.push(harness);
     const store = await createLifecycleStore(harness, "REVIEW_PENDING");
     const run = (await store.readState()).runs["job-1"];
-    if (run?.reviewBundle === undefined) throw new Error("review bundle missing");
-    await writeFile(resolve(store.dataDirectory, run.reviewBundle.relativePath), "tampered", "utf8");
+    if (run?.candidate === undefined) throw new Error("candidate missing");
+    await writeFile(resolve(store.dataDirectory, run.candidate.relativePath), "tampered", "utf8");
 
     const recovered = await new RecoveryManager(store, new Runtime()).recover("job-1");
     expect(recovered).toMatchObject({
       phase: "PAUSED",
       action: "BLOCKED",
-      reason: "ARTIFACT_INTEGRITY_FAILED:reviewBundle"
+      reason: "ARTIFACT_INTEGRITY_FAILED:gitWorkspace.revisions.1.candidate"
     });
   });
 });

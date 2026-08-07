@@ -162,7 +162,8 @@ describe("smartflow.v5 MCP handlers", () => {
       expectedStateVersion: 3,
       claimId: "claim-1",
       reviewAttemptId: "review-attempt-1",
-      reviewBundleHash: "a".repeat(64),
+      taskSourceHash: "a".repeat(64),
+      candidateHash: "b".repeat(64),
       reviewerSessionId: "reviewer-1",
       result
     })).resolves.toMatchObject({

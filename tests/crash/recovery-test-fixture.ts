@@ -14,7 +14,6 @@ import {
 } from "@smartflow/publish";
 import type { RunPhase } from "@smartflow/protocol";
 import {
-  createReviewBundle,
   createReviewHostAction,
   evaluateReviewGate
 } from "@smartflow/review";
@@ -184,51 +183,16 @@ export async function createLifecycleStore(
     Buffer.from(JSON.stringify(candidate), "utf8")
   );
 
-  const reviewBundle = createReviewBundle({
+  const reviewAction = createReviewHostAction({
     revision: 1,
-    taskManifest: compiled.manifest,
-    taskManifestHash: taskManifest.sha256,
-    baselineHash: baseline.snapshotHash,
-    candidate,
+    taskSourceHash: taskSource.sha256.replace(/^sha256:/u, ""),
     candidateHash: candidate.hash,
-    changedPathHashes: {
-      "sum.js": { operation: "ADD", oldHash: null, newHash: sourceHash }
-    },
-    pathEvidence: [{
-      path: "sum.js",
-      operation: "ADD",
-      oldHash: null,
-      newHash: sourceHash,
-      diff: null,
-      blob: Buffer.from(sourceBytes).toString("base64")
-    }],
-    workerSummary: "recovery fixture worker",
-    knownRisks: [],
-    gitEvidence: {
-      resultSnapshot: resultSnapshotRef,
-      incrementalPatch: incrementalPatchRef,
-      cumulativePatch: cumulativePatchRef,
-      evidence: evidenceRef
-    }
-  });
-  const reviewBundleRef = await store.writeArtifact(
-    `runs/job-1/revision-1/review-bundles/${reviewBundle.bundleHash}.json`,
-    Buffer.from(JSON.stringify(reviewBundle), "utf8")
-  );
-  const reviewAction = createReviewHostAction(
-    reviewBundle,
-    reviewBundleRef,
-    new Date(Date.now() + 60_000).toISOString(),
-    {
-      taskSource,
-      approvedSourceHash: compiled.manifest.sourceHash,
-      piSessionId: "pi-session-old"
-    }
-  );
+    changedPaths: ["sum.js"],
+    piSessionId: "pi-session-old"
+  }, new Date(Date.now() + 60_000).toISOString());
   const reviewGate = evaluateReviewGate(
     {
       reviewAttemptId: "review-attempt-1",
-      reviewBundleHash: reviewBundle.bundleHash,
       reviewerSessionId: "reviewer-session-1",
       piSessionId: "pi-session-old",
       changedPaths: ["sum.js"]
@@ -247,7 +211,8 @@ export async function createLifecycleStore(
     revision: 1,
     claimId: "claim-old",
     reviewAttemptId: "review-attempt-1",
-    reviewBundleHash: reviewBundle.bundleHash,
+    taskSourceHash: taskSource.sha256.replace(/^sha256:/u, ""),
+    candidateHash: candidate.hash,
     reviewerSessionId: "reviewer-session-1",
     piSessionId: "pi-session-old",
     gate: reviewGate
@@ -339,9 +304,6 @@ export async function createLifecycleStore(
     "FIXING", "REVIEW_PENDING", "REVIEWING", "LEADER_DECISION",
     "READY_TO_PUBLISH", "PUBLISHING"
   ]).has(phase);
-  const hasReview = new Set<RunPhase>([
-    "REVIEW_PENDING", "REVIEWING", "LEADER_DECISION", "READY_TO_PUBLISH", "PUBLISHING"
-  ]).has(phase);
   const hasDecision = new Set<RunPhase>(["LEADER_DECISION", "READY_TO_PUBLISH", "PUBLISHING"])
     .has(phase);
   const hasLeader = phase === "READY_TO_PUBLISH" || phase === "PUBLISHING";
@@ -403,11 +365,6 @@ export async function createLifecycleStore(
         }
       : {}),
     ...(hasCandidate ? { candidate: candidateRef } : {}),
-    ...(hasReview
-      ? {
-          reviewBundle: reviewBundleRef
-        }
-      : {}),
     ...(basePendingAction === undefined ? {} : { pendingAction: basePendingAction }),
     ...(hasDecision
       ? {
@@ -415,7 +372,8 @@ export async function createLifecycleStore(
           reviewHistory: [{
             reviewAttemptId: "review-attempt-1",
             reviewerSessionId: "reviewer-session-1",
-            reviewBundleHash: reviewBundle.bundleHash,
+            taskSourceHash: taskSource.sha256.replace(/^sha256:/u, ""),
+            candidateHash: candidate.hash,
             reviewHash: reviewDecision.reviewHash
           }]
         }

@@ -7,7 +7,7 @@ This walkthrough validates the Pi migration, removal of Broker/OpenCode and rete
 1. Start the MCP server with exactly one configured model: `SMARTFLOW_PI_API`, `SMARTFLOW_PI_BASE_URL`, `SMARTFLOW_PI_MODEL` and `SMARTFLOW_PI_API_KEY`.
 2. Omit optional model values and confirm the frozen configuration uses context `1000000`, max output `384000`, thinking `high` and Attempt deadline `1800000ms`; repeat with legal overrides.
 3. Start a Run from `tasks-a.md`; record canonical path, Task Artifact, `tasksSha256` and `providerRuntimeConfigHash` while confirming the API Key is absent from all recorded values.
-4. Edit `tasks-a.md` after execute returns; confirm Pi and Reviewer still receive frozen bytes.
+4. Confirm the canonical task file is mirrored to the Run worktree before Worker execution and the Reviewer reads that same worktree copy.
 5. Change effective Pi runtime config; confirm the active Revision pauses/fails instead of changing model or API.
 6. Start through a path alias; expect `TASK_ALREADY_ACTIVE` and no new Pi Attempt/workspace.
 7. Repeat configuration parsing with each supported API: `openai-completions`, `openai-responses`, `anthropic-messages`, `google-generative-ai`.

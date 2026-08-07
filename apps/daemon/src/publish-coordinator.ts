@@ -19,7 +19,6 @@ import {
   type PublishServiceResult,
   type WorkspaceApplyAdapter
 } from "@smartflow/publish";
-import { verifyReviewBundle, type ReviewBundle } from "@smartflow/review";
 import { StateStore, type ProjectState, type RunRecord } from "@smartflow/state-store";
 import { taskManifestSchema } from "@smartflow/task-manifest";
 import {
@@ -369,7 +368,6 @@ export class PublishCoordinator {
       state.activeRunsByTaskPath[run.canonicalTaskPath] !== jobId ||
       run.baseline === undefined ||
       run.candidate === undefined ||
-      run.reviewBundle === undefined ||
       run.review === undefined ||
       run.leaderDecision === undefined ||
       run.workspace === undefined
@@ -391,9 +389,6 @@ export class PublishCoordinator {
     const candidate = JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(run.candidate))
     ) as Candidate;
-    const reviewBundle = JSON.parse(
-      new TextDecoder().decode(await this.store.readArtifact(run.reviewBundle))
-    ) as ReviewBundle;
     const reviewDecision = JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(run.review))
     ) as Record<string, unknown>;
@@ -401,18 +396,20 @@ export class PublishCoordinator {
       new TextDecoder().decode(await this.store.readArtifact(run.leaderDecision))
     ) as Record<string, unknown>;
     const reviewHash = reviewDecision.reviewHash;
+    const reviewHistoryEntry = [...(run.reviewHistory ?? [])].reverse().find(
+      (entry) => entry.reviewAttemptId === reviewDecision.reviewAttemptId
+    );
     const allowedLeaderDecisions = (
       reviewDecision.gate as { allowedLeaderDecisions?: unknown } | undefined
     )?.allowedLeaderDecisions;
     if (
       manifest.revision !== run.revision ||
-      run.taskManifest.sha256 !== reviewBundle.taskManifestHash ||
       !verifyCandidate(candidate) ||
       candidate.baselineHash !== baselineHash ||
-      !verifyReviewBundle(reviewBundle) ||
-      reviewBundle.candidateHash !== candidate.hash ||
       !semanticHash(reviewDecision, "reviewHash") ||
-      reviewDecision.reviewBundleHash !== reviewBundle.bundleHash ||
+      reviewHistoryEntry?.taskSourceHash !== reviewDecision.taskSourceHash ||
+      reviewHistoryEntry?.candidateHash !== candidate.hash ||
+      reviewDecision.candidateHash !== candidate.hash ||
       !Array.isArray(allowedLeaderDecisions) ||
       !allowedLeaderDecisions.includes("accept") ||
       typeof reviewHash !== "string" ||
@@ -635,7 +632,6 @@ export class PublishCoordinator {
       hash(await readFile(approvedPath)) !== approvedHash.replace(/^sha256:/u, "") ||
       active.taskManifest.sha256 !== expected.taskManifest.sha256 ||
       active.candidate?.sha256 !== expected.candidate?.sha256 ||
-      active.reviewBundle?.sha256 !== expected.reviewBundle?.sha256 ||
       active.review?.sha256 !== expected.review?.sha256 ||
       active.leaderDecision?.sha256 !== expected.leaderDecision?.sha256 ||
       active.deliveryBundle?.sha256 !== deliveryBundle.sha256 ||

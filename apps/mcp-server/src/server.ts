@@ -29,7 +29,7 @@ export function createSmartFlowMcpServer(gateway: DaemonGateway): McpServer {
         "After smartflow_execute, keep using smartflow_wait/status and handle every Review, repair Revision, and publish transition until the run completes or reaches a pause that requires the user.",
         "For a REVIEW action, claim it and use this caller's native session capability: CREATE one independent Reviewer session once, or RESUME exactly the supplied session.",
         "While that Reviewer is running, renew the claim until the result is ready.",
-        "The Reviewer must reread the supplied immutable Task and full cumulative changed-path list on every round, may read unchanged project files for context, and must not run tests, lint, or builds.",
+        "The Reviewer must open the claimed Run worktree, reread its synchronized Task on every round, may read any worktree files needed for context, and must not run tests, lint, or builds.",
         "The Reviewer returns task completion percentages plus a concise reason and implementation suggestion for each incomplete task; the overall percentage is the rounded arithmetic mean of all task percentages.",
         "Retry Reviewer creation or transient failures up to three times; after creation, retry invalid output with that same session up to three times.",
         "If any task is below 100%, submit all incomplete-task findings for repair and automatically approve a safe REPAIR_TASKS_READY Revision without user confirmation.",
@@ -79,7 +79,7 @@ export function createSmartFlowMcpServer(gateway: DaemonGateway): McpServer {
     "smartflow_claim_action",
     {
       description:
-        "Claim the current action. For REVIEW, CREATE means durably map reviewAttemptId to one independent native Reviewer session before reviewing; a retry of that attempt must reuse the mapping. RESUME means restore exactly the supplied session. In both modes reread the immutable Task and ReviewBundle artifacts, score every task from 0 to 100, then round their arithmetic mean for completionPercentage.",
+        "Claim the current action and receive its Run worktree path. For REVIEW, CREATE means durably map reviewAttemptId to one independent native Reviewer session before reviewing; a retry of that attempt must reuse the mapping. RESUME means restore exactly the supplied session. In both modes open that worktree, reread the synchronized Task and current files, score every task from 0 to 100, then round their arithmetic mean for completionPercentage.",
       inputSchema: claimActionInputSchema
     },
     async (input) => toolResult(await handlers.smartflow_claim_action(input))
@@ -101,7 +101,7 @@ export function createSmartFlowMcpServer(gateway: DaemonGateway): McpServer {
     "smartflow_submit_review",
     {
       description:
-        "Submit the structured result produced by the invoking Host's Reviewer session. completionPercentage must be the 0-100 integer obtained by rounding the arithmetic mean of every task's completion percentage. The complete result is returned to the same Leader; this does not finish the run.",
+        "Submit the task completion result produced by the invoking Host's Reviewer session. Include every Task exactly once; completionPercentage is their rounded arithmetic mean. SmartFlow derives findings and path coverage internally. The complete normalized result is returned to the same Leader; this does not finish the run.",
       inputSchema: submitReviewInputSchema
     },
     async (input) => toolResult(await handlers.smartflow_submit_review(input))

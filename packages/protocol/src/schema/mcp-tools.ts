@@ -85,10 +85,13 @@ export const claimActionInputSchema = stateMutationSchema.extend({
   actionId: identifierSchema,
   hostTurnId: identifierSchema
 });
+export const claimedHostActionSchema = hostActionSchema.extend({
+  worktreePath: z.string().min(1)
+});
 export const claimActionOutputSchema = z
   .object({
     claimId: identifierSchema,
-    action: hostActionSchema,
+    action: claimedHostActionSchema,
     stateVersion: nonNegativeIntegerSchema,
     expiresAt: z.iso.datetime({ offset: true })
   })
@@ -128,12 +131,59 @@ export const reviewSubmissionSchema = z
   })
   .strict();
 
+const taskCompletionSchema = z
+  .object({
+    id: z.string().regex(/^T\d{3,}$/u),
+    completionPercentage: z.number().int().min(0).max(100),
+    reason: z.string().trim().min(1).optional(),
+    suggestion: z.string().trim().min(1).optional()
+  })
+  .strict()
+  .superRefine((task, context) => {
+    const hasGuidance = task.reason !== undefined && task.suggestion !== undefined;
+    if ((task.completionPercentage === 100) === hasGuidance) {
+      context.addIssue({
+        code: "custom",
+        message: "incomplete tasks require reason and suggestion; complete tasks require neither"
+      });
+    }
+  });
+
+export const taskCompletionReviewSchema = z
+  .object({
+    completionPercentage: z.number().int().min(0).max(100),
+    tasks: z.array(taskCompletionSchema).min(1)
+  })
+  .strict()
+  .superRefine((review, context) => {
+    if (new Set(review.tasks.map((task) => task.id)).size !== review.tasks.length) {
+      context.addIssue({ code: "custom", path: ["tasks"], message: "task ids must be unique" });
+    }
+    const average = Math.round(
+      review.tasks.reduce((total, task) => total + task.completionPercentage, 0) /
+        review.tasks.length
+    );
+    if (review.completionPercentage !== average) {
+      context.addIssue({
+        code: "custom",
+        path: ["completionPercentage"],
+        message: "completionPercentage must be the rounded task average"
+      });
+    }
+  });
+
+export const reviewSubmissionInputSchema = z.union([
+  reviewSubmissionSchema,
+  taskCompletionReviewSchema
+]);
+
 export const reviewResultSubmitInputSchema = stateMutationSchema.extend({
   claimId: identifierSchema,
   reviewAttemptId: identifierSchema,
-  reviewBundleHash: sha256Schema,
+  taskSourceHash: sha256Schema,
+  candidateHash: sha256Schema,
   reviewerSessionId: identifierSchema,
-  result: reviewSubmissionSchema
+  result: reviewSubmissionInputSchema
 });
 export const reviewResultSubmitOutputSchema = mutationResultSchema.extend({
   reviewHash: sha256Schema,
@@ -346,6 +396,7 @@ export type ReviewResultSubmitOutput = z.infer<typeof reviewResultSubmitOutputSc
 export type ReportHostUnavailableInput = z.infer<typeof reportHostUnavailableInputSchema>;
 export type ReportHostUnavailableOutput = z.infer<typeof reportHostUnavailableOutputSchema>;
 export type ReviewSubmission = z.infer<typeof reviewSubmissionSchema>;
+export type TaskCompletionReview = z.infer<typeof taskCompletionReviewSchema>;
 export type SubmitLeaderDecisionInput = z.infer<typeof submitLeaderDecisionInputSchema>;
 export type SubmitLeaderDecisionOutput = z.infer<typeof submitLeaderDecisionOutputSchema>;
 export type ResumeInput = z.infer<typeof resumeInputSchema>;

@@ -28,19 +28,9 @@ describe("HostActionLoop Review lease", () => {
       type: "REVIEW" as const,
       actionId: "review-action-1",
       revision: 1,
-      reviewBundle: {
-        relativePath: "runs/job-1/revision-1/review-bundle.json",
-        sha256: digest,
-        size: 100
-      },
-      reviewBundleHash: digest,
+      taskSourceHash: digest,
+      candidateHash: digest,
       reviewAttemptId: "review-attempt-1",
-      taskSource: {
-        relativePath: "runs/job-1/revision-1/task-source.md",
-        sha256: digest,
-        size: 100
-      },
-      approvedSourceHash: digest,
       changedPaths: ["src/a.ts"],
       reviewerSession: { mode: "CREATE" as const },
       piSessionId: "pi-session-1",
@@ -65,7 +55,7 @@ describe("HostActionLoop Review lease", () => {
           stateVersion += 1;
           return Promise.resolve({
             claimId: "claim-1",
-            action,
+            action: { ...action, worktreePath: "/tmp/worktree" },
             stateVersion,
             expiresAt: "2026-07-20T00:05:00Z"
           });
@@ -142,19 +132,9 @@ describe("HostActionLoop Review lease", () => {
       type: "REVIEW" as const,
       actionId: "review-action-retry",
       revision: 1,
-      reviewBundle: {
-        relativePath: "runs/job-1/revision-1/review-bundle.json",
-        sha256: digest,
-        size: 100
-      },
-      reviewBundleHash: digest,
+      taskSourceHash: digest,
+      candidateHash: digest,
       reviewAttemptId: "review-attempt-retry",
-      taskSource: {
-        relativePath: "runs/job-1/revision-1/task-source.md",
-        sha256: digest,
-        size: 100
-      },
-      approvedSourceHash: digest,
       changedPaths: ["src/a.ts"],
       reviewerSession: { mode: "CREATE" as const },
       piSessionId: "pi-session-1",
@@ -178,7 +158,7 @@ describe("HostActionLoop Review lease", () => {
           stateVersion += 1;
           return Promise.resolve({
             claimId: "claim-retry",
-            action,
+            action: { ...action, worktreePath: "/tmp/worktree" },
             stateVersion,
             expiresAt: "2026-07-20T00:05:00Z"
           });
@@ -228,24 +208,14 @@ describe("HostActionLoop Review lease", () => {
 describe("compact Reviewer completion result", () => {
   const context = {
     reviewAttemptId: "review-attempt-1",
-    taskSource: {
-      relativePath: "runs/job-1/revision-1/task-source.md",
-      sha256: digest,
-      size: 100
-    },
-    approvedSourceHash: digest,
-    reviewBundle: {
-      relativePath: "runs/job-1/revision-1/review-bundle.json",
-      sha256: digest,
-      size: 100
-    },
-    changedPaths: ["src/a.ts"],
+    worktreePath: "/tmp/worktree",
+    taskSourceHash: digest,
+    candidateHash: digest,
     reviewerSession: { mode: "CREATE" as const },
-    piSessionId: "pi-session-1",
-    reviewBundleHash: digest
+    piSessionId: "pi-session-1"
   };
 
-  it("derives the average and actionable repair finding", () => {
+  it("passes the compact task result through without path coverage", () => {
     const output = validateHostReviewOutput(context, {
       reviewerSessionId: "reviewer-1",
       completionPercentage: 75,
@@ -260,17 +230,17 @@ describe("compact Reviewer completion result", () => {
       ]
     });
 
-    expect(output.result).toMatchObject({
-      verdict: "REQUEST_CHANGES",
+    expect(output.result).toEqual({
       completionPercentage: 75,
-      pathCoverage: { "src/a.ts": "FULL" }
-    });
-    expect(output.result.convergeFindings).toHaveLength(1);
-    expect(output.result.convergeFindings[0]).toMatchObject({
-      code: "TASK_INCOMPLETE",
-      criterionId: "T001",
-      summary: "Reason: Required behavior is incomplete; Suggestion: Implement the missing behavior",
-      blocking: true
+      tasks: [
+        {
+          id: "T001",
+          completionPercentage: 50,
+          reason: "Required behavior is incomplete",
+          suggestion: "Implement the missing behavior"
+        },
+        { id: "T002", completionPercentage: 100 }
+      ]
     });
   });
 
@@ -290,7 +260,7 @@ describe("compact Reviewer completion result", () => {
     })).toThrow(/HOST_REVIEW_INVALID_OUTPUT/u);
   });
 
-  it("keeps the Review incomplete when a rounded average is 100 but one task is not", () => {
+  it("preserves a rounded average of 100 when one task is not complete", () => {
     const output = validateHostReviewOutput(context, {
       reviewerSessionId: "reviewer-1",
       completionPercentage: 100,
@@ -305,10 +275,7 @@ describe("compact Reviewer completion result", () => {
       ]
     });
 
-    expect(output.result).toMatchObject({
-      verdict: "REQUEST_CHANGES",
-      completionPercentage: 100
-    });
-    expect(output.result.convergeFindings).toHaveLength(1);
+    expect(output.result).toMatchObject({ completionPercentage: 100 });
+    expect("tasks" in output.result && output.result.tasks[0]?.completionPercentage).toBe(99);
   });
 });

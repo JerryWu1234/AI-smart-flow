@@ -60,7 +60,8 @@ class LifecycleGateway implements HostGateway {
       }
       if (
         typeof request.reviewAttemptId !== "string" ||
-        typeof request.reviewBundleHash !== "string" ||
+        typeof request.taskSourceHash !== "string" ||
+        typeof request.candidateHash !== "string" ||
         typeof request.reviewerSessionId !== "string" ||
         typeof request.result !== "object" ||
         request.result === null
@@ -136,7 +137,7 @@ class LifecycleGateway implements HostGateway {
     if (this.claimedActionId === action.actionId) {
       return {
         claimId: `claim:${action.actionId}`,
-        action,
+        action: { ...action, worktreePath: "/tmp/worktree" },
         stateVersion: this.stateVersion,
         expiresAt: "2026-07-20T12:00:00+08:00"
       };
@@ -145,7 +146,7 @@ class LifecycleGateway implements HostGateway {
     this.stateVersion += 1;
     return {
       claimId: `claim:${action.actionId}`,
-      action,
+      action: { ...action, worktreePath: "/tmp/worktree" },
       stateVersion: this.stateVersion,
       expiresAt: "2026-07-20T12:00:00+08:00"
     };
@@ -251,19 +252,9 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       type: "REVIEW",
       actionId: "action-review",
       revision: 1,
-      reviewBundle: {
-        relativePath: "runs/job-1/review/bundle.json",
-        sha256: "b".repeat(64),
-        size: 10
-      },
-      reviewBundleHash: "b".repeat(64),
+      taskSourceHash: approval.sourceHash,
+      candidateHash: "b".repeat(64),
       reviewAttemptId: "review-attempt-1",
-      taskSource: {
-        relativePath: "runs/job-1/revision-1/task-source.md",
-        sha256: approval.sourceHash,
-        size: Buffer.byteLength(finalDraft.source)
-      },
-      approvedSourceHash: approval.sourceHash,
       changedPaths: ["sum.js"],
       reviewerSession: { mode: "CREATE" },
       piSessionId: "pi-session-1",
@@ -301,19 +292,9 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       type: "REVIEW",
       actionId: "action-review-unavailable",
       revision: 1,
-      reviewBundle: {
-        relativePath: "runs/job-1/review/unavailable-bundle.json",
-        sha256: "c".repeat(64),
-        size: 10
-      },
-      reviewBundleHash: "c".repeat(64),
+      taskSourceHash: approval.sourceHash,
+      candidateHash: "c".repeat(64),
       reviewAttemptId: "review-attempt-2",
-      taskSource: {
-        relativePath: "runs/job-1/revision-1/task-source.md",
-        sha256: approval.sourceHash,
-        size: Buffer.byteLength(finalDraft.source)
-      },
-      approvedSourceHash: approval.sourceHash,
       changedPaths: ["sum.js"],
       reviewerSession: {
         mode: "RESUME",
@@ -760,7 +741,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     })).toMatchObject({ phase: "CANCELING" });
   });
 
-  it("blocks a direct claim inside the mutation lock when Review evidence is missing", async () => {
+  it("blocks a direct claim inside the mutation lock when Candidate evidence is missing", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const dataDirectory = resolve(harness.dataDir, "claim-integrity");
@@ -779,7 +760,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       throw new Error("claim integrity fixture is incomplete");
     }
     const corrupted = { ...run };
-    delete corrupted.reviewBundle;
+    delete corrupted.candidate;
     await store.writeState({
       ...state,
       stateVersion: state.stateVersion + 1,
@@ -790,10 +771,10 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     const runtime = new ProjectRuntime({ dataDirectory });
 
     await expect(runtime.handle({
-      id: "claim-with-missing-review-bundle",
+      id: "claim-with-missing-candidate",
       method: "smartflow_claim_action",
       payload: {
-        requestId: "claim-with-missing-review-bundle",
+        requestId: "claim-with-missing-candidate",
         projectId,
         jobId: "job-1",
         actionId,
@@ -803,7 +784,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       }
     })).rejects.toMatchObject({
       code: "ARTIFACT_INTEGRITY_BLOCKED",
-      message: "ARTIFACT_REF_MISSING:reviewBundle"
+      message: "ARTIFACT_REF_MISSING:candidate"
     });
     expect(await readFile(store.statePath)).toEqual(before);
   });
@@ -836,14 +817,30 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       ? action.reviewerSession.reviewerSessionId
       : "current-host-reviewer-session";
     const result = {
-      verdict: "APPROVE" as const,
       completionPercentage: 100,
-      convergeFindings: [],
-      adversarialFindings: [],
-      pathCoverage: Object.fromEntries(action.changedPaths.map((path) => [path, "FULL"] as const)),
-      residualRisks: []
+      tasks: [{ id: "T001", completionPercentage: 100 }]
     };
     const runtime = new ProjectRuntime({ dataDirectory });
+    await expect(runtime.handle({
+      id: "incomplete-task-coverage",
+      method: "smartflow_submit_review",
+      payload: {
+        requestId: "incomplete-task-coverage",
+        projectId,
+        jobId: "job-1",
+        expectedRevision: 1,
+        expectedStateVersion: state.stateVersion,
+        claimId: action.claimId,
+        reviewAttemptId: action.reviewAttemptId,
+        taskSourceHash: action.taskSourceHash,
+        candidateHash: action.candidateHash,
+        reviewerSessionId,
+        result: {
+          completionPercentage: 100,
+          tasks: [{ id: "T999", completionPercentage: 100 }]
+        }
+      }
+    })).rejects.toThrow(/REVIEW_TASK_COVERAGE_INCOMPLETE/u);
     const response = await runtime.handle({
       id: "current-host-review-submission",
       method: "smartflow_submit_review",
@@ -855,7 +852,8 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         expectedStateVersion: state.stateVersion,
         claimId: action.claimId,
         reviewAttemptId: action.reviewAttemptId,
-        reviewBundleHash: action.reviewBundleHash,
+        taskSourceHash: action.taskSourceHash,
+        candidateHash: action.candidateHash,
         reviewerSessionId,
         result
       }
@@ -864,7 +862,14 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       phase: "LEADER_DECISION",
       reviewAttemptId: action.reviewAttemptId,
       reviewerSessionId,
-      result
+      result: {
+        verdict: "APPROVE",
+        completionPercentage: 100,
+        convergeFindings: [],
+        adversarialFindings: [],
+        pathCoverage: Object.fromEntries(action.changedPaths.map((path) => [path, "FULL"])),
+        residualRisks: []
+      }
     });
     const reviewed = (await store.readState()).runs["job-1"];
     expect(reviewed).toMatchObject({
@@ -942,7 +947,8 @@ describe("Host planning, approval, and MCP lifecycle", () => {
           jobId: "job-1",
           claimId: action.claimId,
           reviewAttemptId: action.reviewAttemptId,
-          reviewBundleHash: action.reviewBundleHash,
+          taskSourceHash: action.taskSourceHash,
+          candidateHash: action.candidateHash,
           reviewerSessionId: action.reviewerSession.mode === "RESUME"
             ? action.reviewerSession.reviewerSessionId
             : "source-drift-reviewer-session",
@@ -1040,7 +1046,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     }
   });
 
-  it("blocks retry_publish before state mutation or publish scheduling when evidence is missing", async () => {
+  it("blocks retry_publish before state mutation or publish scheduling when Candidate evidence is missing", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const dataDirectory = resolve(harness.dataDir, "resume-integrity");
@@ -1063,7 +1069,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         resumeActions: ["retry_publish", "export_bundle", "cancel"]
       }
     };
-    delete corrupted.reviewBundle;
+    delete corrupted.candidate;
     await store.writeState({
       ...state,
       stateVersion: state.stateVersion + 1,
@@ -1081,10 +1087,10 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     });
 
     await expect(runtime.handle({
-      id: "retry-publish-with-missing-review-bundle",
+      id: "retry-publish-with-missing-candidate",
       method: "smartflow_resume",
       payload: {
-        requestId: "retry-publish-with-missing-review-bundle",
+        requestId: "retry-publish-with-missing-candidate",
         projectId,
         jobId: "job-1",
         resumeAction: "retry_publish",
@@ -1093,13 +1099,13 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       }
     })).rejects.toMatchObject({
       code: "ARTIFACT_INTEGRITY_BLOCKED",
-      message: "ARTIFACT_REF_MISSING:reviewBundle"
+      message: "ARTIFACT_REF_MISSING:candidate"
     });
     expect(await readFile(store.statePath)).toEqual(before);
     expect(publishCalls).toBe(0);
   });
 
-  it("blocks retry_host_review inside the mutation lock when Review evidence is missing", async () => {
+  it("blocks retry_host_review inside the mutation lock when Candidate evidence is missing", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const dataDirectory = resolve(harness.dataDir, "review-resume-integrity");
@@ -1122,7 +1128,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         resumeActions: ["retry_host_review", "cancel"]
       }
     };
-    delete corrupted.reviewBundle;
+    delete corrupted.candidate;
     await store.writeState({
       ...state,
       stateVersion: state.stateVersion + 1,
@@ -1133,10 +1139,10 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     const runtime = new ProjectRuntime({ dataDirectory });
 
     await expect(runtime.handle({
-      id: "retry-host-review-with-missing-review-bundle",
+      id: "retry-host-review-with-missing-candidate",
       method: "smartflow_resume",
       payload: {
-        requestId: "retry-host-review-with-missing-review-bundle",
+        requestId: "retry-host-review-with-missing-candidate",
         projectId,
         jobId: "job-1",
         resumeAction: "retry_host_review",
@@ -1145,7 +1151,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       }
     })).rejects.toMatchObject({
       code: "ARTIFACT_INTEGRITY_BLOCKED",
-      message: "ARTIFACT_REF_MISSING:reviewBundle"
+      message: "ARTIFACT_REF_MISSING:candidate"
     });
     expect(await readFile(store.statePath)).toEqual(before);
   });

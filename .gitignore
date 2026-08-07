@@ -146,4 +146,4 @@ vite.config.ts.timestamp-*
 .vite/
 
 # Local SmartFlow end-to-end fixture and runtime artifacts
-# .smartflow-e2e/
+.smartflow-e2e/

@@ -106,7 +106,7 @@ flowchart TD
 | ExecutionSandboxAdapter | 启动/终止受限进程树，提供 stdin/stdout/stderr 流和 containment identity | 不实现 Broker 权限策略 |
 | Pi Provider | 校验/冻结 MCP 模型配置、启动 Pi RPC child、发送 prompt、归一化事件、保存 session Artifact | 不选择备用 Worker/API/模型；不重写官方 coding tools |
 | Pi SDK child | 加载随包 Extension、内存注册一个模型、运行 Agent loop/官方工具 | 不读取 `models.json`、宿主用户 Pi 配置、原始项目或 SmartFlow 状态 |
-| Review Bridge | ReviewBundle/Action、Reviewer provenance 与结构化结果校验 | 不自动发布 |
+| Review Bridge | Worktree ReviewAction、Reviewer provenance 与结构化结果校验 | 不自动发布 |
 | Publish Service | 项目级串行、冲突预检、批量写回、DeliveryBundle | 不自动 merge/commit/push |
 
 ## Pi Worker Design
@@ -301,7 +301,7 @@ interface PiWorkerAttemptState {
 - Publish 只检查累计 Candidate paths，要求 expected-old-hash、稳定 operationId、结果查询和支持的 batch mode。
 - 冲突返回 `0/N` 与 DeliveryBundle；PARTIAL/UNKNOWN 进入 `PUBLISH_RECOVERY_BLOCKED`。
 
-Pi runtime directory 必须在 Result Snapshot 之前清理/排除，因此不会出现在 Candidate changed paths、ReviewBundle 或 Publish。
+Pi runtime directory 必须在 Result Snapshot 之前清理/排除，因此不会出现在 Candidate changed paths 或 Publish。
 
 ## Data Directory and Durability
 

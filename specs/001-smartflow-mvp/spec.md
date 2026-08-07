@@ -241,7 +241,7 @@ Reviewer 来源必须指向当前 Review finding。Leader 来源必须绑定当�
 | RevisionPatch | 相邻 Revision 的修复证据 | previous result + current result |
 | ReviewAction | Host 待处理审查动作 | Review attempt + Candidate |
 | ReviewerBinding | 闭环唯一 Reviewer session | Run + first reviewer session ID |
-| ReviewDecision | Reviewer 的结构化结果 | Action + ReviewBundle + Reviewer session |
+| ReviewDecision | Reviewer 的结构化结果 | Action + synchronized task Hash + Candidate Hash + Reviewer session |
 | RepairItem | Reviewer 或 Leader 的修复输入 | current finding 或 code/task/path/reason |
 | LeaderDecision | accept / repair / pause | current Review |
 | PublishResult | CAS 写回或 Bundle 事实 | Candidate + Review + LeaderDecision |

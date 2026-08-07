@@ -101,7 +101,6 @@ export const runRecordSchema = z
     workerAttempts: z.array(workerAttemptSchema),
     candidate: artifactRefSchema.optional(),
     pendingAction: canonicalRecordSchema.optional(),
-    reviewBundle: artifactRefSchema.optional(),
     review: artifactRefSchema.optional(),
     leaderDecision: artifactRefSchema.optional(),
     reviewHistory: z.array(canonicalRecordSchema).optional(),
@@ -275,7 +274,6 @@ export interface RunArtifactBinding {
     | "GIT_EVIDENCE"
     | "BASELINE"
     | "CANDIDATE"
-    | "REVIEW_BUNDLE"
     | "REVIEW"
     | "LEADER_DECISION"
     | "DELIVERY_BUNDLE"
@@ -352,18 +350,9 @@ export function runArtifactInventory(run: RunRecord): RunArtifactInventory {
   const repairPaused = run.phase === "PAUSED" && (run.pause?.code.startsWith("REPAIR_") ?? false);
   const candidate = add("candidate", run.candidate, run.revision, "CANDIDATE", requiresCandidate || publishPaused || reviewPaused || repairPaused);
   add("baseline", run.baseline, 1, "BASELINE", requiresBaseline || publishPaused || reviewPaused || repairPaused);
-  const reviewBundle = add("reviewBundle", run.reviewBundle, run.revision, "REVIEW_BUNDLE", new Set(["REVIEW_PENDING", "REVIEWING", "LEADER_DECISION", "READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase) || publishPaused || reviewPaused);
   add("review", run.review, run.revision, "REVIEW", new Set(["LEADER_DECISION", "READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase) || publishPaused);
   add("leaderDecision", run.leaderDecision, run.revision, "LEADER_DECISION", new Set(["READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase) || publishPaused);
   add("deliveryBundle", run.deliveryBundle, run.revision, "DELIVERY_BUNDLE", run.phase === "PUBLISHING" || run.phase === "COMPLETED" || publishPaused);
-
-  const pendingAction = record(run.pendingAction);
-  if (pendingAction?.type === "REVIEW" || run.phase === "REVIEW_PENDING" || run.phase === "REVIEWING") {
-    const nested = add("pendingAction.reviewBundle", pendingAction?.reviewBundle, run.revision, "REVIEW_BUNDLE", true);
-    if (nested !== undefined && (reviewBundle === undefined || !artifactRefsEqual(nested, reviewBundle))) {
-      issues.push("ARTIFACT_BINDING_CONFLICT:pendingAction.reviewBundle");
-    }
-  }
 
   const recovery = record(run.recovery);
   const repairDraft = record(recovery?.repairDraft);

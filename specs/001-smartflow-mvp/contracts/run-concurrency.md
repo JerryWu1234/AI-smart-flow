@@ -11,7 +11,7 @@ Relative, absolute and symlink aliases that identify the same file resolve to th
 
 ## Frozen task contents
 
-- Pi Worker, RepairCoordinator and Reviewer receive only immutable Task Artifacts referenced by the Run.
+- Pi Worker and Reviewer use the synchronized canonical task file in the isolated Run worktree; RepairCoordinator feedback remains separately bound to the Revision.
 - Editing, moving or deleting source Markdown after start does not change the active Run.
 - Starting a future Run freezes the then-current bytes and receives a new source Hash.
 

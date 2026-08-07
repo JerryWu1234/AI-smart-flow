@@ -179,9 +179,6 @@ importers:
       '@smartflow/task-manifest':
         specifier: workspace:*
         version: link:../task-manifest
-      '@smartflow/workspace':
-        specifier: workspace:*
-        version: link:../workspace
 
   packages/state-store:
     dependencies:

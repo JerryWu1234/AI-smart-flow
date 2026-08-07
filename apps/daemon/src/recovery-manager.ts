@@ -13,7 +13,6 @@ import {
   verifyLocalDeliveryBundle,
   type ApplyOperation
 } from "@smartflow/publish";
-import { verifyReviewBundle, type ReviewBundle } from "@smartflow/review";
 import {
   StateStore,
   canonicalHash,
@@ -165,28 +164,22 @@ export async function verifyRunArtifacts(
       if (!verifyCandidate(candidate)) return "ARTIFACT_SEMANTIC_MISMATCH:candidate";
     }
 
-    const reviewBundleBytes = bytesByName.get("reviewBundle");
-    let reviewBundle: ReviewBundle | undefined;
-    if (reviewBundleBytes !== undefined) {
-      reviewBundle = json(reviewBundleBytes) as ReviewBundle;
-      if (
-        !verifyReviewBundle(reviewBundle) ||
-        reviewBundle.revision !== run.revision ||
-        reviewBundle.taskManifestHash !== digest(run.taskManifest.sha256) ||
-        (candidate !== undefined && reviewBundle.candidateHash !== candidate.hash)
-      ) return "ARTIFACT_SEMANTIC_MISMATCH:reviewBundle";
-    }
-
     const reviewBytes = bytesByName.get("review");
     if (reviewBytes !== undefined) {
       const review = durableReviewDecisionSchema.parse(json(reviewBytes));
       const matchingAttempt = [...run.workerAttempts].reverse().find(
         (attempt) => attempt.revision === run.revision && attempt.piSessionId === review.piSessionId
       );
+      const matchingHistory = [...(run.reviewHistory ?? [])].reverse().find(
+        (entry) => entry.reviewAttemptId === review.reviewAttemptId
+      );
       if (
-        reviewBundle === undefined ||
         review.revision !== run.revision ||
-        review.reviewBundleHash !== reviewBundle.bundleHash ||
+        candidate === undefined ||
+        review.candidateHash !== candidate.hash ||
+        matchingHistory === undefined ||
+        matchingHistory.taskSourceHash !== review.taskSourceHash ||
+        matchingHistory.candidateHash !== review.candidateHash ||
         matchingAttempt === undefined ||
         review.reviewerSessionId === review.piSessionId
       ) return "ARTIFACT_SEMANTIC_MISMATCH:review";

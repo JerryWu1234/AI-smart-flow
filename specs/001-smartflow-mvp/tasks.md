@@ -93,7 +93,7 @@
 
 ### Tests
 
-- [ ] T164 [P] [US3] Update failing Review/repair coverage for Pi identities and no-progress stopping in `tests/e2e/review-repair.test.ts`, `tests/e2e/production-repair-loop.test.ts`, and `packages/review/src/review-bundle.test.ts` — Acceptance: tests distinguish Pi session from Reviewer session, require cumulative changed-path coverage, and prove that the same blocking finding with no effective related-path change across two repair rounds produces `REPAIR_NO_PROGRESS` without starting a third automatic repair.
+- [ ] T164 [P] [US3] Update failing Review/repair coverage for Pi identities and no-progress stopping in `tests/e2e/review-repair.test.ts`, `tests/e2e/production-repair-loop.test.ts`, and `tests/contract/review-decision.test.ts` — Acceptance: tests distinguish Pi session from Reviewer session, require cumulative changed-path coverage, and prove that the same blocking finding with no effective related-path change across two repair rounds produces `REPAIR_NO_PROGRESS` without starting a third automatic repair.
 
 ### Implementation
 

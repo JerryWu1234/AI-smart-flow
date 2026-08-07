@@ -35,7 +35,6 @@ function result(overrides: Partial<ReviewResultInput> = {}): ReviewResultInput {
 
 const context = {
   reviewAttemptId: "review-1",
-  reviewBundleHash: "a".repeat(64),
   reviewerSessionId: "reviewer-1",
   piSessionId: "pi-session-1",
   changedPaths: ["packages/a.ts"]

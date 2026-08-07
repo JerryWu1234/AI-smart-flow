@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted and implemented in the Host-owned workflow.
+Accepted. The direct Run-worktree review update is pending implementation.
 
 ## Decision
 
@@ -11,8 +11,8 @@ orchestration loop:
 
 1. Wait for the Worker to finish its current coding round.
 2. When a Review Action is available, create or resume the independent
-   Reviewer session and provide the immutable `task.md` plus the changed-file
-   list.
+   Reviewer session in the Run worktree and provide the changed-file list.
+   The Reviewer reads the worktree's synchronized `task.md` directly.
 3. Submit the structured Reviewer result.
 4. If any task is below 100%, automatically start the next repair round with
    the Reviewer feedback; do not wait for user confirmation.
@@ -38,12 +38,34 @@ the first review. No replacement Reviewer session is created for that Run.
 Each review receives the full changed-file list from the Run baseline through
 the current Candidate. The bound session's own history may aid understanding,
 but never reduces the review input.
-The Reviewer receives read-only access to query the immutable Candidate's
-current file contents and diffs as needed. The Leader supplies paths and this
-query access rather than embedding file contents or internal Git hashes in the
-prompt.
-The Reviewer may also read unchanged project files when needed for context,
-while keeping its completion judgment limited to the frozen `task.md`.
+The Worker writes into one Run-scoped isolated Git worktree. The independent
+Reviewer opens that same worktree read-only and inspects current files and
+diffs there. There is no separate review-content Artifact or content proxy.
+The original project's canonical `task.md` is the source of
+truth. Whenever that source file changes, SmartFlow mirrors its complete bytes
+to the same canonical path in the Run worktree. Worker and Reviewer both read
+that mirrored worktree file. The Leader still supplies the full cumulative
+changed-file list on every review round.
+The Reviewer may also read unchanged files from the Run worktree when needed
+for context, while keeping its completion judgment limited to the frozen
+`task.md`.
+
+The original project worktree remains untouched until every task is 100% and
+the Leader accepts the Review. Publish applies the accepted Run worktree
+Candidate to the original project with the existing conflict checks.
+
+Existing workflow phase sequencing remains responsible for ensuring the
+Worker has finished before Review starts. This design adds no worktree freeze,
+permission-mode transition, additional lock, or stale-worktree mechanism.
+Reviewer read-only behavior is a role constraint, not a new filesystem state.
+
+After the Leader successfully claims a Review Action, SmartFlow returns the
+absolute Run-worktree path to that trusted Leader. The Leader opens or resumes
+the bound Reviewer session with that path as its working directory. This path
+is limited to the claimed Review flow: it is not returned by ordinary status,
+written to logs or pause messages, or supplied to the Worker as review input.
+SmartFlow does not add an opaque worktree handle or an Artifact/content query
+proxy for Reviewer file access.
 
 If the bound Reviewer session is lost, cannot be resumed, or remains
 unavailable, pause the workflow and report the root cause. Do not create a
@@ -100,15 +122,21 @@ The Reviewer reports only task completion and repair guidance:
 `completionPercentage` is the rounded arithmetic mean of every task's
 completion percentage. A fully complete task omits `reason` and `suggestion`.
 
-## Task Immutability
+## Task Synchronization
 
-The original approved `task.md` stays unchanged across repair rounds. The
-Reviewer result is supplied separately as the repair instruction, so the
-acceptance standard remains stable and feedback cannot expand the task scope.
-Every repair Worker receives that complete immutable `task.md`, but its repair
-instruction contains only incomplete task IDs, completion percentages, reasons,
-and suggestions. The Leader retains the complete Reviewer result for viewing
-without forwarding completed-task details to the Worker.
+The original project's canonical `task.md` is the sole task source. SmartFlow
+detects any change to that file and synchronizes the complete current bytes to
+the matching canonical task path inside the Run worktree. Worker and Reviewer
+both read this same mirrored worktree file; the Review flow does not use a
+separate task-content payload or task Artifact path.
+
+The workflow assumes the canonical task source does not change while a Worker
+or Reviewer is active. Mid-round task changes, cancellation, stale-result
+handling, and automatic restart are outside this design.
+
+Reviewer repair guidance remains structured as task IDs, completion
+percentages, reasons, and suggestions. The Leader retains the complete Review
+result for viewing without forwarding completed-task details to the Worker.
 
 ## Consequences
 
@@ -116,6 +144,11 @@ without forwarding completed-task details to the Worker.
   Codex Leader must run the Host loop.
 - Reviewer findings are focused on the approved task and changed files, which
   constrains repairs to the original scope.
+- Worker and Reviewer inspect the same filesystem state; no ArtifactRef path
+  resolution is required to review file contents.
+- Claimed Review Actions expose the Run-worktree path directly to the trusted
+  Leader instead of introducing a second file-access protocol.
+- The Run worktree remains isolated from the original project until publish.
 - Files unrelated to `task.md` do not affect the Reviewer result. They may be
   user changes and must neither block publishing nor trigger deletion.
 - The existing verbose Review MCP payload must be adapted before this compact

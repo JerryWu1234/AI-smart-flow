@@ -138,29 +138,13 @@ try {
     { call: (name, args) => callMcp(client, name, args) },
     {
       review: async (context) => {
-        const projectDataRoot = resolve(daemonRoot, "projects", scope.projectId);
-        const tasksSource = await readFile(
-          resolve(projectDataRoot, context.taskSource.relativePath)
-        );
+        const tasksSource = await readFile(resolve(context.worktreePath, "tasks.md"));
         const observedHash = createHash("sha256").update(tasksSource).digest("hex");
-        if (observedHash !== context.approvedSourceHash) {
+        if (observedHash !== context.taskSourceHash) {
           throw new Error("HOST_REVIEW_TASKS_SOURCE_DRIFT");
         }
-        const reviewBundle = asRecord(
-          JSON.parse(await readFile(
-            resolve(projectDataRoot, context.reviewBundle.relativePath),
-            "utf8"
-          )),
-          "review bundle"
-        );
-        const evidence = Array.isArray(reviewBundle.changedPaths)
-          ? reviewBundle.changedPaths.map((item) => asRecord(item, "changed path evidence"))
-          : [];
         for (const path of context.changedPaths) {
-          const item = evidence.find((candidate) => candidate.path === path);
-          if (item === undefined || (item.blob === null && item.diff === null)) {
-            throw new Error(`HOST_REVIEW_EVIDENCE_MISSING:${path}`);
-          }
+          await readFile(resolve(context.worktreePath, path));
         }
         return {
           reviewerSessionId: context.reviewerSession.mode === "RESUME"

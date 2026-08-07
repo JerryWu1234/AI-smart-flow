@@ -229,14 +229,3 @@ export async function captureGitSnapshot(
     createdAt: new Date().toISOString()
   };
 }
-
-export async function readGitBlob(
-  runGitDirectory: string,
-  blobId: string,
-  gitBinary = "git"
-): Promise<Buffer> {
-  return (await runGitCommand(
-    gitBinary,
-    ["--git-dir", runGitDirectory, "cat-file", "blob", blobId]
-  )).stdout;
-}

@@ -1,10 +1,9 @@
 import {
   identifierSchema,
   reviewSubmissionSchema,
-  type ArtifactRef,
-  type ReviewSubmission
+  type ReviewSubmission,
+  type TaskCompletionReview
 } from "@smartflow/protocol";
-import { findingFingerprint } from "@smartflow/review";
 
 export type ReviewerSessionRequest =
   // CREATE is idempotent for one reviewAttemptId: a Host retry must reuse its durable mapping.
@@ -13,18 +12,16 @@ export type ReviewerSessionRequest =
 
 export interface HostReviewContext {
   reviewAttemptId: string;
-  taskSource: ArtifactRef;
-  approvedSourceHash: string;
-  reviewBundle: ArtifactRef;
-  changedPaths: string[];
+  worktreePath: string;
+  taskSourceHash: string;
+  candidateHash: string;
   reviewerSession: ReviewerSessionRequest;
   piSessionId: string;
-  reviewBundleHash: string;
 }
 
 export interface HostReviewOutput {
   reviewerSessionId: string;
-  result: ReviewSubmission;
+  result: ReviewSubmission | TaskCompletionReview;
 }
 
 export interface TaskCompletionReviewTask {
@@ -134,33 +131,11 @@ export function validateHostReviewOutput(
       result: reviewSubmissionSchema.parse(output.result)
     };
   }
-  const allTasksComplete = compact.tasks.every((task) => task.completionPercentage === 100);
-  const convergeFindings = compact.tasks.flatMap((task) => {
-    if (
-      task.completionPercentage === 100 ||
-      task.reason === undefined ||
-      task.suggestion === undefined
-    ) return [];
-    const finding = {
-      code: "TASK_INCOMPLETE",
-      criterionId: task.id,
-      path: null,
-      severity: "P1" as const,
-      blocking: true,
-      summary: `Reason: ${task.reason}; Suggestion: ${task.suggestion}`,
-      evidence: [`Task ${task.id} is ${String(task.completionPercentage)}% complete`]
-    };
-    return [{ ...finding, fingerprint: findingFingerprint(finding) }];
-  });
   return {
     reviewerSessionId,
-    result: reviewSubmissionSchema.parse({
-      verdict: allTasksComplete ? "APPROVE" : "REQUEST_CHANGES",
+    result: {
       completionPercentage: compact.completionPercentage,
-      convergeFindings,
-      adversarialFindings: [],
-      pathCoverage: Object.fromEntries(context.changedPaths.map((path) => [path, "FULL"])),
-      residualRisks: []
-    })
+      tasks: compact.tasks
+    }
   };
 }

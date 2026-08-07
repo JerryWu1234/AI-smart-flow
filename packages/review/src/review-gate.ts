@@ -19,7 +19,6 @@ export interface NormalizedReviewResult extends Omit<ReviewResultInput, "converg
 
 export interface ReviewGateContext {
   reviewAttemptId: string;
-  reviewBundleHash: string;
   reviewerSessionId: string;
   piSessionId: string;
   boundReviewerSessionId?: string;

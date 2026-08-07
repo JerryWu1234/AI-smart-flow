@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readdir, rm } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
@@ -10,7 +10,7 @@ import type {
   WorkerStartInput
 } from "@smartflow/provider-core";
 import { redactPiValue } from "@smartflow/provider-pi";
-import { createReviewBundle, createReviewHostAction } from "@smartflow/review";
+import { createReviewHostAction } from "@smartflow/review";
 import {
   StateStore,
   StateStoreError,
@@ -25,9 +25,7 @@ import {
   initializeGitObjectStore,
   materializeGitSnapshot,
   probeGitRepository,
-  readGitBlob,
   type Candidate,
-  type CandidateOperation,
   type GitWorkspaceSnapshot
 } from "@smartflow/workspace";
 
@@ -334,6 +332,7 @@ export class WorkerRunner {
         this.readSnapshot(run.baseline),
         this.readSnapshot(existingRevision.inputSnapshot)
       ]);
+      await this.syncCanonicalTask(initial.canonicalProjectRoot, run, workspaceRoot);
       const result = await this.mutations.mutate(
         {
           requestId: `worker-workspace-reuse:${request.jobId}:r${revisionKey}:s${String(initial.stateVersion)}`,
@@ -463,6 +462,7 @@ export class WorkerRunner {
       dataDirectory: runRoot,
       destination: workspaceRoot
     });
+    await this.syncCanonicalTask(initial.canonicalProjectRoot, run, workspaceRoot);
     const workspaceRelativePath = portableRelative(this.store.dataDirectory, workspaceRoot);
     const sandboxId = `workspace-${randomUUID()}`;
     const preparedCapabilityRef = requiredValue(
@@ -516,6 +516,23 @@ export class WorkerRunner {
     const preparedRun = result.state.runs[request.jobId];
     if (preparedRun === undefined) throw new Error("PI_RUN_DISAPPEARED");
     return { baseline, inputSnapshot, runGitDirectory, workspaceRoot, run: preparedRun };
+  }
+
+  private async syncCanonicalTask(
+    projectRoot: string,
+    run: RunRecord,
+    workspaceRoot: string
+  ): Promise<void> {
+    const manifest = taskManifestSchema.parse(JSON.parse(
+      new TextDecoder().decode(await this.store.readArtifact(run.taskManifest))
+    ));
+    const sourcePath = isAbsolute(run.canonicalTaskPath)
+      ? run.canonicalTaskPath
+      : resolve(projectRoot, run.canonicalTaskPath);
+    const targetPath = resolve(workspaceRoot, manifest.canonicalTaskPath);
+    if (!isInside(workspaceRoot, targetPath)) throw new Error("TASK_WORKTREE_PATH_INVALID");
+    await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
+    await writeFile(targetPath, await readFile(sourcePath));
   }
 
   private async beginAttempt(
@@ -880,34 +897,14 @@ export class WorkerRunner {
     const manifest = taskManifestSchema.parse(JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(prepared.run.taskManifest))
     ));
+    const reviewTaskPath = resolve(prepared.workspaceRoot, manifest.canonicalTaskPath);
+    if (!isInside(prepared.workspaceRoot, reviewTaskPath)) {
+      throw new Error("TASK_WORKTREE_PATH_INVALID");
+    }
+    const reviewTaskSourceHash = createHash("sha256")
+      .update(await readFile(reviewTaskPath))
+      .digest("hex");
     const candidateIncomplete = candidate.operations.length === 0 && !manifest.allowNoChange;
-    const pathEvidence = candidateIncomplete
-      ? []
-      : await Promise.all(candidate.operations.map(async (operation: CandidateOperation) => {
-          const oldHash = "oldEntry" in operation ? operation.oldEntry.sha256 : null;
-          const newHash = "newEntry" in operation ? operation.newEntry.sha256 : null;
-          if (operation.kind === "DELETE") {
-            return {
-              path: operation.path,
-              operation: operation.kind,
-              oldHash,
-              newHash,
-              diff: `deleted sha256:${oldHash ?? "unknown"}`,
-              blob: null
-            };
-          }
-          const entry = resultSnapshot.entries.find((candidateEntry) => candidateEntry.path === operation.path);
-          if (entry === undefined) throw new Error(`GIT_RESULT_ENTRY_MISSING: ${operation.path}`);
-          const bytes = await readGitBlob(prepared.runGitDirectory, entry.blobId);
-          return {
-            path: operation.path,
-            operation: operation.kind,
-            oldHash,
-            newHash,
-            diff: null,
-            blob: Buffer.from(bytes).toString("base64")
-          };
-        }));
 
     await this.mutations.mutate(
       {
@@ -920,7 +917,7 @@ export class WorkerRunner {
         expectedAttemptId: attemptId,
         expectedPhases: ["RUNNING"]
       },
-      async (state) => {
+      (state) => {
         const run = state.runs[request.jobId];
         if (run === undefined) throw new Error("PI_RUN_MISSING");
         const attempt = currentAttempt(run);
@@ -929,56 +926,26 @@ export class WorkerRunner {
         }
         const revisionWorkspace = run.gitWorkspace?.revisions[String(request.revision)];
         if (revisionWorkspace === undefined) throw new Error("GIT_REVISION_WORKSPACE_MISSING");
-        let reviewBundleRef: RunRecord["reviewBundle"];
         let pendingAction: RunRecord["pendingAction"];
         if (!candidateIncomplete) {
           if (attempt.piSessionId === undefined) throw new Error("PI_SESSION_MISSING");
-          const bundle = createReviewBundle({
-            revision: run.revision,
-            taskManifest: manifest,
-            taskManifestHash: run.taskManifest.sha256,
-            baselineHash: prepared.baseline.snapshotHash,
-            candidate,
-            candidateHash: candidate.hash,
-            changedPathHashes: Object.fromEntries(candidate.operations.map((operation) => [
-              operation.path,
-              {
-                operation: operation.kind,
-                oldHash: "oldEntry" in operation ? operation.oldEntry.sha256 : null,
-                newHash: "newEntry" in operation ? operation.newEntry.sha256 : null
-              }
-            ])),
-            pathEvidence,
-            workerSummary: `Pi produced ${String(candidate.operations.length)} changed paths`,
-            knownRisks: [],
-            gitEvidence: {
-              resultSnapshot: resultSnapshotRef,
-              incrementalPatch: incrementalPatchRef,
-              cumulativePatch: cumulativePatchRef,
-              evidence: evidenceRef
-            }
-          });
-          reviewBundleRef = await this.store.writeArtifact(
-            `runs/${request.jobId}/revision-${String(run.revision)}/review-bundles/${bundle.bundleHash}.json`,
-            Buffer.from(JSON.stringify(bundle), "utf8")
-          );
           const reviewerSessions = [...new Set((run.reviewHistory ?? []).flatMap((entry) =>
             typeof entry.reviewerSessionId === "string" ? [entry.reviewerSessionId] : []
           ))];
           if (reviewerSessions.length > 1) throw new Error("REVIEWER_SESSION_HISTORY_INVALID");
           pendingAction = {
             ...createReviewHostAction(
-              bundle,
-              reviewBundleRef,
-              new Date(Date.now() + 15 * 60_000).toISOString(),
               {
-                taskSource: run.taskSource,
-                approvedSourceHash: manifest.sourceHash,
+                revision: run.revision,
+                taskSourceHash: reviewTaskSourceHash,
+                candidateHash: candidate.hash,
+                changedPaths: candidate.operations.map((operation) => operation.path),
                 piSessionId: attempt.piSessionId,
                 ...(reviewerSessions[0] === undefined
                   ? {}
                   : { boundReviewerSessionId: reviewerSessions[0] })
-              }
+              },
+              new Date(Date.now() + 15 * 60_000).toISOString()
             )
           };
         }
@@ -1003,9 +970,7 @@ export class WorkerRunner {
                     }
                   }
                 },
-            ...(reviewBundleRef === undefined || pendingAction === undefined
-              ? {}
-              : { reviewBundle: reviewBundleRef, pendingAction }),
+            ...(pendingAction === undefined ? {} : { pendingAction }),
             ...(candidateIncomplete
               ? {
                   lastError: {

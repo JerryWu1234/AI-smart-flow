@@ -11,7 +11,7 @@ Task
 → Pi Worker
 → Candidate + Review Action
 → Host 绑定 Reviewer
-→ Reviewer 读取当前 Revision 的冻结任务 Artifact 与最新完整 Result Workspace
+→ Reviewer 读取 Run worktree 中同步的原始任务文件与当前完整结果
 → Review 返回 Leader
    ├─ accept → Publish
    ├─ repair → FIXING → PAUSED → 批准新 Revision
@@ -77,7 +77,7 @@ interface ReviewSubmission {
 
 Daemon 必须校验：
 
-- Action、claim、Revision 和 ReviewBundle 都是当前值；
+- Action、claim、Revision、taskSourceHash 和 candidateHash 都是当前值；
 - reviewerSessionId 符合首轮 CREATE 或后续 RESUME 规则；
 - 全部 changed paths 都有覆盖记录；
 - finding fingerprint 可由稳定字段重算；
@@ -146,9 +146,9 @@ Leader RepairItem 必须：
 Leader 选择 repair 后：
 
 1. Daemon 将 RepairItems 转换为具体修复任务草稿，进入 `FIXING`。
-2. 草稿持久化后进入 `PAUSED`，Host 校验并批准新的不可变 Revision 任务 Artifact；不改写启动用任务文件。
+2. 草稿持久化后进入 `PAUSED`，Host 校验并批准新的不可变 Revision 修复输入；原始任务文件保持不变。
 3. 仅纠正已批准范围时可批准 `LEADER_REPAIR` Revision；扩大产品范围时重新取得用户批准。
-4. 批准后进入 `PREPARING`，创建新 Revision 并失效旧 Candidate、ReviewBundle、ReviewDecision、LeaderDecision 和 PublishResult。
+4. 批准后进入 `PREPARING`，创建新 Revision 并失效旧 Candidate、ReviewAction、ReviewDecision、LeaderDecision 和 PublishResult。
 5. Pi Worker 从上一 Revision Result Tree 创建新的 Pi session 继续执行，并生成 Run Baseline 到最新 Result Tree 的累计 Candidate；相邻 Tree Patch 只作为本轮证据。
 6. Daemon 创建新 Review Action。
 7. Host 恢复原 Reviewer `S1` 完成复审。

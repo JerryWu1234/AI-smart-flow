@@ -1,18 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-import type { ArtifactRef } from "@smartflow/protocol";
-
-import { verifyReviewBundle, type ReviewBundle } from "./review-bundle.js";
-
 export interface ReviewHostAction {
   type: "REVIEW";
   actionId: string;
   revision: number;
-  reviewBundle: ArtifactRef;
-  reviewBundleHash: string;
+  taskSourceHash: string;
+  candidateHash: string;
   reviewAttemptId: string;
-  taskSource: ArtifactRef;
-  approvedSourceHash: string;
   changedPaths: string[];
   reviewerSession:
     | { mode: "CREATE" }
@@ -22,21 +16,21 @@ export interface ReviewHostAction {
 }
 
 export function createReviewHostAction(
-  bundle: ReviewBundle,
-  artifact: ArtifactRef,
-  expiresAt: string,
   context: {
-    taskSource: ArtifactRef;
-    approvedSourceHash: string;
+    revision: number;
+    taskSourceHash: string;
+    candidateHash: string;
+    changedPaths: string[];
     piSessionId: string;
     boundReviewerSessionId?: string;
-  }
+  },
+  expiresAt: string
 ): ReviewHostAction {
   if (
-    !verifyReviewBundle(bundle) ||
+    context.revision < 1 ||
+    !/^[a-f0-9]{64}$/u.test(context.taskSourceHash) ||
+    !/^[a-f0-9]{64}$/u.test(context.candidateHash) ||
     Date.parse(expiresAt) <= Date.now() ||
-    context.approvedSourceHash !== bundle.taskManifest.sourceHash ||
-    context.taskSource.sha256.replace(/^sha256:/u, "") !== bundle.taskManifest.taskSourceArtifact.sha256.replace(/^sha256:/u, "") ||
     context.piSessionId.length === 0 ||
     context.boundReviewerSessionId === context.piSessionId
   ) {
@@ -45,13 +39,11 @@ export function createReviewHostAction(
   return {
     type: "REVIEW",
     actionId: `review-action-${randomUUID()}`,
-    revision: bundle.revision,
-    reviewBundle: artifact,
-    reviewBundleHash: bundle.bundleHash,
+    revision: context.revision,
+    taskSourceHash: context.taskSourceHash,
+    candidateHash: context.candidateHash,
     reviewAttemptId: `review-attempt-${randomUUID()}`,
-    taskSource: context.taskSource,
-    approvedSourceHash: context.approvedSourceHash,
-    changedPaths: bundle.changedPaths.map((path) => path.path),
+    changedPaths: [...context.changedPaths],
     reviewerSession: context.boundReviewerSessionId === undefined
       ? { mode: "CREATE" }
       : { mode: "RESUME", reviewerSessionId: context.boundReviewerSessionId },

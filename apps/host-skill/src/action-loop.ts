@@ -119,14 +119,10 @@ export class HostActionLoop {
           finding.fingerprint,
           finding
         ])).values()];
-        const fullyCovered = status.pendingAction?.changedPaths.every(
-          (path) => review.data.result.pathCoverage[path] === "FULL"
-        ) ?? false;
         const complete =
           review.data.result.verdict === "APPROVE" &&
           review.data.result.completionPercentage === 100 &&
-          blockingFindings.length === 0 &&
-          fullyCovered;
+          blockingFindings.length === 0;
         if (complete) {
           await this.gateway.call("smartflow_submit_leader_decision", {
             requestId: requestId("accept"),
@@ -284,13 +280,11 @@ export class HostActionLoop {
     }
     const context: ReviewActionContext = {
       reviewAttemptId: claim.action.reviewAttemptId,
-      taskSource: { ...claim.action.taskSource },
-      approvedSourceHash: claim.action.approvedSourceHash,
-      reviewBundle: { ...claim.action.reviewBundle },
-      changedPaths: [...claim.action.changedPaths],
+      worktreePath: claim.action.worktreePath,
+      taskSourceHash: claim.action.taskSourceHash,
+      candidateHash: claim.action.candidateHash,
       reviewerSession: { ...claim.action.reviewerSession },
-      piSessionId: claim.action.piSessionId,
-      reviewBundleHash: claim.action.reviewBundleHash
+      piSessionId: claim.action.piSessionId
     };
     let stateVersion = claim.stateVersion;
     let renewalSequence = 0;
@@ -378,7 +372,8 @@ export class HostActionLoop {
       ...reviewRequest,
       expectedStateVersion: stateVersion,
       reviewAttemptId: context.reviewAttemptId,
-      reviewBundleHash: context.reviewBundleHash,
+      taskSourceHash: context.taskSourceHash,
+      candidateHash: context.candidateHash,
       reviewerSessionId: output.reviewerSessionId,
       result: output.result
     });

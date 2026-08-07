@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 import {
   hostActionSchema,
   type ClaimActionInput,
@@ -7,17 +8,17 @@ import {
   type ReportHostUnavailableOutput,
   type RenewActionClaimInput,
   type RenewActionClaimOutput,
+  type ReviewResultSubmitInput,
+  type ReviewResultSubmitOutput,
   type SubmitLeaderDecisionInput,
   type SubmitLeaderDecisionOutput,
-  type ReviewResultSubmitInput,
-  type ReviewResultSubmitOutput
+  type TaskCompletionReview
 } from "@smartflow/protocol";
 import {
   assertLeaderDecision,
   evaluateReviewGate,
-  verifyReviewBundle,
-  type ReviewBundle,
-  type ReviewGateDecision
+  type ReviewGateDecision,
+  type ReviewResultInput
 } from "@smartflow/review";
 import { StateStore, type ProjectState, type RunRecord } from "@smartflow/state-store";
 import { taskManifestSchema } from "@smartflow/task-manifest";
@@ -27,7 +28,8 @@ interface DurableReviewDecision {
   revision: number;
   claimId: string;
   reviewAttemptId: string;
-  reviewBundleHash: string;
+  taskSourceHash: string;
+  candidateHash: string;
   reviewerSessionId: string;
   piSessionId: string;
   gate: ReviewGateDecision;
@@ -48,6 +50,46 @@ function canonical(value: unknown): string {
 
 function hash(value: unknown): string {
   return createHash("sha256").update(canonical(value), "utf8").digest("hex");
+}
+
+function isTaskCompletionReview(
+  input: ReviewResultSubmitInput["result"]
+): input is TaskCompletionReview {
+  return "tasks" in input;
+}
+
+function normalizeReviewResult(
+  expectedTaskIds: readonly string[],
+  changedPaths: readonly string[],
+  input: ReviewResultSubmitInput["result"]
+): ReviewResultInput {
+  const pathCoverage = Object.fromEntries(changedPaths.map((path) => [path, "FULL" as const]));
+  if (!isTaskCompletionReview(input)) return { ...input, pathCoverage };
+
+  const reviewedTaskIds = new Set(input.tasks.map((task) => task.id));
+  if (
+    reviewedTaskIds.size !== expectedTaskIds.length ||
+    expectedTaskIds.some((taskId) => !reviewedTaskIds.has(taskId))
+  ) {
+    throw new Error("REVIEW_TASK_COVERAGE_INCOMPLETE");
+  }
+  const incompleteTasks = input.tasks.filter((task) => task.completionPercentage < 100);
+  return {
+    verdict: incompleteTasks.length === 0 ? "APPROVE" : "REQUEST_CHANGES",
+    completionPercentage: input.completionPercentage,
+    convergeFindings: incompleteTasks.map((task) => ({
+      code: "TASK_INCOMPLETE",
+      criterionId: task.id,
+      path: null,
+      severity: "P1",
+      blocking: true,
+      summary: `Reason: ${task.reason}; Suggestion: ${task.suggestion}`,
+      evidence: [`Task ${task.id} is ${String(task.completionPercentage)}% complete`]
+    })),
+    adversarialFindings: [],
+    pathCoverage,
+    residualRisks: []
+  };
 }
 
 function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
@@ -94,11 +136,9 @@ function pendingReviewAction(run: RunRecord): ReturnType<typeof hostActionSchema
     type: pending.type,
     actionId: pending.actionId,
     revision: pending.revision,
-    reviewBundle: pending.reviewBundle,
-    reviewBundleHash: pending.reviewBundleHash,
+    taskSourceHash: pending.taskSourceHash,
+    candidateHash: pending.candidateHash,
     reviewAttemptId: pending.reviewAttemptId,
-    taskSource: pending.taskSource,
-    approvedSourceHash: pending.approvedSourceHash,
     changedPaths: pending.changedPaths,
     reviewerSession: pending.reviewerSession,
     piSessionId: pending.piSessionId,
@@ -130,22 +170,17 @@ export class ReviewCoordinator {
     if (!claimAvailable || action?.type !== "REVIEW") {
       throw new Error("REVIEW_ACTION_NOT_CLAIMABLE");
     }
-    if (
-      run.reviewBundle === undefined ||
-      canonical(action.reviewBundle) !== canonical(run.reviewBundle)
-    ) throw new Error("REVIEW_ACTION_BUNDLE_INVALID");
+    if (run.candidate === undefined || run.workspace === undefined) {
+      throw new Error("REVIEW_ACTION_CONTEXT_MISSING");
+    }
     const reviewerSessionId = boundReviewerSession(run);
     const reviewerSessionMatches = reviewerSessionId === undefined
       ? action.reviewerSession.mode === "CREATE"
       : action.reviewerSession.mode === "RESUME" &&
         action.reviewerSession.reviewerSessionId === reviewerSessionId;
-    const approvedSourceHash = stringField(run.approvedTasks, "sourceHash");
     if (
       action.piSessionId !== workerSession(run) ||
-      !reviewerSessionMatches ||
-      canonical(action.taskSource) !== canonical(run.taskSource) ||
-      action.approvedSourceHash !== approvedSourceHash ||
-      action.approvedSourceHash !== action.taskSource.sha256.replace(/^sha256:/u, "")
+      !reviewerSessionMatches
     ) throw new Error("REVIEW_ACTION_CONTEXT_STALE");
     if ((run.reviewHistory ?? []).some(
       (entry) => stringField(entry, "reviewAttemptId") === action.reviewAttemptId
@@ -176,7 +211,10 @@ export class ReviewCoordinator {
       nextState: replaceRun(state, nextRun),
       response: {
         claimId,
-        action: claimableAction,
+        action: {
+          ...claimableAction,
+          worktreePath: resolve(this.store.dataDirectory, run.workspace.relativePath)
+        },
         stateVersion: state.stateVersion + 1,
         expiresAt
       }
@@ -290,18 +328,17 @@ export class ReviewCoordinator {
     const pending = run.pendingAction;
     const action = pendingReviewAction(run);
     const claimExpiresAt = stringField(pending, "claimExpiresAt");
-    const reviewBundleHash = stringField(pending, "reviewBundleHash");
+    const taskSourceHash = stringField(pending, "taskSourceHash");
+    const candidateHash = stringField(pending, "candidateHash");
     const claimId = stringField(pending, "claimId");
-    const reviewBundleRef = pending?.reviewBundle;
     if (
       run.phase !== "REVIEWING" ||
       action?.type !== "REVIEW" ||
       claimId !== input.claimId ||
-      reviewBundleHash !== input.reviewBundleHash ||
+      taskSourceHash !== input.taskSourceHash ||
+      candidateHash !== input.candidateHash ||
       action.reviewAttemptId !== input.reviewAttemptId ||
-      claimExpiresAt === undefined ||
-      typeof reviewBundleRef !== "object" ||
-      reviewBundleRef === null
+      claimExpiresAt === undefined
     ) {
       throw new Error("REVIEW_CLAIM_STALE_OR_MISMATCHED");
     }
@@ -316,21 +353,13 @@ export class ReviewCoordinator {
         hostUnavailableReason: "HOST_REVIEW_CLAIM_EXPIRED_DURING_EXECUTION"
       }, now);
     }
-    const bundle = JSON.parse(
-      new TextDecoder().decode(await this.store.readArtifact(reviewBundleRef as {
-        relativePath: string;
-        sha256: string;
-        size: number;
-      }))
-    ) as ReviewBundle;
     if (
-      !verifyReviewBundle(bundle) ||
-      bundle.bundleHash !== input.reviewBundleHash ||
-      bundle.revision !== run.revision
+      input.taskSourceHash !== action.taskSourceHash ||
+      input.candidateHash !== action.candidateHash
     ) {
-      throw new Error("REVIEW_BUNDLE_BINDING_INVALID");
+      throw new Error("REVIEW_CONTEXT_BINDING_INVALID");
     }
-    const changedPaths = bundle.changedPaths.map((path) => path.path);
+    const changedPaths = action.changedPaths;
     if (canonical(action.changedPaths) !== canonical(changedPaths)) {
       throw new Error("REVIEW_CHANGED_PATHS_MISMATCH");
     }
@@ -342,23 +371,31 @@ export class ReviewCoordinator {
           action.reviewerSession.reviewerSessionId !== boundSessionId ||
           input.reviewerSessionId !== boundSessionId))
     ) throw new Error("REVIEWER_SESSION_BINDING_MISMATCH");
+    const manifest = taskManifestSchema.parse(JSON.parse(
+      new TextDecoder().decode(await this.store.readArtifact(run.taskManifest))
+    ));
+    const reviewResult = normalizeReviewResult(
+      manifest.enabledTaskIds,
+      changedPaths,
+      input.result
+    );
     const gate = evaluateReviewGate(
       {
         reviewAttemptId: input.reviewAttemptId,
-        reviewBundleHash: input.reviewBundleHash,
         reviewerSessionId: input.reviewerSessionId,
         piSessionId: workerSession(run),
         ...(boundSessionId === undefined ? {} : { boundReviewerSessionId: boundSessionId }),
         changedPaths
       },
-      input.result
+      reviewResult
     );
     const body = {
       schemaVersion: 1 as const,
       revision: run.revision,
       claimId: input.claimId,
       reviewAttemptId: input.reviewAttemptId,
-      reviewBundleHash: input.reviewBundleHash,
+      taskSourceHash: input.taskSourceHash,
+      candidateHash: input.candidateHash,
       reviewerSessionId: input.reviewerSessionId,
       piSessionId: workerSession(run),
       gate
@@ -378,7 +415,8 @@ export class ReviewCoordinator {
         {
           reviewAttemptId: input.reviewAttemptId,
           reviewerSessionId: input.reviewerSessionId,
-          reviewBundleHash: input.reviewBundleHash,
+          taskSourceHash: input.taskSourceHash,
+          candidateHash: input.candidateHash,
           reviewHash: decision.reviewHash
         }
       ],
@@ -395,7 +433,7 @@ export class ReviewCoordinator {
         reviewHash: decision.reviewHash,
         reviewAttemptId: input.reviewAttemptId,
         reviewerSessionId: input.reviewerSessionId,
-        result: input.result
+        result: gate.result
       }
     };
   }

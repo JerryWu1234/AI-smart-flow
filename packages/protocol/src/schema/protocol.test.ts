@@ -103,30 +103,20 @@ describe("smartflow.v5 protocol schemas", () => {
         type: "REVIEW",
         actionId: "a1",
         revision: 1,
-        effectHash: "not-a-review-bundle",
+        effectHash: "not-a-review-context",
         expiresAt: "2026-07-20T00:00:00Z"
       })
     ).toThrow();
   });
 
-  it("models CREATE and RESUME Review actions without serialized bundle content", () => {
+  it("models CREATE and RESUME Review actions bound to task source and Candidate", () => {
     const action = {
       type: "REVIEW",
       actionId: "action-1",
       revision: 1,
-      reviewBundle: {
-        relativePath: "runs/job-1/revision-1/review-bundle.json",
-        sha256: digest,
-        size: 100
-      },
-      reviewBundleHash: digest,
+      taskSourceHash: digest,
+      candidateHash: digest,
       reviewAttemptId: "review-attempt-1",
-      taskSource: {
-        relativePath: "runs/job-1/revision-1/task-source.md",
-        sha256: digest,
-        size: 42
-      },
-      approvedSourceHash: digest,
       changedPaths: ["src/a.ts"],
       reviewerSession: { mode: "CREATE" },
       piSessionId: "pi-session-1",
@@ -143,7 +133,7 @@ describe("smartflow.v5 protocol schemas", () => {
     }).success).toBe(false);
     expect(hostActionSchema.safeParse({
       ...action,
-      reviewBundleContent: { serialized: "tasks" }
+      worktreePath: "/private/run-worktree"
     }).success).toBe(false);
   });
 
@@ -198,11 +188,34 @@ describe("smartflow.v5 protocol schemas", () => {
       expectedStateVersion: 3,
       claimId: "claim-1",
       reviewAttemptId: "review-attempt-1",
-      reviewBundleHash: digest,
+      taskSourceHash: digest,
+      candidateHash: digest,
       reviewerSessionId: "reviewer-1",
       result: review
     };
     expect(submitReviewInputSchema.safeParse(submission).success).toBe(true);
+    expect(submitReviewInputSchema.safeParse({
+      ...submission,
+      result: {
+        completionPercentage: 75,
+        tasks: [
+          {
+            id: "T001",
+            completionPercentage: 50,
+            reason: "Required behavior is incomplete",
+            suggestion: "Implement the missing behavior"
+          },
+          { id: "T002", completionPercentage: 100 }
+        ]
+      }
+    }).success).toBe(true);
+    expect(submitReviewInputSchema.safeParse({
+      ...submission,
+      result: {
+        completionPercentage: 50,
+        tasks: [{ id: "T001", completionPercentage: 50 }]
+      }
+    }).success).toBe(false);
     expect(submitReviewInputSchema.safeParse({
       ...submission,
       provenance: { forged: true }
@@ -333,7 +346,8 @@ describe("smartflow.v5 protocol schemas", () => {
       revision: 1,
       claimId: "claim-1",
       reviewAttemptId: "review-1",
-      reviewBundleHash: digest,
+      taskSourceHash: digest,
+      candidateHash: digest,
       reviewerSessionId: "reviewer-1",
       piSessionId: "pi-session-1",
       gate: {

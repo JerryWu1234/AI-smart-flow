@@ -38,7 +38,7 @@ interface TaskManifestV3 {
 }
 ```
 
-Worker and Reviewer read the immutable TaskSourceArtifact, never the mutable source file. TaskManifest contains no Provider field, permission policy, Broker tool definition or model credential.
+The original canonical task file is mirrored byte-for-byte to the same path in the Run worktree before each Worker attempt. Worker and Reviewer read that synchronized worktree file; TaskSourceArtifact remains audit evidence. TaskManifest contains no Provider field, permission policy, Broker tool definition or model credential.
 
 ## PiRuntimeConfiguration and credential
 
@@ -191,6 +191,7 @@ interface ReviewerBinding {
 interface ReviewDecision {
   actionId: string;
   revision: number;
+  taskSourceHash: string;
   candidateHash: string;
   reviewerSessionId: string;
   reviewArtifact: ArtifactRef;

@@ -15,7 +15,7 @@ import {
   type HostGateway,
   type ReviewActionResult
 } from "@smartflow/host-skill";
-import type { ArtifactRef, RepairItem, ReviewSubmission } from "@smartflow/protocol";
+import type { RepairItem, ReviewSubmission } from "@smartflow/protocol";
 import type {
   CancelReceipt,
   ProviderProbeResult,
@@ -179,8 +179,7 @@ function createReviewCallback(
     verdict: "APPROVE" | "REQUEST_CHANGES";
     findingCodes: string[];
     blocking?: boolean;
-  }>,
-  readArtifact: (ref: ArtifactRef) => Promise<Uint8Array>
+  }>
 ): {
   review: NonNullable<HostActionCallbacks["review"]>;
   observations: Array<{
@@ -209,15 +208,8 @@ function createReviewCallback(
       ) {
         throw new Error("later reviews must resume the original reviewer session");
       }
-      const tasksSource = new TextDecoder().decode(await readArtifact(context.taskSource));
-      const reviewBundle = JSON.parse(
-        new TextDecoder().decode(await readArtifact(context.reviewBundle))
-      ) as { changedPaths: Array<{ path: string; blob: string | null }> };
-      const implementationBlob = reviewBundle.changedPaths.find((path) => path.path === "sum.js")?.blob;
-      if (implementationBlob === null || implementationBlob === undefined) {
-        throw new Error("sum.js review evidence missing");
-      }
-      const implementationSource = Buffer.from(implementationBlob, "base64").toString("utf8");
+      const tasksSource = await readFile(resolve(context.worktreePath, "tasks.md"), "utf8");
+      const implementationSource = await readFile(resolve(context.worktreePath, "sum.js"), "utf8");
       observations.push({
         tasksSource,
         implementationSource,
@@ -242,9 +234,7 @@ function createReviewCallback(
         completionPercentage: verdict === "APPROVE" ? 100 : 0,
         convergeFindings: [],
         adversarialFindings: [],
-        pathCoverage: Object.fromEntries(
-          context.changedPaths.map((path) => [path, "FULL" as const])
-        ),
+        pathCoverage: { "sum.js": "FULL" },
         residualRisks: []
       };
       const converge = verdict === "APPROVE" ? approval : {
@@ -260,7 +250,7 @@ function createReviewCallback(
       return {
         reviewerSessionId,
         result: combineReviewStageResults(
-          context.changedPaths,
+          ["sum.js"],
           converge,
           adversarial
         )
@@ -335,7 +325,7 @@ describe("production review repair loop", () => {
       }
     }) as { projectId: string; jobId: string };
     const store = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
-    const reviewer = createReviewCallback(reviewPlans, (ref) => store.readArtifact(ref));
+    const reviewer = createReviewCallback(reviewPlans);
 
     const firstReviewPending = await waitForState(
       store,
@@ -344,16 +334,15 @@ describe("production review repair loop", () => {
     );
     const firstRun = firstReviewPending.runs[execute.jobId];
     if (firstRun === undefined) throw new Error("first revision missing");
-    const firstReviewBundle = firstRun.pendingAction?.reviewBundle as { sha256?: string } | undefined;
     const firstEvidence = {
       taskManifest: firstRun.taskManifest,
       candidate: firstRun.candidate,
-      reviewBundleHash: firstReviewBundle?.sha256,
+      candidateHash: firstRun.pendingAction?.candidateHash,
       attemptId: firstRun.workerAttempts.at(-1)?.attemptId,
       sessionId: firstRun.workerAttempts.at(-1)?.piSessionId
     };
     expect(firstEvidence.candidate).toBeDefined();
-    expect(firstEvidence.reviewBundleHash).toBeDefined();
+    expect(firstEvidence.candidateHash).toBeDefined();
 
     const firstReview = await new HostActionLoop(gateway, {
       review: reviewer.review
@@ -455,8 +444,7 @@ describe("production review repair loop", () => {
     const secondRun = secondReviewPending.runs[execute.jobId];
     if (secondRun === undefined) throw new Error("second review revision missing");
     expect(secondRun.candidate?.sha256).not.toBe(firstEvidence.candidate?.sha256);
-    expect((secondRun.pendingAction?.reviewBundle as { sha256?: string } | undefined)?.sha256)
-      .not.toBe(firstEvidence.reviewBundleHash);
+    expect(secondRun.pendingAction?.candidateHash).not.toBe(firstEvidence.candidateHash);
     expect(secondRun.workerAttempts.at(-1)?.attemptId).not.toBe(firstEvidence.attemptId);
     expect(secondRun.workerAttempts.at(-1)?.piSessionId).not.toBe(firstEvidence.sessionId);
     expect(provider.starts.map((start) => start.revision)).toEqual([1, 2]);
@@ -560,8 +548,8 @@ describe("production review repair loop", () => {
     expect(reviewer.observations.map((observation) => observation.sessionMode))
       .toEqual(["CREATE", "RESUME", "RESUME"]);
     expect(reviewer.observations[0]?.tasksSource).toBe(tasksSource);
-    expect(reviewer.observations[1]?.tasksSource)
-      .not.toBe(reviewer.observations[0]?.tasksSource);
+    expect(reviewer.observations[1]?.tasksSource).toBe(tasksSource);
+    expect(reviewer.observations[2]?.tasksSource).toBe(tasksSource);
     expect(reviewer.observations[0]?.implementationSource)
       .toContain('implementedRevision = "1"');
     expect(reviewer.observations[1]?.implementationSource)
@@ -608,7 +596,7 @@ describe("production review repair loop", () => {
       }
     }) as { projectId: string; jobId: string };
     const store = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
-    const reviewer = createReviewCallback(reviewPlans, (ref) => store.readArtifact(ref));
+    const reviewer = createReviewCallback(reviewPlans);
     const candidateHashes = new Map<number, string>();
 
     const completeRound = async (

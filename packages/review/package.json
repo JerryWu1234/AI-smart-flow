@@ -24,7 +24,6 @@
   },
   "dependencies": {
     "@smartflow/protocol": "workspace:*",
-    "@smartflow/task-manifest": "workspace:*",
-    "@smartflow/workspace": "workspace:*"
+    "@smartflow/task-manifest": "workspace:*"
   }
 }
