@@ -4,6 +4,8 @@ import { isAbsolute, posix, resolve } from "node:path";
 
 import type { ArtifactRef } from "@smartflow/protocol";
 
+import { canonical, observedFile } from "./internal-utils.js";
+
 export interface ApplyOperation {
   path: string;
   type: "ADD" | "MODIFY" | "DELETE";
@@ -20,15 +22,7 @@ export interface PreflightConflict {
   reason: "EXPECTED_ABSENT" | "EXPECTED_FILE" | "HASH_MISMATCH" | "MODE_MISMATCH" | "UNSAFE_PATH";
 }
 
-function canonical(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((item) => canonical(item)).join(",")}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`)
-    .join(",")}}`;
-}
+
 
 export function canonicalOperations(operations: readonly ApplyOperation[]): ApplyOperation[] {
   const sorted = [...operations].sort((left, right) => left.path.localeCompare(right.path));
@@ -86,19 +80,7 @@ export function stableOperationId(bindings: {
   return `publish-${createHash("sha256").update(canonical(bindings), "utf8").digest("hex")}`;
 }
 
-async function observedFile(path: string): Promise<{ hash: string; mode: number } | "ABSENT" | "OTHER"> {
-  try {
-    const stats = await lstat(path);
-    if (!stats.isFile() || stats.isSymbolicLink()) return "OTHER";
-    return {
-      hash: createHash("sha256").update(await readFile(path)).digest("hex"),
-      mode: stats.mode & 0o777
-    };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "ABSENT";
-    throw error;
-  }
-}
+
 
 export async function preflightOperations(
   activeWorkspace: string,

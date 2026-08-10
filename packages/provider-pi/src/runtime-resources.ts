@@ -16,17 +16,17 @@ export interface PiRuntimeResources {
   sessionDirectory: string;
 }
 
-export function piWorkerEntryPath(): string {
+function piWorkerEntryPath(): string {
   const extension = extname(fileURLToPath(import.meta.url)) === ".mjs" ? ".mjs" : ".js";
   return fileURLToPath(new URL(`./worker-entry${extension}`, import.meta.url));
 }
 
-export function piMcpModelExtensionPath(): string {
+function piMcpModelExtensionPath(): string {
   const extension = extname(fileURLToPath(import.meta.url)) === ".mjs" ? ".mjs" : ".js";
   return fileURLToPath(new URL(`./mcp-model-extension${extension}`, import.meta.url));
 }
 
-export function piSdkBootstrapPath(): string {
+function piSdkBootstrapPath(): string {
   const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
   const pnpmMarker = "/node_modules/.pnpm/";
   const pnpmIndex = entry.indexOf(pnpmMarker);

@@ -11,6 +11,7 @@ import {
   type ApplyOperation,
   type PreflightConflict
 } from "./preflight.js";
+import { observedFile, sha256 as hash } from "./internal-utils.js";
 
 export interface ApplyPathResult {
   path: string;
@@ -50,26 +51,8 @@ export interface PublishBlobReader {
   read(ref: ArtifactRef): Promise<Uint8Array>;
 }
 
-function hash(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
 function bareHash(value: string): string {
   return value.replace(/^sha256:/u, "");
-}
-
-async function observedFile(path: string): Promise<{ hash: string; mode: number } | "ABSENT" | "OTHER"> {
-  try {
-    const stats = await lstat(path);
-    if (!stats.isFile() || stats.isSymbolicLink()) return "OTHER";
-    return {
-      hash: hash(await readFile(path)),
-      mode: stats.mode & 0o777
-    };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "ABSENT";
-    throw error;
-  }
 }
 
 async function pathResult(operation: ApplyOperation): Promise<ApplyPathResult> {

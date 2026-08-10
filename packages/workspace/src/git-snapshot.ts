@@ -4,6 +4,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import { WorkspaceError } from "./errors.js";
 import { runGitCommand } from "./git-command.js";
+import { canonical, isInsideOrEqual as isInside, sha256 as hash } from "./internal-utils.js";
 
 export type GitSnapshotKind = "RUN_BASELINE" | "REVISION_INPUT" | "REVISION_RESULT";
 export type GitFileMode = "100644" | "100755" | "120000";
@@ -49,19 +50,6 @@ const sensitiveNames = new Set([
   ".env", ".npmrc", ".netrc", "credentials", "credentials.json", "id_rsa", "id_ed25519"
 ]);
 
-function canonical(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map((key) =>
-    `${JSON.stringify(key)}:${canonical(record[key])}`
-  ).join(",")}}`;
-}
-
-function hash(value: Uint8Array | string): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-
 function isSensitive(path: string): boolean {
   return path.split("/").some((name) => sensitiveNames.has(name) || /\.(?:key|pem|p12)$/iu.test(name));
 }
@@ -69,11 +57,6 @@ function isSensitive(path: string): boolean {
 function safeRelativePath(path: string): boolean {
   return path.length > 0 && !path.startsWith("/") && !path.includes("\\") &&
     !path.split("/").some((part) => part === "" || part === "." || part === "..");
-}
-
-function isInside(root: string, target: string): boolean {
-  const path = relative(root, target);
-  return path.length === 0 || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
 }
 
 async function outputPath(dataDirectory: string, target: string): Promise<string> {

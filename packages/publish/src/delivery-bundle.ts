@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { canonicalOperations, type ApplyOperation } from "./preflight.js";
+import { canonical, sha256 as hash } from "./internal-utils.js";
 import {
   signingKeyId,
   type SignatureEnvelope
@@ -64,19 +65,7 @@ export interface DeliveryBundleDirectory {
   signerPublicKey: KeyObject;
 }
 
-function canonical(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((item) => canonical(item)).join(",")}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`)
-    .join(",")}}`;
-}
 
-function hash(value: Uint8Array | string): string {
-  return createHash("sha256").update(value).digest("hex");
-}
 
 export function createDeliveryBundle(input: DeliveryBundleInput): DeliveryBundle {
   const operations = canonicalOperations(input.operations);

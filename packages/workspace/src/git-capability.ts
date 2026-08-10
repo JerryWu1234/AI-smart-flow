@@ -3,6 +3,7 @@ import { lstat, realpath } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 
 import { runGitCommand } from "./git-command.js";
+import { canonical } from "./internal-utils.js";
 
 export type GitPauseCode =
   | "GIT_UNAVAILABLE"
@@ -42,14 +43,7 @@ const inclusionPolicy = {
   sensitive: false
 } as const;
 
-function canonical(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map((key) =>
-    `${JSON.stringify(key)}:${canonical(record[key])}`
-  ).join(",")}}`;
-}
+
 
 const inclusionPolicyHash = createHash("sha256")
   .update(canonical(inclusionPolicy), "utf8")

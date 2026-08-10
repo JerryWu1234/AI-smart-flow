@@ -6,4 +6,4 @@ export * from "./git-cleanup.js";
 export * from "./git-materializer.js";
 export * from "./git-object-store.js";
 export * from "./git-snapshot.js";
-export * from "./path-guard.js";
+

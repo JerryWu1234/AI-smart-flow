@@ -95,7 +95,3 @@ export function registerMcpModel(
   const registration = createMcpModelRegistration(environment);
   pi.registerProvider(registration.providerId, registration.config);
 }
-
-export default function smartFlowMcpModelExtension(pi: McpModelExtensionApi): void {
-  registerMcpModel(pi);
-}

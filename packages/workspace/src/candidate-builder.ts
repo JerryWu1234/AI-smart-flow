@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { runGitCommand } from "./git-command.js";
 import type { GitSnapshotEntry, GitWorkspaceSnapshot } from "./git-snapshot.js";
+import { canonical } from "./internal-utils.js";
 
 export type CandidateEntry =
   | { path: string; kind: "FILE"; sha256: string; size: number; mode: number }
@@ -40,15 +41,7 @@ export interface GitCandidateBuildResult {
   evidenceBytes: Buffer;
 }
 
-function canonical(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((item) => canonical(item)).join(",")}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`)
-    .join(",")}}`;
-}
+
 
 function candidateHash(candidate: Pick<Candidate, "baselineHash" | "operations">): string {
   return createHash("sha256")

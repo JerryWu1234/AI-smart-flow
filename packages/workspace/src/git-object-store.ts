@@ -3,15 +3,11 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import { WorkspaceError } from "./errors.js";
 import { runGitCommand } from "./git-command.js";
+import { isStrictlyInside as isInside } from "./internal-utils.js";
 
 export interface GitObjectStoreRef {
   gitDirectory: string;
   objectDirectory: string;
-}
-
-function isInside(root: string, target: string): boolean {
-  const path = relative(root, target);
-  return path.length > 0 && !path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path);
 }
 
 export async function initializeGitObjectStore(

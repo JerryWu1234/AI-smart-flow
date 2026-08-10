@@ -35,7 +35,7 @@ export interface CompiledTaskManifest {
   artifactBytes: Uint8Array;
 }
 
-export function providerRuntimeConfigHash(input: unknown): string {
+function providerRuntimeConfigHash(input: unknown): string {
   return hashCanonical(input);
 }
 
