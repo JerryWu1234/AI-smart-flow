@@ -2,7 +2,7 @@ import type { ArtifactRef } from "@smartflow/protocol";
 
 import type { ProjectState, RunRecord } from "./schema.js";
 
-export const fixtureArtifact: ArtifactRef = {
+const fixtureArtifact: ArtifactRef = {
   relativePath: "runs/job-1/revision-1/task-manifest.json",
   sha256: "a".repeat(64),
   size: 128

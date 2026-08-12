@@ -23,19 +23,14 @@ import {
 const digest = "a".repeat(64);
 
 describe("smartflow.v5 protocol schemas", () => {
-  it("defines exactly the eleven public MCP tools without Worker tool decisions", () => {
+  it("defines exactly the six public MCP tools without manual Review primitives", () => {
     expect(Object.keys(mcpToolSchemas).sort()).toEqual([
       "smartflow_cancel",
-      "smartflow_claim_action",
       "smartflow_execute",
-      "smartflow_renew_action_claim",
       "smartflow_result",
       "smartflow_resume",
       "smartflow_review_turn",
-      "smartflow_status",
-      "smartflow_submit_leader_decision",
-      "smartflow_submit_review",
-      "smartflow_wait"
+      "smartflow_status"
     ]);
     expect("smartflow_submit_tool_decision" in mcpToolSchemas).toBe(false);
   });

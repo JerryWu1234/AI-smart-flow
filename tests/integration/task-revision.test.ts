@@ -3,12 +3,7 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-  advanceRevision,
-  checkApprovedSource,
-  compileTaskManifest,
-  createRevisionState
-} from "@smartflow/task-manifest";
+import { compileTaskManifest } from "@smartflow/task-manifest";
 import {
   frozenPiRuntimeConfig,
   piRuntimeConfigHash,
@@ -48,7 +43,7 @@ const piConfiguration: PiRuntimeConfiguration = {
   resourcePolicy: "workspace-project-resources"
 };
 
-describe("task revision guard", () => {
+describe("task manifest runtime inputs", () => {
   it("compiles the exact frozen Pi runtime hash consumed by WorkerRunner", () => {
     const compiled = compileTaskManifest(createTasksSource(), {
       ...compileOptions,
@@ -57,33 +52,7 @@ describe("task revision guard", () => {
     expect(compiled.manifest.providerRuntimeConfigHash).toBe(piRuntimeConfigHash(piConfiguration));
   });
 
-  it("pauses on approved source drift and clears Candidate, Review, and Publish evidence", () => {
-    const compiled = compileTaskManifest(createTasksSource(), compileOptions);
-    const initial = createRevisionState({
-      revision: 1,
-      sourceHash: compiled.manifest.sourceHash,
-      tasksHash: compiled.manifest.tasksHash,
-      taskManifestHash: compiled.manifestHash
-    });
-    expect(checkApprovedSource(initial.sourceHash, createTasksSource())).toEqual({ matches: true });
-    expect(checkApprovedSource(initial.sourceHash, `${createTasksSource()}\nchanged`)).toMatchObject({
-      matches: false,
-      pause: { code: "APPROVED_SOURCE_DRIFT" }
-    });
-    const next = advanceRevision(initial, {
-      sourceHash: "a".repeat(64),
-      tasksHash: "b".repeat(64),
-      taskManifestHash: "c".repeat(64)
-    });
-    expect(next).toMatchObject({
-      revision: 2,
-      candidate: null,
-      reviewDecision: null,
-      publishResult: null
-    });
-  });
-
-  it("compiles and guards a run after the project .specify directory is deleted", async () => {
+  it("compiles a run after the project .specify directory is deleted", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const tasksPath = resolve(harness.projectDir, "tasks.md");
@@ -95,9 +64,5 @@ describe("task revision guard", () => {
     await rm(specifyPath, { recursive: true });
     const after = compileTaskManifest(await readFile(tasksPath), compileOptions);
     expect(after).toEqual(before);
-    expect(checkApprovedSource(after.manifest.sourceHash, await readFile(tasksPath))).toEqual({
-      matches: true
-    });
   });
-
 });

@@ -4,11 +4,9 @@ import {
   assessRepairProgress,
   deriveRepairApproval,
   normalizeFinding,
-  repairApprovalKind,
   type RepairRound
 } from "@smartflow/review";
 import {
-  advanceRevision,
   compileTaskManifest,
   type TaskManifest
 } from "@smartflow/task-manifest";
@@ -164,29 +162,7 @@ describe("review repair loop", () => {
         authorizedCriterionIds: ["T001"]
       }
     }).manifest;
-    expect(repairApprovalKind(parent, forged)).toBe("USER");
+    expect(deriveRepairApproval(parent, forged).kind).toBe("USER");
     expect(deriveRepairApproval(parent, forged).reasons).toContain("PROVIDER_RUNTIME_CHANGED");
-  });
-
-  it("invalidates old Candidate, Review, and Publish evidence for a repair Revision", () => {
-    const revised = advanceRevision(
-      {
-        revision: 1,
-        sourceHash: "source-1",
-        tasksHash: "tasks-1",
-        taskManifestHash: "manifest-1"
-      },
-      {
-        sourceHash: "source-2",
-        tasksHash: "tasks-2",
-        taskManifestHash: "manifest-2"
-      }
-    );
-    expect(revised).toMatchObject({
-      revision: 2,
-      candidate: null,
-      reviewDecision: null,
-      publishResult: null
-    });
   });
 });

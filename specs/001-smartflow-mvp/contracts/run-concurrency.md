@@ -30,7 +30,7 @@ Relative, absolute, and symlink aliases that identify the same file resolve to t
 - An active composite turn is owned by stable `hostTurnId + turnToken + revision`.
 - `CLAIMING` is written before Action claim. It binds the action and 30-minute deadline without exposing the worktree.
 - `AWAITING_REVIEW` is written only after claim/reconciliation and adds `claimId + reviewAttemptId`; only this stage may yield `REVIEW_REQUIRED` with `worktreePath`.
-- `AWAITING_USER_INPUT` durably records a pause that only the owning Host may answer.
+- `AWAITING_USER_INPUT` durably records a pause that only the owning Host may answer through `smartflow_review_turn` with the active `turnToken`; public `smartflow_resume` cannot answer or bypass this checkpoint.
 - A different Host ID is rejected. A stale token causes no mutation and receives current no-path `NOT_READY`.
 - Claim renewal occurs every 60 seconds or 30 seconds before lease expiry. Retry after transient failure is 1 second; three failures pause the Run safely.
 
@@ -47,7 +47,7 @@ Relative, absolute, and symlink aliases that identify the same file resolve to t
 
 1. On Daemon startup, `ProjectRuntime` advances its runtime epoch under CAS.
 2. If a Run has durable `hostTurn`, `HostTurnCoordinator.recoverRun()` is the sole authority for claim reconciliation, deadline/lease checks, and renewal restoration.
-3. `ProjectRuntime` then rereads fresh state. While `hostTurn` remains, it MUST NOT schedule legacy pipeline/publish/cancel recovery for that Run.
+3. `ProjectRuntime` then rereads fresh state. While `hostTurn` remains, it MUST NOT schedule ordinary pipeline/publish/cancel recovery for that Run.
 4. `CLAIMING` recovery either reconciles the existing claimed Action, reissues the idempotent claim, clears an unclaimed expired intent, or pauses an expired active claim.
 5. `AWAITING_REVIEW` recovery restores renewal or durably pauses an expired deadline/lease. `AWAITING_USER_INPUT` requires no background action and remains available to the owning Host.
 6. `state.json`, not in-memory queues/timers, Host requests, or Pi/Reviewer session files, is the recovery truth.

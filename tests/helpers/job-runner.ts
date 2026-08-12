@@ -1,8 +1,8 @@
 import { EventEmitter } from "node:events";
 
-export type BackgroundJobStatus = "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED";
+type BackgroundJobStatus = "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED";
 
-export interface BackgroundJobSnapshot {
+interface BackgroundJobSnapshot {
   jobId: string;
   status: BackgroundJobStatus;
   stateVersion: number;
@@ -10,7 +10,7 @@ export interface BackgroundJobSnapshot {
   error?: string;
 }
 
-export interface JobWaitResult {
+interface JobWaitResult {
   changed: boolean;
   snapshot: BackgroundJobSnapshot;
 }
@@ -59,7 +59,9 @@ export class JobRunner {
     });
   }
 
-  private update(snapshot: Omit<BackgroundJobSnapshot, "stateVersion"> & { stateVersion?: number }): BackgroundJobSnapshot {
+  private update(
+    snapshot: Omit<BackgroundJobSnapshot, "stateVersion"> & { stateVersion?: number }
+  ): BackgroundJobSnapshot {
     this.nextStateVersion += 1;
     const next: BackgroundJobSnapshot = { ...snapshot, stateVersion: this.nextStateVersion };
     this.jobs.set(next.jobId, next);

@@ -38,14 +38,9 @@ async function callMcp(client, name, args) {
   return asRecord(JSON.parse(text.text), name);
 }
 
-async function waitForPhase(client, scope, afterStateVersion, expected, timeoutMs) {
+async function waitForPhase(client, scope, expected, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
-  const firstWait = await callMcp(client, "smartflow_wait", {
-    ...scope,
-    afterStateVersion,
-    timeoutMs: Math.min(5_000, timeoutMs)
-  });
-  let summary = asRecord(firstWait.summary, "smartflow_wait.summary");
+  let summary = await callMcp(client, "smartflow_status", scope);
   while (Date.now() < deadline) {
     const phase = String(summary.phase);
     if (expected.has(phase)) return summary;
@@ -92,7 +87,6 @@ async function executeAndCancelSecondary(client, primaryScope) {
   const secondCanceled = await waitForPhase(
     client,
     secondScope,
-    Number(secondCancel.stateVersion),
     new Set(["CANCELED"]),
     120_000
   );
@@ -116,6 +110,9 @@ const client = new Client({ name: "smartflow-installed-e2e", version: "1.0.0" })
 let stage = "connect";
 try {
   await client.connect(transport);
+  const publicToolNames = (await client.listTools()).tools
+    .map((tool) => tool.name)
+    .sort();
   stage = "import-host-skill";
   const { approveTasksSource, executeApprovedWorkflow } = await import(
     pathToFileURL(hostSkillEntry).href
@@ -276,6 +273,7 @@ try {
   }
 
   process.stdout.write(`${JSON.stringify({
+    publicToolNames,
     scope,
     secondExecute,
     secondCanceled,

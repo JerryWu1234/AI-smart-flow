@@ -20,8 +20,6 @@ import {
   reviewTurnInputSchema,
   statusInputSchema,
   submitLeaderDecisionInputSchema,
-  submitReviewInputSchema,
-  waitInputSchema,
   type ArtifactRef,
   type CancelInput,
   type ExecuteInput,
@@ -446,23 +444,8 @@ export class ProjectRuntime {
         }
       case "smartflow_status":
         return this.status(statusInputSchema.parse(request.payload));
-      case "smartflow_wait":
-        return this.wait(waitInputSchema.parse(request.payload));
       case "smartflow_review_turn":
         return this.hostTurns.turn(reviewTurnInputSchema.parse(request.payload));
-      case "smartflow_claim_action":
-        return this.claimAction(claimActionInputSchema.parse(request.payload));
-      case "smartflow_renew_action_claim":
-        return this.renewActionClaim(renewActionClaimInputSchema.parse(request.payload));
-      case "smartflow_submit_review":
-        {
-          const input = submitReviewInputSchema.parse(request.payload);
-          return "hostUnavailableReason" in input
-            ? this.reportHostUnavailable(input)
-            : this.submitReview(input);
-        }
-      case "smartflow_submit_leader_decision":
-        return this.submitLeaderDecision(submitLeaderDecisionInputSchema.parse(request.payload));
       case "smartflow_resume":
         {
           const parsed = resumeInputSchema.safeParse(request.payload);

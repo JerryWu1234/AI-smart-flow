@@ -8,6 +8,7 @@ export default tseslint.config(
       "**/node_modules/**",
       "coverage/**",
       ".agents/**",
+      ".smartflow-e2e/**",
       ".specify/**",
       "eslint.config.js",
       "scripts/**",

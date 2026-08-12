@@ -2,10 +2,11 @@ import {
   reviewTurnInputSchema,
   reviewTurnOutputSchema,
   type ResultOutput,
-  type ReviewTurnInput
+  type ReviewSubmission,
+  type ReviewTurnInput,
+  type ReviewTurnOutput
 } from "@smartflow/protocol";
 
-import type { HostActionCallbacks, ReviewActionContext } from "./action-loop.js";
 import {
   executeApprovedTasks,
   type ApprovedTasksSnapshot,
@@ -14,8 +15,30 @@ import {
 import {
   reviewerSessionIdFromOutput,
   validateHostReviewOutput,
+  type HostReviewCallbackOutput,
+  type HostReviewContext,
   type HostReviewOutput
 } from "./reviewer.js";
+
+export type ReviewActionResult = HostReviewCallbackOutput;
+export type ReviewActionContext = HostReviewContext;
+
+export interface RepairLimitContext {
+  projectId: string;
+  jobId: string;
+  revision: number;
+  repairRounds: 15;
+  result: ReviewSubmission;
+}
+
+export type UserInputContext = Extract<ReviewTurnOutput, { kind: "USER_INPUT_REQUIRED" }>;
+export type UserInputAnswer = NonNullable<ReviewTurnInput["answer"]>;
+
+export interface HostActionCallbacks {
+  review?(context: ReviewActionContext): Promise<ReviewActionResult>;
+  answerUserInput?(context: UserInputContext): Promise<UserInputAnswer | undefined>;
+  continueAfterRepairLimit?(context: RepairLimitContext): Promise<boolean>;
+}
 
 export interface ExecuteApprovedWorkflowInput {
   projectRoot: string;

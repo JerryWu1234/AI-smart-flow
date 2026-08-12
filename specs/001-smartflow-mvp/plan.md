@@ -5,7 +5,7 @@
 **Feature Branch**: `001-smartflow-mvp`
 **Version**: 4.1.0
 **Date**: 2026-08-11
-**Scope**: Preserve the sandboxed Pi Worker and safe Git Candidate/Publish path while moving deterministic Review mechanics into the Daemon behind the preferred `smartflow_review_turn` composite API.
+**Scope**: Preserve the sandboxed Pi Worker and safe Git Candidate/Publish path while moving deterministic Review mechanics into the Daemon behind the sole public `smartflow_review_turn` continuation API.
 
 ## Summary
 
@@ -35,7 +35,7 @@ SmartFlow 不代理文件操作或 Shell。安全性由整个 Pi Worker 进程�
 
 MCP server 进程环境仍是唯一模型配置入口。每个实例只绑定一个 API endpoint 和模型；API Key 只通过子进程环境传入。Pi child 加载静态 Extension，通过官方 `pi.registerProvider()` 内存注册模型，不生成或读取 `models.json`。
 
-`smartflow_review_turn` 是 execute 后的首选高层 continuation。它公开四态并在 schema-v4 `RunRecord.hostTurn` 中持久化三阶段 checkpoint；旧 10 个 primitive 工具保留，总工具数恰好 11。设计细节见 [adr-daemon-owned-review-turn.md](adr-daemon-owned-review-turn.md) 与 [contracts/review-turn.md](contracts/review-turn.md)。
+`smartflow_execute → smartflow_review_turn*` 是唯一公开 Review orchestration。Review turn 公开四态并在 schema-v4 `RunRecord.hostTurn` 中持久化三阶段 checkpoint；公共 MCP surface 恰好六个工具：execute、review-turn，以及四个独立 Run-management APIs status/resume/cancel/result。后四者不是 Review continuation 或第二条 Review 编排路径；公开 resume 只用于独立 paused-Run recovery，不能代答或绕过 active `hostTurn` ownership。`HostActionLoop` symbol 与 wait/claim/renew/Review submission/Leader decision 的公开 symbols、schemas、handlers、registrations、aliases 均不存在；对应 mechanics 仅为 Daemon internal。设计细节见 [adr-daemon-owned-review-turn.md](adr-daemon-owned-review-turn.md) 与 [contracts/review-turn.md](contracts/review-turn.md)。
 
 ## Technical Context
 
@@ -55,7 +55,7 @@ MCP server 进程环境仍是唯一模型配置入口。每个实例只绑定一
 | State | Project 外 Data Dir 的原子 schema-v4 `state.json`；Run 含 durable `hostTurn`/`autoRepairRounds` |
 | Schema | Zod；运行时类型与协议来自同一 Schema |
 | Snapshot | Run-scoped Git object store + Revision-scoped ordinary workspace/index |
-| Host protocol | Preferred `smartflow_execute → smartflow_review_turn`; four public states; exactly 11 MCP tools |
+| Host protocol | Sole public Review orchestration: `smartflow_execute → smartflow_review_turn*`; four ReviewTurn states; exactly 6 public MCP tools |
 | Concurrency | Per-Run composite-turn queue + Project-wide stateVersion CAS + stable child request IDs |
 | Transport | MCP Host ↔ local Daemon；Daemon ↔ Pi child JSONL RPC |
 | Hash | SHA-256 + Canonical JSON |
@@ -115,9 +115,9 @@ flowchart TD
 | 组件 | 保留/新增职责 | 明确不负责 |
 |---|---|---|
 | Host / User Leader | Task/user approval、稳定 hostTurn identity、Reviewer CREATE/RESUME、向用户展示 typed pause 并提交 answer | 不重建 wait/claim/renew/decision/Publish mechanics；不直接控制 Pi tools |
-| MCP Gateway | 校验并转发 11 个工具；复合 turn 为首选；隐藏非 claimed 内部路径 | 不向 Pi 暴露 MCP；不删除兼容 primitives；不自行保存状态 |
-| HostTurnCoordinator | Per-Run serialization、bounded wait、durable claim intent、claim/renew、Review submission、decision plan、typed pause、deadline/restart recovery | 不创建 Reviewer、不询问用户、不扩大 Repair scope |
-| Daemon runtime | Project CAS、Run/Pi lifecycle、Attempt、取消、repair Revision、Publish progression；Host-turn checkpoint 优先恢复 | 不代理文件/Shell；checkpoint 存在时不并行 legacy recovery |
+| MCP Gateway | 校验并转发六个公开工具；`execute → review-turn*` 是唯一公开 Review 编排；隐藏非 claimed 内部路径 | 不向 Pi 暴露 MCP；wait/claim/renew/review/decision 的公开 symbols、schemas、handlers、registrations、aliases 不存在；不自行保存状态 |
+| HostTurnCoordinator | Per-Run serialization、bounded wait、durable claim intent、Daemon-internal claim/renew、Review submission、decision plan、typed pause、deadline/restart recovery | 不创建 Reviewer、不询问用户、不扩大 Repair scope |
+| Daemon runtime | Project CAS、Run/Pi lifecycle、Attempt、取消、repair Revision、Publish progression；Host-turn checkpoint 优先恢复 | 不代理文件/Shell；checkpoint 存在时不并行 ordinary Run recovery |
 | StateStore / ProjectMutationExecutor | schema-v4 state、stateVersion CAS、request receipt/idempotency、atomic replace | 不从 events/timers/session 推断事实 |
 | Git Workspace Manager | Baseline/Result Snapshot、Workspace 物化、Candidate diff、发布预检 | 不执行 Pi 工具调用 |
 | ExecutionSandboxAdapter | 启动/终止受限进程树，提供 streams 与 containment identity | 不实现 Broker 权限策略 |
@@ -309,15 +309,15 @@ interface RunReviewAutomationState {
 }
 ```
 
-`CLAIMING` is persisted before claim, `AWAITING_REVIEW` before path disclosure, and `AWAITING_USER_INPUT` before asking the user. `autoRepairRounds` counts automatic repair in the current group; `resume_review_decision` resets it. Removed fields remain `brokerSession`, `effectExecutions`, `managedProcesses`, `workerBlock`, and their answers/receipts.
+`CLAIMING` is persisted before claim, `AWAITING_REVIEW` before path disclosure, and `AWAITING_USER_INPUT` before asking the user. `autoRepairRounds` counts automatic repair in the current group. The owning Host submits `resume_review_decision` through `smartflow_review_turn` with the active `turnToken`; HostTurnCoordinator invokes Daemon resume mechanics internally and resets the counter. Removed fields remain `brokerSession`, `effectExecutions`, `managedProcesses`, `workerBlock`, and their answers/receipts.
 
 ### MCP surface
 
-Register exactly eleven public tools: `smartflow_execute`, `smartflow_status`, `smartflow_wait`, `smartflow_review_turn`, `smartflow_claim_action`, `smartflow_renew_action_claim`, `smartflow_submit_review`, `smartflow_submit_leader_decision`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`.
+Register exactly six public tools: `smartflow_execute`, `smartflow_review_turn`, `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`.
 
-The Host Skill uses only execute plus the composite turn at the high level. The ten primitives remain compatible for diagnostics/low-level clients but are not the preferred orchestration API. `smartflow_submit_tool_decision`, Worker block answers, and Host Worker-tool approval branches remain deleted. All non-`REVIEW_REQUIRED` composite outputs reject `worktreePath`.
+The sole public Review orchestration path is `smartflow_execute → smartflow_review_turn*`. `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result` are separate Run-management APIs, not Review continuations or a second Review orchestration path. The `HostActionLoop` symbol and public symbols, schemas, handlers, registrations, and aliases for `smartflow_wait`, `smartflow_claim_action`, `smartflow_renew_action_claim`, `smartflow_submit_review`, and `smartflow_submit_leader_decision` do not exist; those mechanics are Daemon-internal only. All non-`REVIEW_REQUIRED` ReviewTurn outputs reject `worktreePath`.
 
-`resume` only performs a Run action already present in durable `resumeActions`; it does not accept arbitrary Pi tool answers. `USER_INPUT_REQUIRED` exposes legal options and, when required, a typed approval template. `DONE` wraps result only for terminal phases.
+Public `smartflow_resume` performs independent paused-Run recovery using an action already present in durable `resumeActions`. While an active `hostTurn` exists, it cannot submit a `USER_INPUT_REQUIRED` answer or bypass ownership: the owning Host must send that answer through `smartflow_review_turn` with the same `turnToken`, after which HostTurnCoordinator invokes Daemon resume mechanics internally. `DONE` directly wraps canonical `ResultOutput` only for terminal phases; its shape matches the independent `smartflow_result` response without calling that public API.
 
 ### State compatibility
 
@@ -439,9 +439,9 @@ apps/
 | P3 — Daemon integration | 接入 registry/runner/recovery/cancel/state，删除 Worker tool-decision 流 | 重连/崩溃/新 Revision 的 session matrix 全部通过 |
 | P4 — Legacy deletion | 删除 execution-broker、provider-opencode、provider-claude-agent 及依赖/状态/协议残留 | 全仓 `rg` 对遗留运行代码命中为 0 |
 | P5 — Review/Publish regression | 更新 contract/integration/security/crash/e2e tests | Candidate、Reviewer binding、冲突发布和取消恢复保持通过 |
-| P6 — Solution D composite turn | 新增 schema-v4 Host turn、review-turn tool/coordinator、Host migration、deterministic policy 与 two-tool E2E | 四态/路径保护/11 工具、restart/CAS/renew/deadline、15 轮和 terminal-only DONE 全部通过；真实 Pi evidence 独立跟踪 |
+| P6 — Solution D sole public Review turn | 新增 schema-v4 Host turn、review-turn tool/coordinator、Host migration、deterministic policy 与 two-tool E2E；确保 `HostActionLoop` symbol 和五个 public Review mechanics names 的 symbols、schemas、handlers、registrations、aliases 均不存在 | 四态/路径保护/六工具、restart/CAS/renew/deadline、15 轮和 terminal-only DONE 全部通过；真实 Pi evidence 独立跟踪 |
 
-P0→P1→P2 是 Worker 迁移阻塞链；P3 依赖 P0–P2；P4 在 Pi 主线接通后立即执行；P5 收敛 Worker/Publish 回归。P6 在现有 Candidate/Review primitives 上建立首选复合控制面，并以 schema-v4 checkpoint 接管 Review-turn 恢复。不得保留双 Provider feature flag、Broker compatibility adapter，或 Host/Daemon 两套并行机械编排。
+P0→P1→P2 是 Worker 迁移阻塞链；P3 依赖 P0–P2；P4 在 Pi 主线接通后立即执行；P5 收敛 Worker/Publish 回归。P6 在现有 Candidate/Review domain operations 上建立唯一公开 ReviewTurn 控制面，并以 schema-v4 checkpoint 接管 Review-turn 恢复；wait、claim/renew、Review submission、Leader decision、repair 与 Publish progression 仅为 Daemon-internal mechanics。上述公开 mechanics 的 symbols、schemas、handlers、registrations、aliases 与 `HostActionLoop` symbol 均不存在；双 Provider feature flag、Broker compatibility adapter 或 Host/Daemon 两套并行机械编排也不存在。
 
 ## Test Strategy
 
@@ -453,14 +453,14 @@ P0→P1→P2 是 Worker 迁移阻塞链；P3 依赖 P0–P2；P4 在 Pi 主线�
 - Run state 拒绝 Broker/effect/managedProcess 旧字段，接受 PiWorkerAttempt/session Artifact。
 - MCP/API/UI/log serialization 不暴露 workspace、状态或 session 绝对路径。
 - `smartflow_review_turn` 只接受互斥 Review/answer/failure continuations并要求 token；输出只属于四态。
-- MCP schemas/handlers 恰好注册 11 个工具，保留全部十个 primitives。
+- MCP schemas/handlers 恰好注册六个公开工具且名称集合固定；`HostActionLoop` symbol 与 wait/claim/renew/review/decision 的公开 symbols、schemas、handlers、registrations、aliases 数均为 0，对应 mechanics 仅从 Daemon 内部调用。
 
 ### Composite Review turn
 
 - Poll/stale/pause/terminal responses reject `worktreePath`; claim-complete `REVIEW_REQUIRED` includes current path and provenance.
 - First Action requests Reviewer `CREATE`; repair requests bound `RESUME`; Reviewer ID cannot equal Pi session ID.
 - Concurrent turns serialize per Run; an injected CAS mismatch permits at most four total attempts (the initial attempt plus up to three retries), rereading fresh state with stable child request IDs and no duplicate effects.
-- Restart at `CLAIMING`, `AWAITING_REVIEW`, and `AWAITING_USER_INPUT` recovers one checkpoint; fresh-state reread prevents legacy recovery races.
+- Restart at `CLAIMING`, `AWAITING_REVIEW`, and `AWAITING_USER_INPUT` recovers one checkpoint; fresh-state reread prevents ordinary Run recovery races.
 - 30-minute deadline, 60-second renewal, 30-second safety margin, 1-second retry, and three-failure pause are tested with controlled time.
 - `ACCEPT`, `REPAIR`, invalid Review, 15-round pause, counter reset, typed answer, and terminal-only `DONE` each have direct tests.
 
@@ -489,14 +489,14 @@ P0→P1→P2 是 Worker 迁移阻塞链；P3 依赖 P0–P2；P4 在 Pi 主线�
 
 ### End-to-end
 
-- Production composition: Host-level calls are exactly `smartflow_execute → smartflow_review_turn*`; Daemon performs claim/renew/decision/resume primitives internally.
+- Production composition: Host-level Review calls are exactly `smartflow_execute → smartflow_review_turn*`; Daemon performs wait, Action claim/renew, Review submission, Leader decision, repair, and Publish progression through internal operations rather than public MCP handlers.
 - Automatic repair: new Revision/new Pi session, same Reviewer binding, cumulative Candidate, deterministic eventual Publish.
-- Daemon restart during active Review turn restores token/claim/renewal and never starts competing legacy recovery.
+- Daemon restart during active Review turn restores token/claim/renewal and never starts competing ordinary Run recovery.
 - User-input states cover invalid Review, repair limit, unavailable Reviewer, and publish/recovery pauses; only terminal state returns `DONE`.
 - Installed package: Task → real Pi → Candidate → Review → automatic accept → Publish.
 - Publish conflict: overlapping Runs second result is zero-write `0/N`.
 
-The covered production-composition scenario and focused regressions close T204/T205: composite ownership is enforced across compatibility mutations, lost claim responses recover from the durable lease, Reviewer callbacks receive cumulative `changedPaths`, and pauses are self-contained. They do not prove the installed Pi host contract. Real Pi 0.83.0 Extension/RPC evidence (T190/T208) and an authorized, checked-in real-model two-tool transcript (T192/T209) are separate open gates.
+The covered production-composition scenario and focused regressions close T204/T205: ReviewTurn ownership is enforced across independent Run-management mutations, lost internal claim responses recover from the durable lease, Reviewer callbacks receive cumulative `changedPaths`, and pauses are self-contained. They do not prove the installed Pi host contract. Real Pi 0.83.0 Extension/RPC evidence (T190/T208) and an authorized, checked-in real-model two-tool transcript (T192/T209) are separate open gates.
 
 删除代码时同步删除其专属测试：Broker effect/policy/receipt、OpenCode capability/live-provider、Claude placeholder、Worker tool-decision tests。只为新的行为契约写测试；不为 prompt、Docker 或常量数据单独写单元测试。
 
@@ -508,16 +508,16 @@ The covered production-composition scenario and focused regressions close T204/T
 2. Pi 使用官方 coding tools；SmartFlow 文件/Shell Broker、effects 和 tool-decision 代码为零。
 3. Pi 及全部子进程只能访问当前 isolated workspace 的项目数据；原始项目和 SmartFlow 状态不可访问。
 4. 任意 workspace-local Shell 与网络可用，且无逐命令授权流程。
-5. Candidate、Review、自动 decision 和 Publish 行为通过回归契约；Host 不重建机械 primitive loop。
+5. Candidate、Review、自动 decision 和 Publish 行为通过回归契约；Host 仅通过 ReviewTurn 编排 Review，不重建 Daemon-internal mechanics。
 6. Session matrix、取消和崩溃恢复测试通过。
 7. Timeout 后完整进程树退出、Attempt 为 `TIMED_OUT`，且允许恢复前无新 Candidate/Attempt。
 8. MCP/API/UI/log/Finalize Artifact 的内部绝对路径泄露数为 0；worktree 仅在 claimed `REVIEW_REQUIRED` 暴露。
 9. 发布包、CLI doctor、scripts、workspace manifests 和测试名称不再包含 OpenCode/Claude/Broker 主线。
 10. MCP 配置是唯一模型配置源；四种标准 API 可各自内存注册恰好一个模型，默认 1M/384K/high 生效，且 `models.json` 读写数和 API Key 泄露数均为 0。
 11. Composite output 恰好四态，`DONE` terminal-only，stale continuation 无副作用且无 worktree path。
-12. Public MCP surface 恰好 11 tools；Host Skill 高层调用只包含 execute/review-turn，十个 primitive 保持兼容。
+12. Public MCP surface 恰好六个工具；唯一公开 Review 编排为 `smartflow_execute → smartflow_review_turn*`；status/resume/cancel/result 是独立 Run management APIs，不是 Review continuation 或第二条 Review 编排路径；五个 named handlers 的公开 symbols、schemas、handlers、registrations、aliases 与 `HostActionLoop` symbol 均不存在，对应 mechanics 仅为 Daemon internal。
 13. Host-turn checkpoint 的三阶段、ownership、per-Run queue、Project CAS、stable child IDs、deadline/renew/retry 和 restart sole-authority tests 全部通过。
-14. 自动 decision 覆盖 100% accept、finding repair、invalid Review、15-round limit 和 `resume_review_decision` counter reset。
+14. 自动 decision 覆盖 100% accept、finding repair、invalid Review 与 15-round limit；owning Host 携带 active `turnToken` 通过 `smartflow_review_turn` 提交 `resume_review_decision` 后，HostTurnCoordinator 内部调用 Daemon resume mechanics 并 reset counter。
 15. 已实现的 production-composition gates 不得被用来关闭真实 installed Pi 0.83.0 compatibility 或授权 real-model evidence；T190/T208 与 T192/T209 在证据入库前保持开放。
 
 ## Upstream References

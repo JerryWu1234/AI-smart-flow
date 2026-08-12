@@ -4,11 +4,11 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
-  JobRunner,
   LocalIpcClient,
   LocalIpcServer,
   SMARTFLOW_IPC_PROTOCOL
 } from "@smartflow/daemon";
+import { JobRunner } from "../helpers/job-runner.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 
 const activeHarnesses: RuntimeHarness[] = [];

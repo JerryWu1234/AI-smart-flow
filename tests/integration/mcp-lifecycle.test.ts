@@ -9,15 +9,13 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { LocalIpcClient, LocalIpcServer, ProjectRuntime } from "@smartflow/daemon";
 import {
-  HostActionLoop,
   PlanningSession,
   approveTasksSource,
   executeApprovedTasks,
-  type HostGateway,
-  type ReviewActionResult
+  type HostGateway
 } from "@smartflow/host-skill";
 import type {
-  HostAction,
+  ReviewTurnOutput,
   RunPhase
 } from "@smartflow/protocol";
 import { createTasksSource } from "../../packages/task-manifest/src/test-fixture.js";
@@ -37,54 +35,13 @@ class LifecycleGateway implements HostGateway {
   public phase: RunPhase = "PREPARING";
   public revision = 1;
   public stateVersion = 0;
-  public pendingAction: HostAction | undefined;
   public executeCalls = 0;
   private readonly receipts = new Map<string, unknown>();
-  private claimedActionId: string | undefined;
 
   public async call(toolName: string, input: unknown): Promise<unknown> {
     const request = input as Record<string, unknown>;
     if (toolName !== "smartflow_execute") this.assertRun(request);
     if (toolName === "smartflow_execute") return this.execute(request);
-    if (toolName === "smartflow_status") return this.summary();
-    if (toolName === "smartflow_wait") {
-      return { changed: true, stateVersion: this.stateVersion, summary: this.summary() };
-    }
-    if (toolName === "smartflow_claim_action") return this.claim(request);
-    if (toolName === "smartflow_submit_review") {
-      this.assertMutation(request);
-      if (typeof request.hostUnavailableReason === "string") {
-        this.phase = "PAUSED";
-        this.stateVersion += 1;
-        return this.mutationResult();
-      }
-      if (
-        typeof request.reviewAttemptId !== "string" ||
-        typeof request.taskSourceHash !== "string" ||
-        typeof request.candidateHash !== "string" ||
-        typeof request.reviewerSessionId !== "string" ||
-        typeof request.result !== "object" ||
-        request.result === null
-      ) {
-        throw new LifecycleError("REVIEW_RESULT_REQUIRED", "Host must submit the current Review result");
-      }
-      this.phase = "LEADER_DECISION";
-      this.pendingAction = undefined;
-      this.stateVersion += 1;
-      return {
-        ...this.mutationResult(),
-        reviewHash: "d".repeat(64),
-        reviewAttemptId: request.reviewAttemptId,
-        reviewerSessionId: request.reviewerSessionId,
-        result: request.result
-      };
-    }
-    if (toolName === "smartflow_submit_leader_decision") {
-      this.assertMutation(request);
-      this.phase = request.decision === "accept" ? "READY_TO_PUBLISH" : "PAUSED";
-      this.stateVersion += 1;
-      return this.mutationResult();
-    }
     if (toolName === "smartflow_resume") {
       this.assertMutation(request);
       this.phase = "RUNNING";
@@ -128,30 +85,6 @@ class LifecycleGateway implements HostGateway {
     return response;
   }
 
-  private claim(request: Record<string, unknown>): unknown {
-    this.assertMutation(request);
-    const action = this.pendingAction;
-    if (action === undefined || action.actionId !== request.actionId) {
-      throw new LifecycleError("ACTION_STALE", "Action is no longer active");
-    }
-    if (this.claimedActionId === action.actionId) {
-      return {
-        claimId: `claim:${action.actionId}`,
-        action: { ...action, worktreePath: "/tmp/worktree" },
-        stateVersion: this.stateVersion,
-        expiresAt: "2026-07-20T12:00:00+08:00"
-      };
-    }
-    this.claimedActionId = action.actionId;
-    this.stateVersion += 1;
-    return {
-      claimId: `claim:${action.actionId}`,
-      action: { ...action, worktreePath: "/tmp/worktree" },
-      stateVersion: this.stateVersion,
-      expiresAt: "2026-07-20T12:00:00+08:00"
-    };
-  }
-
   private assertRun(request: Record<string, unknown>): void {
     if (request.projectId !== "project-1" || request.jobId !== "job-1") {
       throw new LifecycleError("RUN_SCOPE_MISMATCH", "Request belongs to another run");
@@ -177,18 +110,6 @@ class LifecycleGateway implements HostGateway {
       phase: this.phase
     };
   }
-
-  private summary(): object {
-    return {
-      projectId: "project-1",
-      jobId: "job-1",
-      phase: this.phase,
-      revision: this.revision,
-      stateVersion: this.stateVersion,
-      progress: { completed: 0, total: 1 },
-      ...(this.pendingAction === undefined ? {} : { pendingAction: this.pendingAction })
-    };
-  }
 }
 
 const activeHarnesses: RuntimeHarness[] = [];
@@ -203,7 +124,7 @@ afterEach(async () => {
 });
 
 describe("Host planning, approval, and MCP lifecycle", () => {
-  it("blocks unapproved drift, then handles review, resume, cancel, and result actions", async () => {
+  it("blocks unapproved drift, then handles resume, cancel, and result actions", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const tasksPath = resolve(harness.projectDir, "tasks.md");
@@ -246,74 +167,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       resumeAction: "approve_new_manifest_revision"
     });
     expect(gateway.phase).toBe("RUNNING");
-
-    gateway.phase = "REVIEW_PENDING";
-    gateway.pendingAction = {
-      type: "REVIEW",
-      actionId: "action-review",
-      revision: 1,
-      taskSourceHash: approval.sourceHash,
-      candidateHash: "b".repeat(64),
-      reviewAttemptId: "review-attempt-1",
-      changedPaths: ["sum.js"],
-      reviewerSession: { mode: "CREATE" },
-      piSessionId: "pi-session-1",
-      expiresAt: "2026-07-20T12:00:00+08:00"
-    };
-    const reviewLoop = new HostActionLoop(gateway, {
-      review(context): Promise<ReviewActionResult> {
-        expect(context.reviewerSession).toEqual({ mode: "CREATE" });
-        expect(context.piSessionId).toBe("pi-session-1");
-        return Promise.resolve({
-          reviewerSessionId: "reviewer-session-1",
-          result: {
-            verdict: "APPROVE",
-            completionPercentage: 100,
-            convergeFindings: [],
-            adversarialFindings: [],
-            pathCoverage: { "sum.js": "FULL" },
-            residualRisks: []
-          }
-        });
-      }
-    });
-    await reviewLoop.pollOnce({
-      projectId: "project-1",
-      jobId: "job-1",
-      expectedRevision: 1,
-      expectedStateVersion: gateway.stateVersion,
-      hostTurnId: "turn-2",
-      requestId: "action-request-2"
-    });
-    expect(gateway.phase).toBe("LEADER_DECISION");
-
-    gateway.phase = "REVIEW_PENDING";
-    gateway.pendingAction = {
-      type: "REVIEW",
-      actionId: "action-review-unavailable",
-      revision: 1,
-      taskSourceHash: approval.sourceHash,
-      candidateHash: "c".repeat(64),
-      reviewAttemptId: "review-attempt-2",
-      changedPaths: ["sum.js"],
-      reviewerSession: {
-        mode: "RESUME",
-        reviewerSessionId: "reviewer-session-1"
-      },
-      piSessionId: "pi-session-1",
-      expiresAt: "2026-07-20T12:00:00+08:00"
-    };
-    const unavailableLoop = new HostActionLoop(gateway, {});
-    await unavailableLoop.pollOnce({
-      projectId: "project-1",
-      jobId: "job-1",
-      expectedRevision: 1,
-      expectedStateVersion: gateway.stateVersion,
-      hostTurnId: "turn-3",
-      requestId: "action-request-3"
-    });
-    expect(gateway.phase).toBe("PAUSED");
-    expect(gateway.pendingAction.actionId).toBe("action-review-unavailable");
 
     await expect(
       gateway.call("smartflow_cancel", {
@@ -394,13 +247,17 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       };
       expect(execute).toMatchObject({ revision: 1, stateVersion: 1, phase: "PREPARING" });
       expect(await firstClient.call("smartflow_execute", request)).toEqual(execute);
-      const waited = await firstClient.call("smartflow_wait", {
-        projectId: execute.projectId,
-        jobId: execute.jobId,
-        afterStateVersion: execute.stateVersion,
-        timeoutMs: 2_000
-      });
-      expect(waited).toMatchObject({ changed: true, summary: { phase: "PAUSED" } });
+      const deadline = Date.now() + 2_000;
+      let status: unknown;
+      do {
+        status = await firstClient.call("smartflow_status", {
+          projectId: execute.projectId,
+          jobId: execute.jobId
+        });
+        if ((status as { phase?: string }).phase === "PAUSED") break;
+        await new Promise<void>((settle) => setTimeout(settle, 20));
+      } while (Date.now() < deadline);
+      expect(status).toMatchObject({ phase: "PAUSED" });
       expect(pipelineCalls).toBe(1);
       firstClient.close();
       firstClient = undefined;
@@ -741,7 +598,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     })).toMatchObject({ phase: "CANCELING" });
   });
 
-  it("blocks a direct claim inside the mutation lock when Candidate evidence is missing", async () => {
+  it("blocks a composite Review turn when Candidate evidence is missing", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const dataDirectory = resolve(harness.dataDir, "claim-integrity");
@@ -755,9 +612,8 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     });
     const state = await store.readState();
     const run = state.runs["job-1"];
-    const actionId = run?.pendingAction?.actionId;
-    if (run === undefined || typeof actionId !== "string") {
-      throw new Error("claim integrity fixture is incomplete");
+    if (run === undefined) {
+      throw new Error("Review integrity fixture is incomplete");
     }
     const corrupted = { ...run };
     delete corrupted.candidate;
@@ -771,16 +627,13 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     const runtime = new ProjectRuntime({ dataDirectory });
 
     await expect(runtime.handle({
-      id: "claim-with-missing-candidate",
-      method: "smartflow_claim_action",
+      id: "review-turn-with-missing-candidate",
+      method: "smartflow_review_turn",
       payload: {
-        requestId: "claim-with-missing-candidate",
+        requestId: "review-turn-with-missing-candidate",
         projectId,
         jobId: "job-1",
-        actionId,
-        hostTurnId: "host-turn-integrity",
-        expectedRevision: 1,
-        expectedStateVersion: state.stateVersion + 1
+        hostTurnId: "host-turn-integrity"
       }
     })).rejects.toMatchObject({
       code: "ARTIFACT_INTEGRITY_BLOCKED",
@@ -789,120 +642,121 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     expect(await readFile(store.statePath)).toEqual(before);
   });
 
-  it("accepts the current Host Review result without running a Daemon reviewer", async () => {
+  it("accepts the current Host Review through the composite turn without running a Daemon reviewer", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
-    const dataDirectory = resolve(harness.dataDir, "forged-review");
+    const dataDirectory = resolve(harness.dataDir, "composite-review");
     const projectId = `project-${createHash("sha256")
       .update(harness.projectDir, "utf8")
       .digest("hex")
       .slice(0, 40)}`;
-    const store = await createLifecycleStore(harness, "REVIEWING", {}, {
+    const store = await createLifecycleStore(harness, "REVIEW_PENDING", {}, {
       dataDirectory: resolve(dataDirectory, "projects", projectId),
       projectId
     });
-    const state = await store.readState();
-    const run = state.runs["job-1"];
-    const action = run?.pendingAction as
-      | (Extract<HostAction, { type: "REVIEW" }> & { claimId?: string })
-      | undefined;
-    if (
-      run === undefined ||
-      action?.type !== "REVIEW" ||
-      typeof action.claimId !== "string"
-    ) {
-      throw new Error("Host Review fixture is incomplete");
+    const runtime = new ProjectRuntime({
+      dataDirectory,
+      publish: (): Promise<void> => Promise.resolve()
+    });
+    const requested = await runtime.handle({
+      id: "current-host-review-request",
+      method: "smartflow_review_turn",
+      payload: {
+        requestId: "current-host-review-request",
+        projectId,
+        jobId: "job-1",
+        hostTurnId: "current-host-reviewer"
+      }
+    }) as ReviewTurnOutput;
+    if (requested.kind !== "REVIEW_REQUIRED") {
+      throw new Error("Host Review was not requested");
     }
-    const reviewerSessionId = action.reviewerSession.mode === "RESUME"
-      ? action.reviewerSession.reviewerSessionId
+    const reviewerSessionId = requested.reviewerSession.mode === "RESUME"
+      ? requested.reviewerSession.reviewerSessionId
       : "current-host-reviewer-session";
-    const result = {
-      completionPercentage: 100,
-      tasks: [{ id: "T001", completionPercentage: 100 }]
-    };
-    const runtime = new ProjectRuntime({ dataDirectory });
+
     await expect(runtime.handle({
       id: "incomplete-task-coverage",
-      method: "smartflow_submit_review",
+      method: "smartflow_review_turn",
       payload: {
         requestId: "incomplete-task-coverage",
         projectId,
         jobId: "job-1",
-        expectedRevision: 1,
-        expectedStateVersion: state.stateVersion,
-        claimId: action.claimId,
-        reviewAttemptId: action.reviewAttemptId,
-        taskSourceHash: action.taskSourceHash,
-        candidateHash: action.candidateHash,
-        reviewerSessionId,
-        result: {
-          completionPercentage: 100,
-          tasks: [{ id: "T999", completionPercentage: 100 }]
+        hostTurnId: "current-host-reviewer",
+        turnToken: requested.turnToken,
+        review: {
+          reviewerSessionId,
+          result: {
+            completionPercentage: 100,
+            tasks: [{ id: "T999", completionPercentage: 100 }]
+          }
         }
       }
     })).rejects.toThrow(/REVIEW_TASK_COVERAGE_INCOMPLETE/u);
+
     const response = await runtime.handle({
       id: "current-host-review-submission",
-      method: "smartflow_submit_review",
+      method: "smartflow_review_turn",
       payload: {
         requestId: "current-host-review-submission",
         projectId,
         jobId: "job-1",
-        expectedRevision: 1,
-        expectedStateVersion: state.stateVersion,
-        claimId: action.claimId,
-        reviewAttemptId: action.reviewAttemptId,
-        taskSourceHash: action.taskSourceHash,
-        candidateHash: action.candidateHash,
-        reviewerSessionId,
-        result
+        hostTurnId: "current-host-reviewer",
+        turnToken: requested.turnToken,
+        review: {
+          reviewerSessionId,
+          result: {
+            completionPercentage: 100,
+            tasks: [{ id: "T001", completionPercentage: 100 }]
+          }
+        }
       }
-    });
+    }) as ReviewTurnOutput;
     expect(response).toMatchObject({
-      phase: "LEADER_DECISION",
-      reviewAttemptId: action.reviewAttemptId,
-      reviewerSessionId,
-      result: {
-        verdict: "APPROVE",
-        completionPercentage: 100,
-        convergeFindings: [],
-        adversarialFindings: [],
-        pathCoverage: Object.fromEntries(action.changedPaths.map((path) => [path, "FULL"])),
-        residualRisks: []
-      }
+      kind: "NOT_READY",
+      phase: "READY_TO_PUBLISH"
     });
+
     const reviewed = (await store.readState()).runs["job-1"];
     expect(reviewed).toMatchObject({
-      phase: "LEADER_DECISION",
+      phase: "READY_TO_PUBLISH",
       reviewHistory: [{
-        reviewAttemptId: action.reviewAttemptId,
+        reviewAttemptId: requested.reviewAttemptId,
         reviewerSessionId
       }]
     });
     expect(reviewed?.review).toBeDefined();
+    expect(reviewed?.leaderDecision).toBeDefined();
     expect(reviewed?.pendingAction).toBeUndefined();
+    expect(reviewed?.hostTurn).toBeUndefined();
+    if (reviewed?.review === undefined) throw new Error("Review artifact was not persisted");
+    const durableReview = JSON.parse(
+      new TextDecoder().decode(await store.readArtifact(reviewed.review))
+    ) as { gate: { result: { pathCoverage: Record<string, string> } } };
+    expect(durableReview.gate.result.pathCoverage).toEqual(
+      Object.fromEntries(requested.changedPaths.map((path) => [path, "FULL"]))
+    );
   });
 
-  it("pauses each Review acceptance boundary on approved source drift and rejects the old action epoch", async () => {
-    for (const phase of ["REVIEW_PENDING", "REVIEWING", "LEADER_DECISION"] as const) {
+  it("pauses the composite Review boundary on approved source drift and rejects the old turn", async () => {
       const harness = await createRuntimeHarness();
       activeHarnesses.push(harness);
       const tasksSource = createTasksSource();
       const tasksPath = resolve(harness.projectDir, "tasks.md");
       await writeFile(tasksPath, tasksSource, "utf8");
-      const dataDirectory = resolve(harness.dataDir, `review-source-drift-${phase.toLowerCase()}`);
+      const dataDirectory = resolve(harness.dataDir, "review-source-drift");
       const projectId = `project-${createHash("sha256")
         .update(harness.projectDir, "utf8")
         .digest("hex")
         .slice(0, 40)}`;
-      const store = await createLifecycleStore(harness, phase, {}, {
+      const store = await createLifecycleStore(harness, "REVIEW_PENDING", {}, {
         dataDirectory: resolve(dataDirectory, "projects", projectId),
         projectId
       });
       const initial = await store.readState();
       const initialRun = initial.runs["job-1"];
       if (initialRun === undefined) throw new Error("review source drift fixture is incomplete");
-      const prepared = await store.writeState({
+      await store.writeState({
         ...initial,
         stateVersion: initial.stateVersion + 1,
         runs: {
@@ -917,72 +771,13 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         },
         updatedAt: new Date().toISOString()
       });
-      const run = prepared.runs["job-1"];
-      if (run === undefined) throw new Error("prepared Review Run is missing");
-      const requestId = `review-source-drift-${phase.toLowerCase()}`;
-      let method: string;
-      let payload: Record<string, unknown>;
-      if (phase === "REVIEW_PENDING") {
-        method = "smartflow_claim_action";
-        payload = {
-          requestId,
-          projectId,
-          jobId: "job-1",
-          actionId: run.pendingAction?.actionId,
-          hostTurnId: "host-turn-source-drift",
-          expectedRevision: 1,
-          expectedStateVersion: prepared.stateVersion
-        };
-      } else if (phase === "REVIEWING") {
-        const action = run.pendingAction as
-          | (Extract<HostAction, { type: "REVIEW" }> & { claimId?: string })
-          | undefined;
-        if (action?.type !== "REVIEW" || typeof action.claimId !== "string") {
-          throw new Error("Reviewing source drift action is missing");
-        }
-        method = "smartflow_submit_review";
-        payload = {
-          requestId,
-          projectId,
-          jobId: "job-1",
-          claimId: action.claimId,
-          reviewAttemptId: action.reviewAttemptId,
-          taskSourceHash: action.taskSourceHash,
-          candidateHash: action.candidateHash,
-          reviewerSessionId: action.reviewerSession.mode === "RESUME"
-            ? action.reviewerSession.reviewerSessionId
-            : "source-drift-reviewer-session",
-          result: {
-            verdict: "APPROVE",
-            completionPercentage: 100,
-            convergeFindings: [],
-            adversarialFindings: [],
-            pathCoverage: Object.fromEntries(
-              action.changedPaths.map((path) => [path, "FULL"])
-            ),
-            residualRisks: []
-          },
-          expectedRevision: 1,
-          expectedStateVersion: prepared.stateVersion
-        };
-      } else {
-        const reviewRef = run.review;
-        if (reviewRef === undefined) throw new Error("Leader Review artifact is missing");
-        const review = JSON.parse(new TextDecoder().decode(await store.readArtifact(reviewRef))) as {
-          reviewHash: string;
-        };
-        method = "smartflow_submit_leader_decision";
-        payload = {
-          requestId,
-          projectId,
-          jobId: "job-1",
-          reviewHash: review.reviewHash,
-          decision: "accept",
-          reason: "source drift boundary test",
-          expectedRevision: 1,
-          expectedStateVersion: prepared.stateVersion
-        };
-      }
+      const requestId = "review-source-drift";
+      const payload = {
+        requestId,
+        projectId,
+        jobId: "job-1",
+        hostTurnId: "host-turn-source-drift"
+      };
 
       let pipelineCalls = 0;
       let publishCalls = 0;
@@ -998,7 +793,11 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         }
       });
       await writeFile(tasksPath, `${tasksSource}\nsource drift`, "utf8");
-      await expect(runtime.handle({ id: requestId, method, payload }))
+      await expect(runtime.handle({
+        id: requestId,
+        method: "smartflow_review_turn",
+        payload
+      }))
         .rejects.toMatchObject({ code: "APPROVED_SOURCE_DRIFT" });
       const paused = await store.readState();
       const pausedRun = paused.runs["job-1"];
@@ -1010,40 +809,40 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         }
       });
       expect(pausedRun?.leaderDecision).toBeUndefined();
-      if (phase !== "LEADER_DECISION") {
-        expect(pausedRun?.pendingAction?.claimId).toBeUndefined();
-      }
+      expect(pausedRun?.pendingAction?.claimId).toBeUndefined();
       expect(pipelineCalls).toBe(0);
       expect(publishCalls).toBe(0);
 
-      await writeFile(tasksPath, tasksSource, "utf8");
-      const resumed = await runtime.handle({
-        id: `restore-source-${phase.toLowerCase()}`,
-        method: "smartflow_resume",
+      const prompt = await runtime.handle({
+        id: "review-source-drift-prompt",
+        method: "smartflow_review_turn",
         payload: {
-          requestId: `restore-source-${phase.toLowerCase()}`,
-          projectId,
-          jobId: "job-1",
-          resumeAction: "restore_approved_tasks",
-          expectedRevision: 1,
-          expectedStateVersion: paused.stateVersion
+          ...payload,
+          requestId: "review-source-drift-prompt"
         }
+      }) as ReviewTurnOutput;
+      expect(prompt).toMatchObject({
+        kind: "USER_INPUT_REQUIRED",
+        pause: { code: "APPROVED_SOURCE_DRIFT" }
       });
-      expect(resumed).toMatchObject({
-        phase: phase === "LEADER_DECISION" ? "LEADER_DECISION" : "REVIEW_PENDING"
-      });
-      const latePayload = phase === "LEADER_DECISION"
-        ? payload
-        : {
-            ...payload,
-            requestId: `${requestId}-late`,
-            expectedStateVersion: paused.stateVersion + 1
-          };
-      await expect(runtime.handle({ id: `${requestId}-late`, method, payload: latePayload }))
-        .rejects.toBeDefined();
+      if (prompt.kind !== "USER_INPUT_REQUIRED") {
+        throw new Error("source drift did not require user input");
+      }
+
+      await writeFile(tasksPath, tasksSource, "utf8");
+      const requested = await runtime.handle({
+        id: "restore-review-source",
+        method: "smartflow_review_turn",
+        payload: {
+          ...payload,
+          requestId: "restore-review-source",
+          turnToken: prompt.turnToken,
+          answer: "restore_approved_tasks"
+        }
+      }) as ReviewTurnOutput;
+      expect(requested).toMatchObject({ kind: "REVIEW_REQUIRED", revision: 1 });
       expect(pipelineCalls).toBe(0);
       expect(publishCalls).toBe(0);
-    }
   });
 
   it("blocks retry_publish before state mutation or publish scheduling when Candidate evidence is missing", async () => {
@@ -1156,7 +955,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     expect(await readFile(store.statePath)).toEqual(before);
   });
 
-  it("blocks primitive resume and claim while a composite Host turn owns the run", async () => {
+  it("blocks resume and cancel while a composite Host turn owns the run", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const dataDirectory = resolve(harness.dataDir, "composite-host-owner");
@@ -1170,12 +969,8 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     });
     const initial = await store.readState();
     const initialRun = initial.runs["job-1"];
-    if (initialRun?.pendingAction?.type !== "REVIEW") {
-      throw new Error("composite owner fixture is missing its Review action");
-    }
-    const actionId = initialRun.pendingAction.actionId;
-    if (typeof actionId !== "string") {
-      throw new Error("composite owner fixture has an invalid Review action id");
+    if (initialRun === undefined) {
+      throw new Error("composite owner fixture is missing its Review run");
     }
     const startedAt = new Date().toISOString();
     await store.writeState({
@@ -1233,47 +1028,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       }
     })).rejects.toMatchObject({ code: "HOST_TURN_ACTIVE" });
     expect(await readFile(store.statePath)).toEqual(pausedBytes);
-
-    const claimableAt = new Date().toISOString();
-    await store.writeState({
-      ...paused,
-      stateVersion: paused.stateVersion + 1,
-      runs: {
-        ...paused.runs,
-        "job-1": {
-          ...initialRun,
-          phase: "REVIEW_PENDING",
-          pause: undefined,
-          hostTurn: {
-            stage: "CLAIMING",
-            turnToken: "turn-owner-claim",
-            hostTurnId: "host-owner",
-            revision: 1,
-            actionId,
-            startedAt: claimableAt,
-            deadlineAt: new Date(Date.now() + 30 * 60_000).toISOString()
-          }
-        }
-      },
-      updatedAt: claimableAt
-    });
-    const claimable = await store.readState();
-    const claimableBytes = await readFile(store.statePath);
-
-    await expect(runtime.handle({
-      id: "primitive-claim-owner-bypass",
-      method: "smartflow_claim_action",
-      payload: {
-        requestId: "primitive-claim-owner-bypass",
-        projectId,
-        jobId: "job-1",
-        expectedRevision: 1,
-        expectedStateVersion: claimable.stateVersion,
-        actionId,
-        hostTurnId: "host-attacker"
-      }
-    })).rejects.toMatchObject({ code: "HOST_TURN_ACTIVE" });
-    expect(await readFile(store.statePath)).toEqual(claimableBytes);
   });
 
   it("keeps informational and illegal pause actions byte-identical", async () => {

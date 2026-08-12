@@ -1,15 +1,15 @@
 # SmartFlow Current Design Index
 
-> 文件名为历史兼容名称；本文描述 2026-08-11 起的 SmartFlow 4.1 方案 D 主线。SmartFlow 运行时不得依赖本文或 Spec Kit。
+> 文件名沿用历史名称；本文描述 2026-08-11 起的 SmartFlow 方案 D 主线。SmartFlow 运行时不得依赖本文或 Spec Kit。
 
 | 项目 | 当前决定 |
 |---|---|
 | 产品范围 | 本地后台 Pi Worker + 独立 Reviewer + Daemon 机械编排 + 安全 Publish |
 | 唯一用户 Leader | 当前用户会话中的 Host 强模型；独占用户交互与 Reviewer 执行 |
-| 机械编排 | Daemon 确定性 wait/claim/renew/accept/repair/pause/Publish，不创建 Reviewer |
-| 首选 Host API | `smartflow_execute → smartflow_review_turn` |
+| 机械编排 | Daemon 内部执行 wait/claim/renew、Review submission、Leader decision、repair 与 Publish progression，不创建 Reviewer |
+| 唯一公开 Review 编排路径 | `smartflow_execute → smartflow_review_turn*` |
 | Review turn 四态 | `NOT_READY | REVIEW_REQUIRED | USER_INPUT_REQUIRED | DONE` |
-| MCP surface | 恰好 11 个工具；复合 turn 首选，旧 10 primitive 兼容保留 |
+| MCP surface | 恰好 6 个工具；2 个 Review 编排工具 + 4 个独立 Run 管理 API |
 | 任务输入 | 纯 Markdown `tasks.md`，按 Revision 冻结 |
 | Run 并发键 | 任务文件规范化绝对路径；同路径一个 Active Run |
 | Workspace | Run-scoped Git objects + Revision-scoped isolated directory |
@@ -19,7 +19,7 @@
 | 安全边界 | Pi 进程树只能访问当前 isolated workspace 的项目数据；Shell/网络允许 |
 | Review | Host 首轮 CREATE、后续 RESUME 同一 Reviewer；Daemon claim 后才暴露 worktree |
 | 状态恢复 | schema-v4 durable Host turn + per-Run serialization + Project-wide CAS |
-| 自动修复 | 每组最多 15 轮；用户通过 `resume_review_decision` 授予下一组 |
+| 自动修复 | 每组最多 15 轮；用户通过 `smartflow_review_turn` 的结构化 answer 授予下一组 |
 | 自动写回 | 仅 100% 有效 Review 后；项目级串行 + conflict-checked batch adapter |
 | 运行时 Spec Kit 依赖 | 无 |
 
@@ -31,7 +31,7 @@
 | [Feature Specification](specs/001-smartflow-mvp/spec.md) | 用户场景、FR-042–FR-051 与 SC-016–SC-020 |
 | [Implementation Plan](specs/001-smartflow-mvp/plan.md) | Pi 架构、复合 turn、状态、恢复与测试计划 |
 | [Daemon Review Turn ADR](specs/001-smartflow-mvp/adr-daemon-owned-review-turn.md) | 方案 D 决策与取舍 |
-| [Composite Review Turn Contract](specs/001-smartflow-mvp/contracts/review-turn.md) | 四态、checkpoint、CAS、deadline、11 工具 |
+| [Composite Review Turn Contract](specs/001-smartflow-mvp/contracts/review-turn.md) | 四态、checkpoint、CAS、deadline、六工具边界 |
 | [Pi Worker Contract](specs/001-smartflow-mvp/contracts/pi-worker.md) | SDK、官方工具、进程隔离、模型与 session 边界 |
 | [Git Workspace Contract](specs/001-smartflow-mvp/contracts/git-workspace.md) | Git Snapshot、Candidate 与发布预检 |
 | [Run Concurrency Contract](specs/001-smartflow-mvp/contracts/run-concurrency.md) | per-Run queue、Project CAS、Host/Pi session 与恢复 |
@@ -68,12 +68,19 @@ Host freezes tasks.md
    └─ DONE → terminal canonical result
 ```
 
+唯一公开 Review 编排路径是 `smartflow_execute → smartflow_review_turn*`。公开 MCP surface 恰好六个工具：
+
+- `smartflow_execute` 与 `smartflow_review_turn` 构成唯一 Review 编排 API；
+- `smartflow_status`、`smartflow_resume`、`smartflow_cancel`、`smartflow_result` 分别是独立的 Run inspection、paused-Run recovery、cancellation、result management API，不是 Review continuation 或第二条 Review 编排路径；active `hostTurn` 的 `USER_INPUT_REQUIRED` answer 必须由 owning Host 携带相同 `turnToken` 通过 `smartflow_review_turn` 提交，公开 `smartflow_resume` 不能代答或绕过 ownership。
+
+Wait、Review claim/renew、Review submission、Leader decision 以及 repair/publish progression 仅为 Daemon 内部 mechanics。`HostActionLoop` symbol 与 `smartflow_wait`、`smartflow_claim_action`、`smartflow_renew_action_claim`、`smartflow_submit_review`、`smartflow_submit_leader_decision` 的公开 symbols、schemas、handlers、registrations、aliases 均不存在。
+
 `NOT_READY`、stale continuation、用户暂停和终态不暴露 worktree path；只有已 durable claim 的 `REVIEW_REQUIRED` 可以向 owning Host 暴露。
 
 ## Host, Daemon, Reviewer, and Worker Boundary
 
-- **Host/Leader**：批准 Task 意图；持有 SmartFlow MCP；创建/恢复 Reviewer；与用户交互。
-- **Daemon**：Run 状态机、Pi 生命周期、Review claim/renew、确定性 Review decision、repair budget、恢复和 Publish。它不创建 Reviewer、不解释开放式用户意图。
+- **Host/Leader**：批准 Task 意图；持有 SmartFlow MCP；创建/恢复 Reviewer；与用户交互；仅通过 `smartflow_review_turn` 返回 Review 或用户答案。
+- **Daemon**：Run 状态机、Pi 生命周期、wait、Review claim/renew 与 submission、确定性 Leader decision、repair budget、普通 Run 恢复和 Publish progression。它不创建 Reviewer、不解释开放式用户意图。
 - **Reviewer**：独立于 Host 与 Pi，重读同步 Task 和最新完整结果，逐 Task 评分并覆盖 cumulative changed paths。
 - **Pi Worker**：只实现当前 Revision；不接 SmartFlow MCP，不等待用户，不参与 Review。
 
@@ -91,7 +98,7 @@ CLAIMING → AWAITING_REVIEW
 
 每个 checkpoint 绑定 `hostTurnId + turnToken + revision`。同一 Run 的 composite turn 串行；每次 mutation 走 Project-wide `stateVersion` CAS，稳定 child request ID 使重试幂等。Review deadline 为 30 分钟；每 60 秒或 lease 到期前 30 秒续租，1 秒失败重试，连续三次失败 durable pause；每个 CAS operation 总计最多尝试四次（含首次，最多三次重试）。
 
-Daemon 重启时先由 Host-turn coordinator 恢复 durable checkpoint，再重读 fresh state。只要 `hostTurn` 存在，legacy pipeline recovery 不得并行推进该 Run。
+Daemon 重启时先由 Host-turn coordinator 恢复 durable checkpoint，再重读 fresh state。只要 `hostTurn` 存在，ordinary Run recovery 不得并行推进该 Run。
 
 ## Automatic Review Decision
 
@@ -102,7 +109,7 @@ Daemon 重启时先由 Host-turn coordinator 恢复 durable checkpoint，再重�
 | 不完整但无 actionable blockers | `PAUSE_INVALID_REVIEW`；仅 cancel |
 | 当前组已达 15 | `PAUSE_REPAIR_LIMIT`；等待用户是否继续下一组 |
 
-Host 不重复提交这些机械决策。每个 repair 使用新 Revision/new Pi session，但复用 bound Reviewer。`resume_review_decision` 重置 `autoRepairRounds` 并授予下一组最多 15 轮。
+Host 不重复提交这些机械决策。每个 repair 使用新 Revision/new Pi session，但复用 bound Reviewer。额度耗尽后，owning Host 携带 active `turnToken`，通过当前 `smartflow_review_turn` 的 `USER_INPUT_REQUIRED` answer 提交 `resume_review_decision`；HostTurnCoordinator 内部调用 Daemon resume mechanics，将 `autoRepairRounds` 重置为 0，并授予下一组最多 15 轮。
 
 ## Task and Pi Configuration Boundary
 
@@ -126,7 +133,7 @@ Pi child 加载静态 Extension，通过官方 `pi.registerProvider()` 在内存
 | 场景 | 结果 |
 |---|---|
 | Host 重连且 Daemon/Pi 存活 | 继续同 job、Attempt、Pi session |
-| Daemon 在 active Host turn 重启 | 恢复同 token/claim/pause；不并发 legacy recovery |
+| Daemon 在 active Host turn 重启 | 恢复同 token/claim/pause；ordinary Run recovery 不并发推进 |
 | Pi/Daemon Worker 崩溃 | 相同 job/Revision/workspace，新 Attempt/Pi session |
 | Attempt 超时 | 终止进程树，持久化 `TIMED_OUT`，等待允许的恢复 |
 | 自动 repair Revision | 上一 Result Tree 物化，新 Pi session，同一 Reviewer |
@@ -137,15 +144,15 @@ Pi child 加载静态 Extension，通过官方 `pi.registerProvider()` 在内存
 
 只有 100% 有效 Review 才能自动 accept/Publish。Publish 使用项目级串行、expected-old-hash、稳定 operationId 和支持的 batch mode；冲突全路径零写入并返回 `0/N` 与 DeliveryBundle；PARTIAL/UNKNOWN durable block。
 
-Production-composition 的覆盖场景已验证复合编排，但当前实现仍有两个明确开放任务：T204（paused Host ownership 与 lost-claim lease wake）和 T205（Reviewer callback 的 `changedPaths` 与 self-contained pause/no primitive result fallback）。因此严格的全状态两工具闭环尚未完成，详见 implementation map。
+Production-composition 的复合编排覆盖已完成。T204（paused Host ownership 与 lost-claim lease wake）和 T205（Reviewer callback 的 `changedPaths` 与 self-contained pause/no primitive result fallback）均已完成，因此严格的全状态两工具闭环已经关闭。
 
-即使 T204/T205 完成，production-composition 也不等于真实 installed Pi SDK/model 兼容。Mocked `registerProvider` 和 gitignored `.smartflow-e2e` transcript 不是可审计 real-model 证据；T190/T208 与 T192/T209 保持开放。
+真实 installed Pi SDK/model 兼容的开放证据仍是 T190/T208 与 T192/T209。Mocked `registerProvider` 和 gitignored `.smartflow-e2e` transcript 不是可审计 real-model 证据。
 
 ## Explicitly Out of Scope
 
 - 自建 coding tools/Broker 或双 Provider compatibility path；
 - Daemon 创建/替换 Reviewer，或 Reviewer/Pi 直接与用户交互；
-- 删除旧 10 个 primitive MCP 工具；
+- 为 `HostActionLoop` 或五个 manual Review orchestration MCP names 提供公开 symbols、schemas、handlers、registrations、aliases；
 - 动态向 Pi 注入 SmartFlow MCP、Host/global Skills；
 - 独立通用 verify/gate 阶段；
 - 自动 Git commit/push/PR、自动 merge、路径预占或并行 Publish；

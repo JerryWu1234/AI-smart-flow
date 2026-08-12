@@ -69,57 +69,6 @@ class WorkflowGateway implements HostGateway {
       this.phase = "REVIEW_PENDING";
       return Promise.resolve(this.reviewRequired());
     }
-    if (toolName === "smartflow_status") return Promise.resolve(this.summary());
-    if (toolName === "smartflow_claim_action") {
-      this.phase = "REVIEWING";
-      this.stateVersion += 1;
-      return Promise.resolve({
-        claimId: `claim-${String(this.reviewNumber + 1)}`,
-        action: { ...this.action(), worktreePath: "/tmp/worktree" },
-        stateVersion: this.stateVersion,
-        expiresAt: "2026-07-20T00:05:00Z"
-      });
-    }
-    if (toolName === "smartflow_submit_review") {
-      const result = this.normalizedReview(request.result);
-      this.reviewerSessionId = String(request.reviewerSessionId);
-      this.phase = "LEADER_DECISION";
-      this.stateVersion += 1;
-      this.reviewNumber += 1;
-      return Promise.resolve({
-        ...this.mutation(),
-        reviewHash: digest,
-        reviewAttemptId: request.reviewAttemptId,
-        reviewerSessionId: request.reviewerSessionId,
-        result
-      });
-    }
-    if (toolName === "smartflow_submit_leader_decision") {
-      const decision = String(request.decision);
-      this.decisions.push(decision);
-      this.stateVersion += 1;
-      if (decision === "repair") {
-        this.phase = "PAUSED";
-      } else if (decision === "accept") {
-        this.phase = "COMPLETED";
-      } else {
-        this.phase = "PAUSED";
-      }
-      return Promise.resolve(this.mutation());
-    }
-    if (toolName === "smartflow_result") {
-      return Promise.resolve(this.result());
-    }
-    if (toolName === "smartflow_resume") {
-      this.stateVersion += 1;
-      if (request.resumeAction === "resume_review_decision") {
-        this.phase = "LEADER_DECISION";
-      } else {
-        this.revision += 1;
-        this.phase = "REVIEW_PENDING";
-      }
-      return Promise.resolve(this.mutation());
-    }
     return Promise.reject(new Error(`Unexpected tool: ${toolName}`));
   }
 
@@ -208,38 +157,6 @@ class WorkflowGateway implements HostGateway {
       adversarialFindings: [],
       pathCoverage: { "src/a.ts": "FULL" },
       residualRisks: []
-    };
-  }
-
-  private action(): object {
-    return {
-      type: "REVIEW",
-      actionId: `review-action-${String(this.reviewNumber + 1)}`,
-      revision: this.revision,
-      taskSourceHash: digest,
-      candidateHash: digest,
-      reviewAttemptId: `review-attempt-${String(this.reviewNumber + 1)}`,
-      changedPaths: ["src/a.ts", "src/b.ts"],
-      reviewerSession: this.reviewerSessionId === undefined
-        ? { mode: "CREATE" }
-        : { mode: "RESUME", reviewerSessionId: this.reviewerSessionId },
-      piSessionId: "pi-session-1",
-      expiresAt: "2026-07-20T00:15:00Z"
-    };
-  }
-
-  private summary(): object {
-    return {
-      projectId: "project-1",
-      jobId: "job-1",
-      phase: this.phase,
-      revision: this.revision,
-      stateVersion: this.stateVersion,
-      progress: { completed: this.phase === "REVIEW_PENDING" ? 1 : 0, total: 1 },
-      ...(this.phase === "REVIEW_PENDING" ? { pendingAction: this.action() } : {}),
-      ...(this.phase === "PAUSED"
-        ? { pause: { code: "REPAIR_TASKS_READY", resumeActions: ["approve_new_manifest_revision"] } }
-        : {})
     };
   }
 }

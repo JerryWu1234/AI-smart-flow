@@ -1,7 +1,16 @@
-export * from "./atomic-file.js";
-export * from "./canonical-json.js";
-export * from "./errors.js";
-export * from "./mutation.js";
-export * from "./project-lock.js";
-export * from "./schema.js";
-export * from "./state-store.js";
+export type { AtomicWriteCheckpoint, AtomicWriteHooks } from "./atomic-file.js";
+export { canonicalHash } from "./canonical-json.js";
+export { StateStoreError } from "./errors.js";
+export { ProjectMutationSession } from "./mutation.js";
+export { ProjectLock } from "./project-lock.js";
+export {
+  projectStateSchema,
+  runArtifactInventory
+} from "./schema.js";
+export type {
+  HostTurn,
+  ProjectState,
+  RunRecord,
+  WorkerAttempt
+} from "./schema.js";
+export { StateStore } from "./state-store.js";

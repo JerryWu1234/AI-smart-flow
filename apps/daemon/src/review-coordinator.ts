@@ -83,7 +83,7 @@ function normalizeReviewResult(
       path: null,
       severity: "P1",
       blocking: true,
-      summary: `Reason: ${task.reason}; Suggestion: ${task.suggestion}`,
+      summary: `Reason: ${task.reason ?? "Not provided"}; Suggestion: ${task.suggestion ?? "Not provided"}`,
       evidence: [`Task ${task.id} is ${String(task.completionPercentage)}% complete`]
     })),
     adversarialFindings: [],

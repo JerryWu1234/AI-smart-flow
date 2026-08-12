@@ -197,10 +197,3 @@ export function deriveRepairApproval(
     reasons
   };
 }
-
-export function repairApprovalKind(
-  previous: TaskManifest,
-  proposed: TaskManifest
-): "USER" | "LEADER_REPAIR" {
-  return deriveRepairApproval(previous, proposed).kind;
-}

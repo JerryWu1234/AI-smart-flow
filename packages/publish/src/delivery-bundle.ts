@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { createPublicKey, type KeyObject } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";

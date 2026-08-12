@@ -257,7 +257,7 @@ export class RecoveryManager {
       case "PAUSED":
         return this.result(state, run, "NONE");
       case "CANCELING":
-        return this.recoverCancellation(state, run);
+        return this.recoverCancellation(run);
       case "COMPLETED":
       case "CANCELED":
       case "FAILED":
@@ -394,7 +394,7 @@ export class RecoveryManager {
     return this.pause(state, run, `PUBLISH_RECOVERY_BLOCKED:${observed.status}`);
   }
 
-  private async recoverCancellation(state: ProjectState, run: RunRecord): Promise<RecoveryResult> {
+  private async recoverCancellation(run: RunRecord): Promise<RecoveryResult> {
     const observed = await this.runtime.continueCancellation(run.jobId);
     const current = await this.store.readState();
     const recovered = current.runs[run.jobId] ?? run;

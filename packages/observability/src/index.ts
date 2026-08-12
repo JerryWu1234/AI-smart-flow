@@ -1,3 +1,3 @@
-export * from "./logger.js";
-export * from "./metrics.js";
-export * from "./redaction.js";
+export { StructuredLogger } from "./logger.js";
+export { MetricsRegistry } from "./metrics.js";
+export { redactSensitive } from "./redaction.js";

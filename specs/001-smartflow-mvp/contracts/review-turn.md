@@ -1,14 +1,14 @@
 # Composite Review Turn Contract
 
-**Status**: Current target contract (implementation gaps tracked by T204/T205)
+**Status**: Current contract
 **Date**: 2026-08-11
-**Preferred Host flow**: `smartflow_execute → smartflow_review_turn`
+**Sole public Review orchestration**: `smartflow_execute → smartflow_review_turn*`
 
 ## Purpose and ownership
 
-`smartflow_review_turn` is the single high-level continuation entry point after an approved Run starts. The Daemon owns deterministic waiting, Review Action claim/renewal, Review submission, accept/repair/pause planning, approved-scope repair continuation, and Publish progression. The Host remains the only component allowed to create/resume a Reviewer session or communicate with the user. The Daemon never creates or replaces a Reviewer.
+`smartflow_review_turn` is the only public Review continuation entry point after an approved Run starts. The Daemon internally owns deterministic waiting, Review Action claim/renewal, Review submission, accept/repair/pause planning, approved-scope repair continuation, and Publish progression. The Host remains the only component allowed to create/resume a Reviewer session or communicate with the user. The Daemon never creates or replaces a Reviewer.
 
-The ten primitive MCP tools remain public for compatibility, diagnostics, and low-level recovery. A high-level Host workflow should not reconstruct the state machine from them.
+The public MCP surface contains exactly six tools: `smartflow_execute`, `smartflow_review_turn`, `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`. The latter four are separate Run-management APIs, not Review continuations or a second Review orchestration path. Public `smartflow_resume` is an independent paused-Run recovery API; while an active `hostTurn` exists, it cannot submit a ReviewTurn answer or bypass ownership. The `HostActionLoop` symbol and public symbols, schemas, handlers, registrations, and aliases for `smartflow_wait`, `smartflow_claim_action`, `smartflow_renew_action_claim`, `smartflow_submit_review`, and `smartflow_submit_leader_decision` do not exist. Their Review orchestration operations are Daemon-internal mechanics only.
 
 ## Input
 
@@ -67,15 +67,15 @@ The Host opens that worktree, rereads the synchronized Task and current files, e
 
 Returns a durable pause with `turnToken`, `pause.code`, `pause.message`, legal mutable `options`, separate read-only `inspectionOptions`, the canonical paused `result`, and, when needed, `requiredInput`. Revision approval uses `mode: "COLLECT"` with a non-submit-ready `inputForm` when user values are missing, or `mode: "CONFIRM"` with a complete schema-valid `answer` when all values are available. It may include current Review or repair draft evidence, but never the claimed worktree path.
 
-- `AUTOMATIC_REPAIR_LIMIT` may offer `resume_review_decision`; choosing it resets the next automatic-repair allowance to 15 rounds.
+- `AUTOMATIC_REPAIR_LIMIT` may offer `resume_review_decision`; the owning Host submits that answer through `smartflow_review_turn` with the active `turnToken`, after which HostTurnCoordinator invokes Daemon resume mechanics internally, resets `autoRepairRounds` to zero, and allows the next group of up to 15 rounds.
 - `INVALID_REVIEW` offers only `cancel`; incomplete Review without actionable blocking findings is never converted into guessed repair work.
 - Other pause codes expose only actions already allowed by the Run's durable `resumeActions`.
 
-Only the Host communicates these choices to the user and submits an answer.
+Only the Host communicates these choices to the user and submits an answer through `smartflow_review_turn`. Option names such as `resume_review_decision` and `cancel` are typed ReviewTurn answer values; submitting them does not invoke the separate public `smartflow_resume` or `smartflow_cancel` APIs. Those APIs remain independent Run-management operations rather than Review continuations. In particular, public `smartflow_resume` cannot answer an active `hostTurn` checkpoint or bypass its owner/token checks.
 
 ### `DONE`
 
-Returned only when the Run is in `COMPLETED`, `CANCELED`, or `FAILED`. It contains the canonical `smartflow_result` payload. Nonterminal pauses and conflicts must use `USER_INPUT_REQUIRED`, not `DONE`.
+Returned only when the Run is in `COMPLETED`, `CANCELED`, or `FAILED`. It directly contains canonical `ResultOutput`. That payload has the same shape as the independent `smartflow_result` response, but producing `DONE` does not call that public API. Nonterminal pauses and conflicts must use `USER_INPUT_REQUIRED`, not `DONE`.
 
 ## Durable Host-turn checkpoint
 
@@ -92,7 +92,7 @@ type HostTurn =
       revision: number; pauseCode: string; startedAt: string };
 ```
 
-`RunRecord.autoRepairRounds` counts daemon-started repair rounds in the current allowance. `resume_review_decision` resets it to zero. Checkpoints are durable-first and are not inferred from logs or an in-memory Host call.
+`RunRecord.autoRepairRounds` counts daemon-started repair rounds in the current allowance. The owning Host submits `resume_review_decision` through `smartflow_review_turn` with the active `turnToken`; HostTurnCoordinator invokes Daemon resume mechanics internally, clears the checkpoint, and resets the counter to zero. Checkpoints are durable-first and are not inferred from logs or an in-memory Host call.
 
 ## Mechanical decision policy
 
@@ -111,28 +111,23 @@ The Host does not re-evaluate or resubmit these mechanical decisions. It still o
 
 - All composite turns for one `projectId + jobId` execute through a per-Run queue.
 - Every state mutation uses Project-wide `stateVersion` CAS. An operation makes at most four total attempts, including the initial attempt and up to three retries after fresh rereads.
-- Child calls use deterministic request IDs derived from the stable `turnToken`; retries cannot duplicate claim, Review submission, repair, resume, or decision effects.
-- Claim intent is persisted before the claim primitive. A lost response is reconciled from durable `pendingAction` and `hostTurn`.
+- Daemon-internal operations use deterministic request IDs derived from the stable `turnToken`; retries cannot duplicate Action claim, Review persistence, repair, resume application, decision, or Publish effects.
+- Claim intent is persisted before the Daemon-internal Action claim. A lost response is reconciled from durable `pendingAction` and `hostTurn`.
 - The review deadline is 30 minutes. Claims renew every 60 seconds or 30 seconds before lease expiry, whichever is earlier. Transient renew failures retry after 1 second; three failures cause a durable Host-review-unavailable pause.
-- On Daemon restart, `HostTurnCoordinator.recoverRun()` is the sole recovery authority while `hostTurn` exists. `ProjectRuntime` rereads fresh state afterward and does not start legacy pipeline recovery until the checkpoint is cleared.
+- On Daemon restart, `HostTurnCoordinator.recoverRun()` is the sole Review-turn recovery authority while `hostTurn` exists. `ProjectRuntime` rereads fresh state afterward and does not start ordinary Run recovery until the checkpoint is cleared.
 
 ## Public MCP surface
 
-Exactly eleven tools are registered:
+Exactly six tools are registered:
 
 1. `smartflow_execute`
-2. `smartflow_status`
-3. `smartflow_wait`
-4. `smartflow_review_turn`
-5. `smartflow_claim_action`
-6. `smartflow_renew_action_claim`
-7. `smartflow_submit_review`
-8. `smartflow_submit_leader_decision`
-9. `smartflow_resume`
-10. `smartflow_cancel`
-11. `smartflow_result`
+2. `smartflow_review_turn`
+3. `smartflow_status`
+4. `smartflow_resume`
+5. `smartflow_cancel`
+6. `smartflow_result`
 
-The legacy ten remain compatible; `smartflow_review_turn` is the preferred composite API.
+`smartflow_execute → smartflow_review_turn*` is the sole public Review orchestration path. `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result` are separate Run-management APIs, not Review continuations or a second Review orchestration path. Public `smartflow_resume` is for independent paused-Run recovery and cannot answer or bypass an active `hostTurn`. The `HostActionLoop` symbol and public symbols, schemas, handlers, registrations, and aliases for `smartflow_wait`, `smartflow_claim_action`, `smartflow_renew_action_claim`, `smartflow_submit_review`, and `smartflow_submit_leader_decision` do not exist; those Review mechanics are Daemon-internal only.
 
 ## Implementation and tests
 

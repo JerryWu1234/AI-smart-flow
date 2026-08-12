@@ -32,7 +32,6 @@
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.83.0",
     "@smartflow/provider-core": "workspace:*",
-    "@smartflow/protocol": "workspace:*",
     "@smartflow/task-manifest": "workspace:*",
     "@smartflow/workspace": "workspace:*"
   }

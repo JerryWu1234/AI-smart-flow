@@ -248,7 +248,7 @@ describe("installed SmartFlow package", () => {
           [
             `const skill = await import(${JSON.stringify(pathToFileURL(hostSkillEntry).href)});`,
             'if (typeof skill.executeApprovedWorkflow !== "function" || typeof skill.approveTasksSource !== "function" || typeof skill.validateHostReviewOutput !== "function") process.exit(1);',
-            'if ("CodexCliReviewerHost" in skill || "HostReviewer" in skill) process.exit(2);'
+            'if ("CodexCliReviewerHost" in skill || "HostReviewer" in skill || "HostActionLoop" in skill) process.exit(2);'
           ].join("\n")
         ],
         { cwd: projectRoot, env: environment, timeout: 30_000, maxBuffer: 2_000_000 }
@@ -302,6 +302,10 @@ describe("installed SmartFlow package", () => {
         }
       );
       const lifecycle = parseJsonLine(lifecycleProcess.stdout);
+      const publicToolNames = asStringArray(
+        lifecycle.publicToolNames,
+        "installed public MCP tool names"
+      );
       const scope = asRecord(lifecycle.scope, "installed lifecycle scope");
       const secondExecute = asRecord(lifecycle.secondExecute, "installed second execute result");
       const secondCanceled = asRecord(lifecycle.secondCanceled, "installed second canceled result");
@@ -328,6 +332,14 @@ describe("installed SmartFlow package", () => {
       }
       const reviewCalls = lifecycle.reviewCalls;
 
+      expect(publicToolNames).toEqual([
+        "smartflow_cancel",
+        "smartflow_execute",
+        "smartflow_result",
+        "smartflow_resume",
+        "smartflow_review_turn",
+        "smartflow_status"
+      ]);
       expect(scope.jobId).toBe(result.jobId);
       expect(secondExecute.jobId).not.toBe(result.jobId);
       expect(secondCanceled).toMatchObject({ phase: "CANCELED" });

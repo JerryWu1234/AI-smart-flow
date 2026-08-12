@@ -1,20 +1,22 @@
 <!--
 同步影响报告
-- 版本变更：4.0.0 -> 4.1.0
+- 版本变更：4.1.0 -> 5.0.0
 - 修改原则：
-  - CP-001：澄清 Leader-only user interaction 不等于 Host 执行机械状态编排；Host 独占 Reviewer 执行和用户交互，Daemon 可执行冻结的确定性编排。
-  - CP-008：Review 仍是发布门槛；满足门槛后的 accept/publish 与不满足时的 repair/pause 由 Daemon 按冻结策略推进。
-  - CP-009：扩展为 Project-wide CAS、per-Run serialization、稳定子请求 ID 与 durable Host-turn ownership。
-- 保留原则：CP-002–CP-007、CP-010、CP-011
+  - CP-001：保留 Leader-only user interaction，并明确 Host 只通过复合 Review turn 返回 Reviewer 结果或用户答案；wait、claim/renew、Review submission、Leader decision 与 repair/publish progression 是 Daemon 内部 mechanics。
+  - CP-008：Review 仍是发布门槛；满足门槛后的 accept/publish 与不满足时的 repair/pause 继续由 Daemon 按冻结策略推进。
+  - CP-009：公开 Review 编排收敛为 `smartflow_execute → smartflow_review_turn*`；其余四个公开工具是独立 Run 管理 API，不是 Review continuation 或第二条 Review 编排路径。
+  - CP-011：将 Host-turn coordinator 与 ordinary Run recovery 的互斥关系写为当前恢复契约。
+- 保留原则：CP-002–CP-007、CP-010
 - 新增原则：无
 - 删除原则：无
+- 公开面事实：`HostActionLoop` symbol 与五个 manual Review orchestration MCP names 的公开 symbols、schemas、handlers、registrations、aliases 均不存在；对应 Review mechanics 仅存在于 Daemon 内部。
 - 模板检查：
   - ✅ .specify/templates/spec-template.md：无需结构变更
   - ✅ .specify/templates/plan-template.md：无需结构变更
   - ✅ .specify/templates/tasks-template.md：无需结构变更
   - ✅ .specify/templates/checklist-template.md：无需结构变更
 - 通用 Spec Kit 配置：✅ feature/init/integration、workflow registry/YAML、templates 与 scripts 均不变
-- 运行设计文档：✅ 已同步 specs/001-smartflow-mvp/ 与 SmartFlow-Spec-Kit-R5.md
+- 运行设计文档：✅ 已同步 SmartFlow-Spec-Kit-R5.md；其余设计文档由对应追踪任务维护
 - 后续 TODO：真实 pinned Pi SDK/RPC 兼容与可审计 real-model 两工具 E2E 证据仍保持开放
 -->
 
@@ -24,9 +26,10 @@
 
 ### CP-001：Leader-only User Interaction（强制）
 - 只有 Host/Leader MAY 直接与用户交互，也只有 Host MAY 创建或恢复独立 Reviewer session 并执行 Reviewer turn。
-- Daemon MAY 执行冻结且确定性的机械编排，包括等待、claim/renew、提交后 accept/repair/pause、批准既有范围的 repair Revision 与 Publish；这不构成第二个 Leader。
+- Host MUST 只通过 `smartflow_review_turn` 返回 Reviewer 结果或结构化用户答案；不得通过独立 Run 管理 API 手动编排 Review 状态。
+- Daemon MAY 执行冻结且确定性的机械编排，包括 wait、claim/renew、Review submission、Leader decision、批准既有范围的 repair Revision 与 Publish progression；这不构成第二个 Leader。
 - Daemon MUST NOT 创建、替换或模拟 Reviewer；Worker、Reviewer、Pi Agent 与工具调用 MUST NOT 直接等待或消费用户输入。
-- 需要选择、批准或补充信息时，Daemon MUST 返回结构化 `USER_INPUT_REQUIRED`；Host/Leader 是唯一向用户提问并提交答案的边界。
+- 需要选择、批准或补充信息时，Daemon MUST 返回结构化 `USER_INPUT_REQUIRED`；Host/Leader 是唯一向用户提问并通过同一 Review turn 提交答案的边界。
 
 ### CP-002：Task Revision 是执行单元（强制）
 - Run MUST 维护不可变的 Task Revision 链；每个 Revision MUST 对应冻结后的 `tasks.md`。
@@ -73,7 +76,7 @@
 - 单个 Project MUST 由唯一有效 writer lease 保护共享运行状态与 Publish；所有 mutation MUST 使用 Project-wide revision/CAS 语义。
 - 同一 `projectId + jobId` 的复合 Review turn MUST 串行化；不同 Run MAY 并行，但共享 `state.json` 的每次提交都必须重新校验 stateVersion。
 - claim intent、claimed review、等待用户输入和自动修复额度 MUST durable-first 持久化；每个 active Host turn MUST 绑定稳定 `hostTurnId + turnToken + revision`。
-- 自动重试 MUST 使用稳定派生的 child request IDs；CAS mismatch、重启或重复请求不得重复 claim、Review 提交、repair 或 Publish。
+- 自动重试 MUST 使用稳定派生的 child request IDs；CAS mismatch、重启或重复请求不得重复 claim、Review submission、repair 或 Publish。
 - 失去 lease、Host-turn ownership 或当前 Revision/Candidate 绑定的进程 MUST 停止写入；stale continuation 只能获得无敏感路径的当前状态。
 
 ### CP-010：Attempt、会话与状态转换可审计（强制）
@@ -84,14 +87,16 @@
 ### CP-011：取消、超时、崩溃必须可恢复（强制）
 - 取消 MUST 终止 Pi Worker 及其全部子进程，回收 lease，并将 Run 写入终态或可恢复状态。
 - 进程崩溃、主机重启或客户端重连后 MUST 从持久化状态恢复；不得假设旧 Pi session 或 Host 请求仍在内存中。
-- 存在 durable `hostTurn` 时，Host-turn coordinator MUST 成为该 Run 的唯一 Review-turn 恢复权威；恢复后必须重读 fresh state，避免 legacy recovery 并发推进同一 Run。
+- 存在 durable `hostTurn` 时，Host-turn coordinator MUST 成为该 Run 的唯一 Review-turn 恢复权威；恢复后必须重读 fresh state，ordinary Run recovery 不得并发推进同一 Run。
 - 恢复逻辑 MUST 区分“同一 Task 的继续执行”和“新功能的新 Task”，最终分类由 Host/Leader 根据用户意图完成。
 
 ## Product and Runtime Boundaries
 
-- 首选高层调用路径是 `smartflow_execute → smartflow_review_turn`；`smartflow_review_turn` 只返回 `NOT_READY | REVIEW_REQUIRED | USER_INPUT_REQUIRED | DONE`。
+- 唯一公开 Review 编排路径是 `smartflow_execute → smartflow_review_turn*`；`smartflow_review_turn` 只返回 `NOT_READY | REVIEW_REQUIRED | USER_INPUT_REQUIRED | DONE`。
+- 公开 MCP surface MUST 恰好包含六个工具：`smartflow_execute`、`smartflow_review_turn`、`smartflow_status`、`smartflow_resume`、`smartflow_cancel`、`smartflow_result`。
+- `smartflow_status`、`smartflow_resume`、`smartflow_cancel`、`smartflow_result` MUST 分别作为独立的 Run inspection、paused-Run recovery、cancellation、result management API；MUST NOT 作为 Review continuation 或第二条 Review 编排路径。公开 `smartflow_resume` 在 active `hostTurn` 存在时 MUST NOT 充当 `USER_INPUT_REQUIRED` answer 或绕过 ownership；该 answer MUST 由 owning Host 携带相同 `turnToken` 通过 `smartflow_review_turn` 提交。
+- Wait、Review claim/renew、Review submission、Leader decision、repair/publish progression MUST 仅为 Daemon 内部 mechanics；`HostActionLoop` symbol 与 `smartflow_wait`、`smartflow_claim_action`、`smartflow_renew_action_claim`、`smartflow_submit_review`、`smartflow_submit_leader_decision` 的公开 symbols、schemas、handlers、registrations、aliases MUST NOT 存在。
 - Host/Leader 持有 MCP、Reviewer 执行与全部用户交互；Daemon 持有确定性状态编排；Pi Worker 不接收 SmartFlow MCP。
-- MCP surface 恰好保留 11 个工具：复合 `smartflow_review_turn` 加原有 10 个 primitive。Primitive 用于兼容、诊断和低层控制，不是高层 Host workflow 的首选路径。
 - 本次迁移不向 Pi 动态注入 Host/global Skills；Pi MAY 发现 isolated workspace 内受控的项目本地资源和 Skills。
 - Git 是 Workspace、Snapshot、Candidate、Review 与 Publish 的主要变更基础设施。
 - `@earendil-works/pi-coding-agent` 是唯一 Worker SDK；`@earendil-works/pi-agent-core` MAY 作为其传递依赖，但 SmartFlow 不直接重建 Coding Agent 能力。
@@ -101,11 +106,11 @@
 
 1. 冻结 Task Revision 与 Pi runtime config hash，并调用 `smartflow_execute`。
 2. Daemon 创建/恢复 isolated Git workspace，在 Sandbox 内执行 Pi，生成不可变 Candidate 与 Review Action。
-3. Host 反复调用 `smartflow_review_turn`；`NOT_READY` 按 `retryAfterMs` bounded poll，不自行驱动 primitive 状态机。
-4. 收到 `REVIEW_REQUIRED` 后，Host 按 `CREATE` 或 `RESUME` 执行独立 Reviewer，并用相同 `turnToken` 提交 Review；Daemon 负责 claim renewal、确定性 accept/repair/pause 和 Publish。
-5. 收到 `USER_INPUT_REQUIRED` 后，只有 Host 与用户交互并提交列出的合法 answer；`DONE` 必须只对应终态 `result`。
+3. Host 反复调用 `smartflow_review_turn`；`NOT_READY` 按 `retryAfterMs` bounded poll，任何其他公开 Run API 都不得充当 Review continuation。
+4. 收到 `REVIEW_REQUIRED` 后，Host 按 `CREATE` 或 `RESUME` 执行独立 Reviewer，并用相同 `turnToken` 通过 `smartflow_review_turn` 返回 Review；Daemon 内部负责 wait、claim/renew、Review submission、Leader decision、repair/pause 和 Publish progression。
+5. 收到 `USER_INPUT_REQUIRED` 后，只有 Host 与用户交互，并用相同 `turnToken` 通过 `smartflow_review_turn` 提交列出的合法 answer；`DONE` 必须只对应终态 `result`。
 6. Publish 使用预期 HEAD 和原子 Git 操作写回原始项目；冲突和恢复阻塞必须 durable pause。
-7. 契约测试 MUST 覆盖四公开状态、路径保护、11 工具、Host-turn ownership、restart/CAS/renew/deadline、15 轮额度和两工具 production composition。
+7. 契约测试 MUST 覆盖四公开状态、路径保护、恰好六个公开工具、Host-turn ownership、restart/CAS/renew/deadline、15 轮额度和两工具 production composition。
 8. Mocked Pi Extension/RPC 测试不能替代真实 pinned SDK 兼容和经用户授权的 real-model E2E 证据；未验证项必须保持开放。
 
 ## Governance
@@ -114,7 +119,8 @@
 - 修改原则必须同步更新受影响的 spec、plan、contracts、tasks、quickstart、追踪矩阵与根设计索引。
 - 版本规则：移除或不兼容地重定义原则为 MAJOR；新增原则或实质扩展为 MINOR；措辞澄清为 PATCH。
 - 4.0.0 明确废弃 OpenCode/Claude Worker、ToolExecutionBroker、工具效果账本、Worker 工具审批流及其持久化状态；旧状态不保证原地兼容。
-- 4.1.0 明确采用 Daemon-owned mechanical orchestration 和单一复合 Review turn，同时保留 Host-only Reviewer/user boundary 与 10 个 primitive 兼容工具。
+- 4.1.0 明确采用 Daemon-owned mechanical orchestration、单一复合 Review turn、Host-only Reviewer/user boundary 与 durable Host-turn ownership。
+- 5.0.0 的公开 MCP surface 恰好为六个工具；`HostActionLoop` symbol 与五个 manual Review orchestration MCP names 的公开 symbols、schemas、handlers、registrations、aliases 均不存在，对应 Review mechanics 仅为 Daemon internal。
 - 合并前 MUST 运行 Spec Kit 一致性分析；若 Constitution 与实现计划冲突，以 Constitution 为准并阻止实现。
 
-**Version**: 4.1.0 | **Ratified**: 2026-07-20 | **Last Amended**: 2026-08-11
+**Version**: 5.0.0 | **Ratified**: 2026-07-20 | **Last Amended**: 2026-08-12

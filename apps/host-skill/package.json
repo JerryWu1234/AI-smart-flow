@@ -24,7 +24,6 @@
     "test": "vitest run --root ../.. --passWithNoTests apps/host-skill/src"
   },
   "dependencies": {
-    "@smartflow/protocol": "workspace:*",
-    "@smartflow/review": "workspace:*"
+    "@smartflow/protocol": "workspace:*"
   }
 }

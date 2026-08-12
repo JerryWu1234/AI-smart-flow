@@ -17,11 +17,13 @@ Run `smartflow doctor --json` to verify Node, Pi, sandbox, model registration, s
 
 ## MCP workflow
 
-After approving a task source, call `smartflow_execute` once and then use only `smartflow_review_turn`. The turn API returns one of four states:
+The public MCP surface contains exactly six tools. The only public Review orchestration path is to call `smartflow_execute` once for an approved task source and then call `smartflow_review_turn` until it returns `DONE`. The turn API returns one of four states:
 
 - `NOT_READY`: wait for `retryAfterMs` and call it again.
 - `REVIEW_REQUIRED`: create or resume the specified independent Reviewer session in `worktreePath`, then return every task's completion score with the unchanged `turnToken`.
 - `USER_INPUT_REQUIRED`: present the message and available actions to the user, then return the selected action with the unchanged `turnToken`.
 - `DONE`: the run reached a terminal result.
 
-The Daemon owns status polling, Review claim renewal, Leader decisions, safe repair-revision approval, the fifteen-round repair limit, and publish transitions. The lower-level MCP lifecycle tools remain available for backward compatibility.
+`smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result` are separate APIs for Run inspection, paused-Run recovery, cancellation, and result management; they are not Review continuations or a second Review orchestration path. While an active `hostTurn` owns `USER_INPUT_REQUIRED`, the owning Host must submit the answer through `smartflow_review_turn` with the same `turnToken`; the public `smartflow_resume` API cannot answer or bypass that checkpoint.
+
+Waiting, Review claim and renewal, Review submission, Leader decisions, and repair/publish progression are Daemon-internal mechanics only. The `HostActionLoop` symbol and public symbols, schemas, handlers, registrations, and aliases for `smartflow_wait`, `smartflow_claim_action`, `smartflow_renew_action_claim`, `smartflow_submit_review`, and `smartflow_submit_leader_decision` do not exist.

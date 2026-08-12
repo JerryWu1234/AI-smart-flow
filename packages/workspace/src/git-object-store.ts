@@ -1,5 +1,5 @@
 import { mkdir, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { resolve } from "node:path";
 
 import { WorkspaceError } from "./errors.js";
 import { runGitCommand } from "./git-command.js";

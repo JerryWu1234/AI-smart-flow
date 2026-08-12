@@ -2,16 +2,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   cancelInputSchema,
-  claimActionInputSchema,
   executeInputSchema,
-  renewActionClaimInputSchema,
   resultInputSchema,
   resumeInputSchema,
   reviewTurnInputSchema,
-  statusInputSchema,
-  submitLeaderDecisionInputSchema,
-  submitReviewInputSchema,
-  waitInputSchema
+  statusInputSchema
 } from "@smartflow/protocol";
 
 import type { DaemonGateway } from "./daemon-gateway.js";
@@ -34,13 +29,12 @@ export function createSmartFlowMcpServer(gateway: DaemonGateway): McpServer {
         "Submit that result to smartflow_review_turn with the unchanged turnToken. The Daemon owns claim renewal, review decisions, safe repair approval, repair counting, and publish transitions.",
         "When it returns USER_INPUT_REQUIRED, present its message and options to the user. If requiredInput.mode is COLLECT, collect every listed field and construct the complete structured answer only from the user's approved values. If its mode is CONFIRM, ask the user to confirm the supplied complete answer before returning it through the same tool.",
         "Never ask the Daemon to create a Reviewer, never use the Worker session as Reviewer, and never replace a lost bound Reviewer session.",
-        "The lower-level status, wait, claim, renew, submit-review, leader-decision, resume, cancel, and result tools remain available only for backward-compatible manual orchestration."
+        "Use smartflow_status, smartflow_resume, smartflow_cancel, and smartflow_result only for explicit run inspection, recovery, cancellation, and result retrieval; do not manually reproduce the composite Review flow."
       ].join(" ")
     }
   );
   const handlers = createToolHandlers(gateway);
 
-  // Submit approved tasks and start a new execution run.
   server.registerTool(
     "smartflow_execute",
     {
@@ -51,7 +45,6 @@ export function createSmartFlowMcpServer(gateway: DaemonGateway): McpServer {
     async (input) => toolResult(await handlers.smartflow_execute(input))
   );
 
-  // Drive all deterministic workflow transitions while leaving only Review execution to the Host.
   server.registerTool(
     "smartflow_review_turn",
     {
@@ -62,85 +55,41 @@ export function createSmartFlowMcpServer(gateway: DaemonGateway): McpServer {
     async (input) => toolResult(await handlers.smartflow_review_turn(input))
   );
 
-  // Get the run's phase, progress, and pending human actions.
   server.registerTool(
     "smartflow_status",
     {
-      description:
-        "Read current run state. A REVIEW action must be handled by this invoking Host using its own native Reviewer session capability.",
+      description: "Read the current state of a run without advancing it.",
       inputSchema: statusInputSchema
     },
     async (input) => toolResult(await handlers.smartflow_status(input))
   );
 
-  // Wait for a state change without polling repeatedly.
   server.registerTool(
-    "smartflow_wait",
+    "smartflow_resume",
     {
       description:
-        "Wait for the next run state change. Keep waiting while work runs; handle pending REVIEW actions and return Review results to the same Leader.",
-      inputSchema: waitInputSchema
+        "Resume, retry, inspect, or approve a permitted follow-up action for a paused run.",
+      inputSchema: resumeInputSchema
     },
-    async (input) => toolResult(await handlers.smartflow_wait(input))
+    async (input) => toolResult(await handlers.smartflow_resume(input))
   );
 
-  // Claim a pending human action to prevent duplicate decisions.
   server.registerTool(
-    "smartflow_claim_action",
+    "smartflow_cancel",
     {
-      description:
-        "Claim the current action and receive its Run worktree path. For REVIEW, CREATE means durably map reviewAttemptId to one independent native Reviewer session before reviewing; a retry of that attempt must reuse the mapping. RESUME means restore exactly the supplied session. In both modes open that worktree, reread the synchronized Task and current files, score every task from 0 to 100, then round their arithmetic mean for completionPercentage.",
-      inputSchema: claimActionInputSchema
+      description: "Request cancellation through the recoverable cancellation flow.",
+      inputSchema: cancelInputSchema
     },
-    async (input) => toolResult(await handlers.smartflow_claim_action(input))
+    async (input) => toolResult(await handlers.smartflow_cancel(input))
   );
 
-  // Keep an active Review claim alive while the Host waits for its Reviewer.
   server.registerTool(
-    "smartflow_renew_action_claim",
+    "smartflow_result",
     {
-      description:
-        "Renew the current Review claim. Only the Host turn that owns the unexpired claim may renew it.",
-      inputSchema: renewActionClaimInputSchema
+      description: "Read a run result and its generated artifacts.",
+      inputSchema: resultInputSchema
     },
-    async (input) => toolResult(await handlers.smartflow_renew_action_claim(input))
-  );
-
-  // Submit the host review outcome for the run.
-  server.registerTool(
-    "smartflow_submit_review",
-    {
-      description:
-        "Submit the task completion result produced by the invoking Host's Reviewer session. Include every Task exactly once; completionPercentage is their rounded arithmetic mean. SmartFlow derives findings and path coverage internally. The complete normalized result is returned to the same Leader; this does not finish the run.",
-      inputSchema: submitReviewInputSchema
-    },
-    async (input) => toolResult(await handlers.smartflow_submit_review(input))
-  );
-
-  // Submit the leader's decision on the review outcome.
-  server.registerTool(
-    "smartflow_submit_leader_decision",
-    {
-      description:
-        "Submit the original Leader's decision after reviewing the complete Reviewer result. Automatically repair when any task is incomplete and automatically accept only when every task is 100%. Repair includes all incomplete-task finding fingerprints.",
-      inputSchema: submitLeaderDecisionInputSchema
-    },
-    async (input) => toolResult(await handlers.smartflow_submit_leader_decision(input))
-  );
-
-  // Resume, retry, revise tasks, or take another permitted follow-up action.
-  server.registerTool("smartflow_resume", { inputSchema: resumeInputSchema }, async (input) =>
-    toolResult(await handlers.smartflow_resume(input))
-  );
-
-  // Request cancellation through the recoverable cancellation flow.
-  server.registerTool("smartflow_cancel", { inputSchema: cancelInputSchema }, async (input) =>
-    toolResult(await handlers.smartflow_cancel(input))
-  );
-
-  // Get the final result, generated artifacts, and next-step guidance.
-  server.registerTool("smartflow_result", { inputSchema: resultInputSchema }, async (input) =>
-    toolResult(await handlers.smartflow_result(input))
+    async (input) => toolResult(await handlers.smartflow_result(input))
   );
   return server;
 }

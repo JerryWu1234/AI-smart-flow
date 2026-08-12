@@ -1,5 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import type { ArtifactRef } from "@smartflow/protocol";

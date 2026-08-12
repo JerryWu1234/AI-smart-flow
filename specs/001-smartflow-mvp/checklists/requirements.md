@@ -33,7 +33,11 @@
 
 ## Solution D Completeness
 
-- [x] Preferred Host API is explicitly `smartflow_execute → smartflow_review_turn`
+- [x] The only public Review orchestration path is `smartflow_execute → smartflow_review_turn*`
+- [x] The public MCP surface is exactly `smartflow_execute`, `smartflow_review_turn`, `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`
+- [x] `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result` are separate Run management APIs, not Review continuations or a second Review orchestration path; public `smartflow_resume` cannot answer or bypass an active `hostTurn`
+- [x] Wait, Action claim/renew, Review submission, and Leader decision are Daemon-internal mechanics with no public handler
+- [x] The public symbols, schemas, handlers, registrations, and aliases for the five named Review mechanics and the `HostActionLoop` symbol do not exist
 - [x] Public output is exactly `NOT_READY | REVIEW_REQUIRED | USER_INPUT_REQUIRED | DONE`
 - [x] `DONE` is terminal-only; pauses/conflicts remain typed user-input states
 - [x] Only claimed `REVIEW_REQUIRED` exposes `worktreePath`; stale/poll/pause/terminal outputs do not
@@ -44,9 +48,8 @@
 - [x] Per-Run serialization, Project-wide CAS, stable child request IDs, and at most four total CAS attempts (initial plus up to three retries) are explicit
 - [x] Thirty-minute deadline, 60-second renew, 30-second margin, 1-second retry and three-failure pause are explicit
 - [x] Mechanical plans `ACCEPT | REPAIR | PAUSE_INVALID_REVIEW | PAUSE_REPAIR_LIMIT` are complete
-- [x] Automatic repair budget is 15 and `resume_review_decision` grants the next group
+- [x] Automatic repair budget is 15; the owning Host submits `resume_review_decision` through `smartflow_review_turn` with the active `turnToken`, and HostTurnCoordinator internally resets the counter for the next group
 - [x] `INVALID_REVIEW` does not invent repair scope and offers only cancel
-- [x] Exactly 11 MCP tools are listed; the ten primitives remain compatible
 - [x] Restart recovery gives durable Host turn sole authority and rereads fresh state
 
 ## Feature Readiness
@@ -62,12 +65,12 @@
 - [ ] Real pinned Pi 0.83.0 Extension/RPC host compatibility has checked-in, reproducible evidence (T190/T208)
 - [ ] Authorized real-model two-tool E2E has checked-in, auditable evidence (T192/T209)
 
-## Current Implementation Gaps
+## Completed Implementation Checks
 
-- [ ] `changedPaths` from `REVIEW_REQUIRED` reaches the packaged Host Reviewer callback (T205)
-- [ ] A paused active Review preserves its owning `hostTurnId` or uses an explicit authorized handoff before another Host can reclaim (T204)
-- [ ] A successful claim whose response is lost schedules recovery/renewal from the durable claim lease, not only the 30-minute Review deadline (T204)
-- [ ] Every advertised composite pause is self-contained, including required approval fields and inspection options, and unanswered pauses do not call primitive `smartflow_result` (T205)
+- [x] `changedPaths` from `REVIEW_REQUIRED` reaches the packaged Host Reviewer callback (T205)
+- [x] A paused active Review preserves its owning `hostTurnId` or uses an explicit authorized handoff before another Host can reclaim (T204)
+- [x] A successful claim whose response is lost schedules recovery/renewal from the durable claim lease, not only the 30-minute Review deadline (T204)
+- [x] Every advertised composite pause is self-contained, including required approval fields and inspection options, and unanswered pauses do not call the independent `smartflow_result` management API (T205)
 
 ## Notes
 

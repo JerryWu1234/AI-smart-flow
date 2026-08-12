@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, posix, resolve } from "node:path";
 
 import type { ArtifactRef } from "@smartflow/protocol";

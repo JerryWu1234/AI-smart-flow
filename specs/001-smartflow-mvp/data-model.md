@@ -209,9 +209,11 @@ type HostTurn =
     });
 ```
 
-`CLAIMING` is durable before the primitive Action claim. `AWAITING_REVIEW` proves the claim context is reconciled and is the only stage from which the composite protocol discloses `worktreePath`. `AWAITING_USER_INPUT` persists a nonterminal typed pause. ReviewerBinding survives repair Revisions; HostTurn does not replace it.
+`CLAIMING` is durable before the Daemon-internal Action claim. `AWAITING_REVIEW` proves the claim context is reconciled and is the only stage from which the public Review protocol discloses `worktreePath`. `AWAITING_USER_INPUT` persists a nonterminal typed pause. ReviewerBinding survives repair Revisions; HostTurn does not replace it.
 
-## Composite ReviewTurn protocol
+`smartflow_execute → smartflow_review_turn*` is the sole public Review orchestration path. The public MCP surface contains exactly six tools: `smartflow_execute`, `smartflow_review_turn`, `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`. Status, resume, cancel, and result are separate Run-management APIs, not Review continuations or a second Review orchestration path. Public `smartflow_resume` is for independent paused-Run recovery and cannot answer or bypass an active `hostTurn`. The `HostActionLoop` symbol and public symbols, schemas, handlers, registrations, and aliases for wait, Action claim/renew, Review submission, and Leader decision do not exist; their operations and repair/Publish progression are Daemon-internal only.
+
+## Sole public ReviewTurn orchestration protocol
 
 ```ts
 interface ReviewTurnInput {
@@ -270,7 +272,7 @@ type ReviewTurnOutput =
   | { kind: "DONE"; result: ResultOutput };
 ```
 
-`review`, `answer`, and `reviewUnavailableReason` are mutually exclusive and require `turnToken`. Stale continuations return current no-path `NOT_READY`. `DONE` is terminal-only.
+`review`, `answer`, and `reviewUnavailableReason` are mutually exclusive and require `turnToken`. Stale continuations return current no-path `NOT_READY`. `DONE` is terminal-only and embeds canonical `ResultOutput` directly. That payload has the same shape as the independent `smartflow_result` response, but producing `DONE` does not call that public API.
 
 ## Automatic repair counter and decision plan
 
@@ -287,7 +289,7 @@ type ReviewDecisionPlan =
   | { kind: "PAUSE_REPAIR_LIMIT"; decision: "pause"; repairItems: RepairItem[] };
 ```
 
-`autoRepairRounds` counts daemon-started repairs in the current group and is incremented with automatic repair. `resume_review_decision` resets it to zero. Accept requires `APPROVE + 100% + no blocking finding`; repair uses only current blocking finding fingerprints and requires counter `< 15`; incomplete Review without actionable findings pauses invalid.
+`autoRepairRounds` counts daemon-started repairs in the current group and is incremented with automatic repair. To grant another group, the owning Host submits `resume_review_decision` as a `smartflow_review_turn` answer with the active `turnToken`; HostTurnCoordinator invokes Daemon resume mechanics internally, clears the checkpoint, and resets the counter to zero. Public `smartflow_resume` is not used for that active HostTurn answer. Accept requires `APPROVE + 100% + no blocking finding`; repair uses only current blocking finding fingerprints and requires counter `< 15`; incomplete Review without actionable findings pauses invalid.
 
 ## Concurrency and idempotency model
 
@@ -295,7 +297,7 @@ type ReviewDecisionPlan =
 - Project `stateVersion` CAS remains the durable writer boundary; a composite operation makes at most four total attempts, including the initial attempt and up to three retries with a fresh reread.
 - Child request IDs are deterministic hashes of stable turn identity and operation scope.
 - Review deadline is 30 minutes. Claim renewal runs every 60 seconds or 30 seconds before lease expiry; transient failure retries after 1 second and three failures pause.
-- On restart, durable `hostTurn` is recovered before any legacy Run pipeline; ProjectRuntime rereads state and schedules no competing recovery while the checkpoint remains.
+- On restart, durable `hostTurn` is recovered before ordinary Run recovery; ProjectRuntime rereads state and schedules no competing recovery while the checkpoint remains.
 
 ## Publish capability and result
 
@@ -337,6 +339,6 @@ It stores `workerAttempts: PiWorkerAttempt[]` and no longer stores Broker sessio
 
 - Active Run: retain every Revision workspace/snapshot, Attempt/session Artifact, Review history, Host turn, and repair count; forbid Git `gc`/`prune`.
 - Attempt terminal: persist terminal state and session Artifact, reconcile process tree, then clean Run-local Pi runtime files.
-- Review turn: persist claim intent before claim; persist claimed context before path disclosure; clear checkpoint only through a current CAS-bound transition.
+- Review turn: persist claim intent before the Daemon-internal Action claim; persist claimed context before path disclosure; clear checkpoint only through a current CAS-bound transition.
 - Reconciled terminal Run: retain task/snapshot/Candidate/Review/automatic-decision/Publish audit Artifacts and patch/bundle; delete temporary workspaces, indexes, runtime directories, and object store.
 - Recovery: `state.json` references exact task binding, Revision, Attempt, Host turn, and Publish operation; it never infers state from mutable files, timers, queues, session files, or `events.jsonl`.

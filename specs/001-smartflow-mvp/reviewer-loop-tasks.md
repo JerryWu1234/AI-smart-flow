@@ -25,6 +25,14 @@ Daemon after Review:
   rounds >= 15 → durable AUTOMATIC_REPAIR_LIMIT pause
 ```
 
+## Public MCP Surface
+
+- 公开 MCP surface 恰好包含 `smartflow_execute`、`smartflow_review_turn`、`smartflow_status`、`smartflow_resume`、`smartflow_cancel`、`smartflow_result` 六个工具。
+- 唯一公开 Review 编排路径是 `smartflow_execute → smartflow_review_turn*`。
+- `smartflow_status`、`smartflow_resume`、`smartflow_cancel`、`smartflow_result` 是彼此独立的 Run management APIs，不是另一条 Review continuation 路径。
+- wait、Action claim/renew、Review submission 与 Leader decision 只属于 Daemon 内部机制。
+- `HostActionLoop` symbol 与 `smartflow_wait`、`smartflow_claim_action`、`smartflow_renew_action_claim`、`smartflow_submit_review`、`smartflow_submit_leader_decision` 的公开 symbols、schemas、handlers、registrations、aliases 均不存在；对应 Review mechanics 仅为 Daemon internal。
+
 ## Ownership
 
 - Host/Leader 是唯一用户交互者，也是唯一可创建或恢复 Reviewer session 的组件。
@@ -107,7 +115,7 @@ interface ReviewSubmission {
 | 不完整但无 actionable blocking finding | `PAUSE_INVALID_REVIEW` | `USER_INPUT_REQUIRED`; 仅 `cancel` |
 | 有 findings 且 `autoRepairRounds >= 15` | `PAUSE_REPAIR_LIMIT` | 用户可选 `resume_review_decision` 或其他已允许动作 |
 
-`resume_review_decision` 将自动 repair counter 重置为 0，授予下一组最多 15 轮。无进展观测不提前终止额度，但也不得绕过无 actionable finding 的 invalid Review 保护。
+Owning Host 必须把 `resume_review_decision` 作为 `smartflow_review_turn` answer，携带 active `turnToken` 提交。HostTurnCoordinator 随后在内部调用 Daemon resume mechanics、清除 checkpoint 并将 automatic repair counter 重置为 0，授予下一组最多 15 轮；公开 `smartflow_resume` 是独立 paused-Run recovery API，不能代答 active `hostTurn` 或绕过 ownership。无进展观测不提前终止额度，但也不得绕过无 actionable finding 的 invalid Review 保护。
 
 ## Durable Checkpoint and Recovery
 
@@ -116,7 +124,7 @@ interface ReviewSubmission {
 - `AWAITING_USER_INPUT` 保存 pause code；重启后返回相同类型的用户请求。
 - Review 总 deadline 为 30 分钟；续租失败重试间隔 1 秒，连续三次失败进入 durable pause。
 - 同一 Run 的 turn 串行执行；Project state mutation 使用 CAS，每个 operation 总计最多尝试四次（含首次，最多三次重试）并在重试前重读。
-- Daemon 重启先恢复 `hostTurn`，随后重读 fresh state；checkpoint 未清除时不得并行启动 legacy pipeline recovery。
+- Daemon 重启先恢复 `hostTurn`，随后重读 fresh state；checkpoint 未清除时不得并行启动同一 Run 的一般 Worker/Run recovery。
 - stable child request IDs 防止重复 claim、Review 提交、repair、resume 或 Publish。
 
 ## Acceptance Matrix
@@ -138,19 +146,20 @@ interface ReviewSubmission {
 | deadline 或三次 renew failure | durable Host-review-unavailable pause |
 | Pause/conflict | `USER_INPUT_REQUIRED`，不是 `DONE` |
 | 终态 | `DONE` + canonical result |
-| MCP 工具注册 | 恰好 11 个；高层 Host 使用 execute + review_turn |
+| MCP 工具注册 | 恰好六个：`smartflow_execute`、`smartflow_review_turn` 与四个独立 Run management APIs；五个 named Review mechanics 的公开 symbols、schemas、handlers、registrations、aliases 数均为 0 |
 
 ## Current Implementation Status
 
-The schemas, 11-tool registry, deterministic decision policy, Host-owner enforcement, claim/renew/restart recovery, self-contained pause protocol, complete Reviewer context, and production-composition repair scenario are implemented. Final semantic review found no actionable P0/P1/P2 and approved T204/T205. The remaining evidence items are:
+The schemas, exact six-tool registry, deterministic decision policy, Host-owner enforcement, claim/renew/restart recovery, self-contained pause protocol, complete Reviewer context, production-composition repair scenario, and absence of the five named public Review symbols/schemas/handlers/registrations/aliases and `HostActionLoop` symbol are implemented. Final semantic review found no actionable P0/P1/P2 and approved T204/T205. The remaining evidence items are:
 
 - T208/T209: installed Pi host compatibility and an explicitly authorized, checked-in real-model transcript remain open; the gated real-Pi test was intentionally not run.
 
 ## Non-goals
 
 - 不让 Daemon 启动 Codex CLI、Claude CLI 或任何 Reviewer。
-- 不让 Daemon解释开放式用户意图、发明 RepairItem 或扩大批准范围。
-- 不移除旧 10 个 primitive MCP 工具。
+- 不让 Daemon 解释开放式用户意图、发明 RepairItem 或扩大批准范围。
+- 不让五个 named Review mechanics 的公开 symbols、schemas、handlers、registrations、aliases 或 `HostActionLoop` symbol 存在；对应 mechanics 仅为 Daemon internal。
+- 不把四个独立 Run management APIs 当作 Review continuation 或第二条 Review 编排路径。
 - 不让 Review 通过代表项目验证命令必然成功；SmartFlow 不新增通用 verify/gate。
 - 不以 mocked Pi Extension/RPC 测试替代真实 pinned Pi SDK 和 real-model E2E。
 - 不修改 Git 历史、远端或原始项目，除非通过受审查的 Publish。

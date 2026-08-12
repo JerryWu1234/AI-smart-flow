@@ -80,7 +80,7 @@ interface PublishExecutionIdentity {
   attemptId?: string;
 }
 
-function publishIdentity(state: ProjectState, run: RunRecord): PublishExecutionIdentity {
+function publishIdentity(run: RunRecord): PublishExecutionIdentity {
   const attempt = run.workerAttempts.at(-1);
   return {
     fence: run.fence,
@@ -378,7 +378,7 @@ export class PublishCoordinator {
     if (artifactFailure !== undefined) {
       throw new Error(`PUBLISH_ARTIFACT_INTEGRITY_BLOCKED:${artifactFailure}`);
     }
-    const identity = publishIdentity(state, run);
+    const identity = publishIdentity(run);
     const manifest = taskManifestSchema.parse(JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(run.taskManifest))
     ));
@@ -585,7 +585,7 @@ export class PublishCoordinator {
     if (await verifyRunArtifacts(this.store, run) !== undefined) {
       return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
     }
-    const identity = publishIdentity(state, run);
+    const identity = publishIdentity(run);
     const candidate = JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(run.candidate))
     ) as Candidate;

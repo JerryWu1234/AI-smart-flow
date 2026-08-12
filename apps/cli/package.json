@@ -26,7 +26,6 @@
     "@smartflow/daemon": "workspace:*",
     "@smartflow/mcp-server": "workspace:*",
     "@smartflow/observability": "workspace:*",
-    "@smartflow/provider-core": "workspace:*",
     "@smartflow/provider-pi": "workspace:*",
     "@smartflow/publish": "workspace:*",
     "@smartflow/state-store": "workspace:*",

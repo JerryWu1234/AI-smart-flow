@@ -29,6 +29,19 @@ class FakeDaemonGateway implements DaemonGateway {
       this.receipts.set(request.requestId, response);
       return Promise.resolve(response);
     }
+    if (toolName === "smartflow_review_turn") {
+      return Promise.resolve({
+        kind: "DONE",
+        result: {
+          projectId: "project-1",
+          jobId: "job-1",
+          phase: "COMPLETED",
+          status: "COMMITTED",
+          artifacts: [],
+          nextActions: []
+        }
+      });
+    }
     if (toolName === "smartflow_cancel") {
       const request = input as { projectId: string; jobId: string };
       if (request.projectId !== "project-1") {
@@ -44,37 +57,6 @@ class FakeDaemonGateway implements DaemonGateway {
         phase: "CANCELING"
       });
     }
-    if (toolName === "smartflow_renew_action_claim") {
-      const request = input as { projectId: string; jobId: string };
-      return Promise.resolve({
-        projectId: request.projectId,
-        jobId: request.jobId,
-        revision: 1,
-        stateVersion: 4,
-        phase: "REVIEWING",
-        expiresAt: "2026-07-20T00:05:00Z"
-      });
-    }
-    if (toolName === "smartflow_submit_review") {
-      const request = input as {
-        projectId: string;
-        jobId: string;
-        reviewAttemptId: string;
-        reviewerSessionId: string;
-        result: unknown;
-      };
-      return Promise.resolve({
-        projectId: request.projectId,
-        jobId: request.jobId,
-        revision: 1,
-        stateVersion: 4,
-        phase: "LEADER_DECISION",
-        reviewHash: "b".repeat(64),
-        reviewAttemptId: request.reviewAttemptId,
-        reviewerSessionId: request.reviewerSessionId,
-        result: request.result
-      });
-    }
     return Promise.reject(new GatewayError("NOT_IMPLEMENTED", toolName));
   }
 }
@@ -88,9 +70,16 @@ const executeInput = {
 };
 
 describe("smartflow.v5 MCP handlers", () => {
-  it("registers all eleven tools without Worker tool decisions and validates approvedSourceHash", async () => {
+  it("registers exactly the six public tools and validates approvedSourceHash", async () => {
     const handlers = createToolHandlers(new FakeDaemonGateway());
-    expect(Object.keys(handlers)).toHaveLength(11);
+    expect(Object.keys(handlers).sort()).toEqual([
+      "smartflow_cancel",
+      "smartflow_execute",
+      "smartflow_result",
+      "smartflow_resume",
+      "smartflow_review_turn",
+      "smartflow_status"
+    ]);
     expect("smartflow_submit_tool_decision" in handlers).toBe(false);
     const first = await handlers.smartflow_execute(executeInput);
     const replay = await handlers.smartflow_execute(executeInput);
@@ -100,20 +89,16 @@ describe("smartflow.v5 MCP handlers", () => {
     ).rejects.toMatchObject({ name: "ZodError" });
   });
 
-  it("forwards a claim renewal bound to the active Host turn", async () => {
+  it("forwards the composite review turn", async () => {
     const handlers = createToolHandlers(new FakeDaemonGateway());
-    await expect(handlers.smartflow_renew_action_claim({
-      requestId: "renew-request-1",
+    await expect(handlers.smartflow_review_turn({
+      requestId: "review-turn-request-1",
       projectId: "project-1",
       jobId: "job-1",
-      expectedRevision: 1,
-      expectedStateVersion: 3,
-      actionId: "action-1",
-      claimId: "claim-1",
       hostTurnId: "host-turn-1"
     })).resolves.toMatchObject({
-      stateVersion: 4,
-      phase: "REVIEWING"
+      kind: "DONE",
+      result: { phase: "COMPLETED", status: "COMMITTED" }
     });
   });
 
@@ -142,35 +127,5 @@ describe("smartflow.v5 MCP handlers", () => {
         reason: "stop"
       })
     ).rejects.toMatchObject({ code: "PROJECT_MISMATCH" });
-  });
-
-  it("forwards a Host review and returns its complete result to the Leader", async () => {
-    const handlers = createToolHandlers(new FakeDaemonGateway());
-    const result = {
-      verdict: "APPROVE",
-      completionPercentage: 100,
-      convergeFindings: [],
-      adversarialFindings: [],
-      pathCoverage: { "src/a.ts": "FULL" },
-      residualRisks: []
-    };
-    await expect(handlers.smartflow_submit_review({
-      requestId: "review-request-1",
-      projectId: "project-1",
-      jobId: "job-1",
-      expectedRevision: 1,
-      expectedStateVersion: 3,
-      claimId: "claim-1",
-      reviewAttemptId: "review-attempt-1",
-      taskSourceHash: "a".repeat(64),
-      candidateHash: "b".repeat(64),
-      reviewerSessionId: "reviewer-1",
-      result
-    })).resolves.toMatchObject({
-      phase: "LEADER_DECISION",
-      reviewAttemptId: "review-attempt-1",
-      reviewerSessionId: "reviewer-1",
-      result
-    });
   });
 });

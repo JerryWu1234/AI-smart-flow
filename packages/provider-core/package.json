@@ -21,8 +21,5 @@
     "build": "tsdown --config ../../tsdown.workspace.config.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --root ../.. --passWithNoTests packages/provider-core/src"
-  },
-  "dependencies": {
-    "@smartflow/protocol": "workspace:*"
   }
 }

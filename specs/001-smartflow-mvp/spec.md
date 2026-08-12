@@ -8,7 +8,7 @@
 **Version**: 4.1.0
 **Created**: 2026-07-20
 **Last Updated**: 2026-08-11
-**Input**: Preserve the sandboxed Pi Worker and safe Candidate/Publish design while adopting Solution D: Daemon-owned deterministic orchestration behind one preferred `smartflow_review_turn` continuation API, with Host-only Reviewer execution and user interaction.
+**Input**: Preserve the sandboxed Pi Worker and safe Candidate/Publish design while adopting Solution D: Daemon-owned deterministic orchestration behind the sole public `smartflow_review_turn` continuation API, with Host-only Reviewer execution and user interaction.
 
 ## Product Decision
 
@@ -34,9 +34,9 @@ Host: smartflow_execute
    └─ DONE → terminal canonical result
 ```
 
-Host/Leader 保留 MCP、独立 Reviewer 的创建/恢复与全部用户交互；Daemon 承担等待、Action claim/renew、Review 提交、确定性 accept/repair/pause、同范围 repair 与 Publish 的机械编排。Daemon 不创建 Reviewer，不解释开放式用户意图，也不得扩大批准范围。Pi Worker 不接收 SmartFlow MCP。当前迁移不动态注入 Host/global Skills，但允许 Pi 使用已进入 isolated workspace 的项目本地资源。
+Host/Leader 保留 MCP、独立 Reviewer 的创建/恢复与全部用户交互；Daemon 在内部承担等待、Action claim/renew、Review 提交、确定性 accept/repair/pause、同范围 repair 与 Publish 的机械编排。Daemon 不创建 Reviewer，不解释开放式用户意图，也不得扩大批准范围。Pi Worker 不接收 SmartFlow MCP。当前迁移不动态注入 Host/global Skills，但允许 Pi 使用已进入 isolated workspace 的项目本地资源。
 
-`smartflow_review_turn` 是 `smartflow_execute` 后的首选高层入口，只返回 `NOT_READY | REVIEW_REQUIRED | USER_INPUT_REQUIRED | DONE`。旧 10 个 primitive 工具继续公开用于兼容和低层控制；总 MCP surface 恰好 11 个工具。只有 durable claim 后的 `REVIEW_REQUIRED` 可向 owning Host 暴露 `worktreePath`。
+`smartflow_execute → smartflow_review_turn*` 是唯一公开 Review 编排路径，复合 turn 只返回 `NOT_READY | REVIEW_REQUIRED | USER_INPUT_REQUIRED | DONE`。公共 MCP surface 恰好六个工具：`smartflow_execute`、`smartflow_review_turn`、`smartflow_status`、`smartflow_resume`、`smartflow_cancel`、`smartflow_result`；后四者是独立 Run management APIs，不是 Review continuation 或第二条 Review 编排路径。公开 `smartflow_resume` 只用于独立 paused-Run recovery；active `hostTurn` 的 `USER_INPUT_REQUIRED` answer 必须由 owning Host 携带相同 `turnToken` 通过 `smartflow_review_turn` 提交，不能借该 API 代答或绕过 ownership。`HostActionLoop` symbol 以及 `smartflow_wait`、`smartflow_claim_action`、`smartflow_renew_action_claim`、`smartflow_submit_review`、`smartflow_submit_leader_decision` 的公开 symbols、schemas、handlers、registrations、aliases 均不存在；对应 Review mechanics 仅为 Daemon internal。只有 Daemon-internal durable claim 后的 `REVIEW_REQUIRED` 可向 owning Host 暴露 `worktreePath`。
 
 启动 SmartFlow MCP server 时传入的环境变量仍是 Pi 模型配置唯一用户来源。每个 MCP server 实例绑定一个模型和 endpoint；SmartFlow 不生成或读取 `models.json`，而在 Pi 子进程内通过官方 Extension 接口注册模型。
 
@@ -86,7 +86,7 @@ Pi Coding Agent SDK 在当前 Run 的 isolated workspace 中运行，直接使�
 
 ### User Story 3 — Host 执行 Reviewer，Daemon 自动编排闭环（Priority: P1）
 
-Pi Worker 完成后生成不可变 Candidate。Host 通过 `smartflow_review_turn` 获得已 claim 的 Review 请求，创建或恢复绑定 Reviewer 并提交结果；Daemon 随后按冻结策略自动 accept/repair/pause，不要求 Host 重放 primitive 状态机。
+Pi Worker 完成后生成不可变 Candidate。Host 通过 `smartflow_review_turn` 获得已 claim 的 Review 请求，创建或恢复绑定 Reviewer 并提交结果；Daemon 随后按冻结策略自动 accept/repair/pause，Host 不重建 Daemon-internal Review 状态机。
 
 **Why this priority**: Reviewer 独立性、用户交互边界和机械编排持久性必须同时成立；任一方职责混淆都会造成重复副作用、不可恢复 claim 或第二个用户 Leader。
 
@@ -97,10 +97,10 @@ Pi Worker 完成后生成不可变 Candidate。Host 通过 `smartflow_review_tur
 1. **Given** Worker 尚未产生当前 Review Action，**When** Host 调用复合 turn，**Then** 返回无 `worktreePath` 的 `NOT_READY` 与 bounded `retryAfterMs`。
 2. **Given** 当前 Candidate 已产生，**When** Daemon durable 写 claim intent 并成功 claim/reconcile，**Then** 返回 `REVIEW_REQUIRED`、稳定 `turnToken`、完整 changed paths、deadline 和首轮 `CREATE`/后续 `RESUME`。
 3. **Given** Host 收到 `REVIEW_REQUIRED`，**When** 执行 Reviewer，**Then** Reviewer session 与 Pi session 分离，每轮重读同步 Task、最新完整 Result Workspace 和累计 Candidate。
-4. **Given** Review 为 `APPROVE + 100% + no blocker`，**When** Host 用同一 token 提交，**Then** Daemon 自动 accept 并进入 Publish，不要求 Host 调用 decision primitive。
+4. **Given** Review 为 `APPROVE + 100% + no blocker`，**When** Host 用同一 token 提交，**Then** Daemon 自动 accept 并进入 Publish，不存在需要 Host 调用的独立 public decision handler。
 5. **Given** Review 不完整且包含 blocking findings，**When** 当前自动 repair 轮次少于 15，**Then** Daemon 只使用当前 finding fingerprints 创建同范围新 Revision，并由新 Pi session 实现、原 Reviewer RESUME。
 6. **Given** Review 不完整但没有 actionable blocking finding，**When** Daemon 规划下一步，**Then** durable pause 为 `INVALID_REVIEW`，复合 turn 返回 `USER_INPUT_REQUIRED` 且只允许 cancel。
-7. **Given** 当前组已完成 15 个自动 repair 轮次，**When** Review 仍不完整，**Then** 保留 Candidate/Review 并返回 `AUTOMATIC_REPAIR_LIMIT`；用户可通过 Host 提交 `resume_review_decision` 授予下一组。
+7. **Given** 当前组已完成 15 个自动 repair 轮次，**When** Review 仍不完整，**Then** 保留 Candidate/Review 并返回 `AUTOMATIC_REPAIR_LIMIT`；owning Host 可携带 active `turnToken`，通过 `smartflow_review_turn` 提交 `resume_review_decision`，由 HostTurnCoordinator 内部调用 Daemon resume mechanics 并授予下一组。
 8. **Given** 旧 token、旧 Candidate 或另一个 `hostTurnId` 提交 continuation，**When** Daemon 校验，**Then** 不产生副作用；stale continuation 只返回无路径当前状态，非 owning Host 被拒绝。
 
 ---
@@ -111,7 +111,7 @@ Pi Worker 完成后生成不可变 Candidate。Host 通过 `smartflow_review_tur
 
 **Why this priority**: Publish 是 isolated workspace 与用户真实项目之间唯一允许的写入通道；自动化不能削弱 Review 门槛或 CAS 保护。
 
-**Independent Test**: 分别测试自动 accept 后的无冲突发布、相关路径漂移和写回能力不足，确认结果为 committed、零写入 conflict 或 DeliveryBundle；Host 高层不调用 decision/publish primitive。
+**Independent Test**: 分别测试自动 accept 后的无冲突发布、相关路径漂移和写回能力不足，确认结果为 committed、零写入 conflict 或 DeliveryBundle；Host 仅使用公开 ReviewTurn，decision 与 Publish progression 均为 Daemon-internal mechanics。
 
 **Acceptance Scenarios**:
 
@@ -174,7 +174,7 @@ Reviewer 来源必须指向当前 Review finding。Leader 来源必须绑定当�
 
 ### Daemon decision matrix
 
-复合流程中的 accept/repair/pause 由 Daemon 根据已验证 Review 与 durable `autoRepairRounds` 机械规划；Host 不重复提交 primitive decision。兼容 primitive 仍可表达显式低层操作，但不得绕过以下门槛。
+复合流程中的 accept/repair/pause 由 Daemon 根据已验证 Review 与 durable `autoRepairRounds` 机械规划；Host 不重复提交 decision。公开 MCP 不提供独立 Review decision 或 repair/Publish progression handler，以下操作均由 ReviewTurn 背后的 Daemon-internal mechanics 执行。
 
 | 当前 Review / counter | 计划 | 结果 |
 |---|---|---|
@@ -184,7 +184,7 @@ Reviewer 来源必须指向当前 Review finding。Leader 来源必须绑定当�
 | 有 findings 且 counter `>= 15` | `PAUSE_REPAIR_LIMIT` | durable `AUTOMATIC_REPAIR_LIMIT`，等待用户是否继续下一组 |
 | Artifact/Hash/session/Host ownership 不匹配 | 无计划 | 拒绝或安全暂停，不得 Publish |
 
-Host 保留两类非机械责任：执行 `CREATE | RESUME` Reviewer，并在 `USER_INPUT_REQUIRED` 时向用户取得合法答案。`resume_review_decision` 重置 counter，授予下一组最多 15 个自动 repair 轮次。
+Host 保留两类非机械责任：执行 `CREATE | RESUME` Reviewer，并在 `USER_INPUT_REQUIRED` 时向用户取得合法答案。对于 `resume_review_decision`，owning Host 必须携带 active `turnToken` 通过 `smartflow_review_turn` 提交；HostTurnCoordinator 内部调用 Daemon resume mechanics、重置 counter，并授予下一组最多 15 个自动 repair 轮次。
 
 ## Requirements
 
@@ -219,11 +219,11 @@ Host 保留两类非机械责任：执行 `CREATE | RESUME` Reviewer，并在 `U
 - **FR-019**：Reviewer 每轮 MUST 重读冻结任务与最新完整 Result Workspace；最终 verdict MUST 覆盖累计 Candidate。
 - **FR-020**：Host MUST 使用当前 `turnToken` 提交 Reviewer 结果；Daemon MUST 校验 Action、Revision、Task/Candidate Hash、Reviewer binding 与 changed-path coverage。Host 的职责止于 Reviewer 执行，不得在高层流程重放机械 decision。
 - **FR-021**：Daemon 自动 repair MUST 包含至少一个来自当前 blocking finding fingerprint 的 RepairItem，并创建同一批准范围的新 Revision；新 Revision 以上一 Result Snapshot 为输入并创建新的 Pi session，Reviewer binding 保持不变。
-- **FR-022**：每组最多自动执行 15 个 repair 轮次；无进展不得在额度耗尽前提前暂停，但无 actionable finding 的无效 Review MUST 立即进入 `INVALID_REVIEW`。额度耗尽后保留 Candidate/Review 并等待用户决定；`resume_review_decision` 重置下一组额度。
+- **FR-022**：每组最多自动执行 15 个 repair 轮次；无进展不得在额度耗尽前提前暂停，但无 actionable finding 的无效 Review MUST 立即进入 `INVALID_REVIEW`。额度耗尽后保留 Candidate/Review 并等待用户决定；owning Host MUST 携带 active `turnToken`，将 `resume_review_decision` 作为 `smartflow_review_turn` answer 提交，HostTurnCoordinator MUST 内部调用 Daemon resume mechanics、将 `autoRepairRounds` 重置为 0，并授予下一组最多 15 轮。
 
 #### State, recovery and publish
 
-- **FR-023**：Daemon MUST 承载后台长任务与方案 D 的机械编排；MCP mutation MUST 快速返回，`state.json` MUST 是唯一恢复事实，首选 Host continuation MUST 是 `smartflow_review_turn`。
+- **FR-023**：Daemon MUST 承载后台长任务与方案 D 的机械编排；MCP mutation MUST 快速返回，`state.json` MUST 是唯一恢复事实，唯一公开 Review continuation MUST 是 `smartflow_review_turn`。
 - **FR-024**：同一规范化任务路径同时最多一个 Active Run；不同任务文件 MAY 并行，但状态与 workspace MUST 按 job 隔离。
 - **FR-025**：每次 Worker 执行 MUST 持久化 `attemptId`、Pi session 标识、Sandbox containment 标识、generation 和 Revision 绑定。
 - **FR-026**：Host 重连且 Worker 存活时 MUST 继续同一 Pi session；进程崩溃恢复同一 Revision 时 MUST 创建新 attempt/Pi session；新 Revision MUST 创建新 Pi session。
@@ -248,15 +248,15 @@ Host 保留两类非机械责任：执行 `CREATE | RESUME` Reviewer，并在 `U
 
 #### Composite Review turn and daemon orchestration
 
-- **FR-042**：批准 Run 的首选高层协议 MUST 是一次 `smartflow_execute` 后重复调用 `smartflow_review_turn`；该复合工具 MUST 只返回 `NOT_READY | REVIEW_REQUIRED | USER_INPUT_REQUIRED | DONE`，`NOT_READY` MUST 提供 bounded `retryAfterMs`。
-- **FR-043**：Daemon MUST 负责 wait、Review Action claim/renew、Review submission、确定性 accept/repair/pause、已批准范围 repair continuation 与 Publish progression；Host MUST 只负责 Reviewer session 的 CREATE/RESUME 和全部用户交互，Daemon MUST NOT 创建、替换或模拟 Reviewer。
+- **FR-042**：批准 Run 的唯一公开 Review orchestration MUST 是一次 `smartflow_execute` 后重复调用 `smartflow_review_turn`（`smartflow_execute → smartflow_review_turn*`）；Review turn MUST 只返回 `NOT_READY | REVIEW_REQUIRED | USER_INPUT_REQUIRED | DONE`，`NOT_READY` MUST 提供 bounded `retryAfterMs`。
+- **FR-043**：Daemon MUST 在内部负责 wait、Review Action claim/renew、Review submission、确定性 accept/repair/pause、已批准范围 repair continuation 与 Publish progression；Host MUST 只负责 Reviewer session 的 CREATE/RESUME 和全部用户交互，Daemon MUST NOT 创建、替换或模拟 Reviewer。
 - **FR-044**：每个 active Review turn MUST 绑定 `hostTurnId + turnToken + revision`。首轮 Reviewer mode MUST 为 `CREATE`，后续 MUST 为同一 session 的 `RESUME`；只有 durable claim/reconciliation 完成后的 `REVIEW_REQUIRED` MAY 暴露 `worktreePath`，且 Reviewer session MUST 与当前 Pi session 分离。
 - **FR-045**：Project state MUST 保持 schema version 4，并在 Run 中 durable 保存 `hostTurn` 三阶段 `CLAIMING | AWAITING_REVIEW | AWAITING_USER_INPUT` 与 `autoRepairRounds`；checkpoint MUST durable-first，不能从日志、timer、Host 请求或 session 文件推断。
-- **FR-046**：Daemon restart MUST 先由 Host-turn coordinator 恢复 checkpoint，再重读 fresh state；checkpoint 存在时不得并行启动 legacy recovery。Review deadline MUST 为 30 分钟；claim MUST 每 60 秒或到期前 30 秒续租；失败每 1 秒重试，连续三次 MUST durable pause。
-- **FR-047**：同一 `projectId + jobId` 的 composite turns MUST 串行化；所有 mutation MUST 使用 Project-wide stateVersion CAS，总计最多尝试四次（含首次，最多三次重试）并重读 fresh state；child request IDs MUST 从稳定 turn identity 派生。Stale Review/failure/answer continuation MUST 零副作用并只返回无敏感路径的当前 `NOT_READY`。
-- **FR-048**：Daemon MUST 只产生四种机械计划：`ACCEPT` 要求 `APPROVE + 100% + no blocking finding`；`REPAIR` 要求当前 blocking findings 且 `autoRepairRounds < 15`，并只使用其 fingerprints；无 actionable finding MUST `PAUSE_INVALID_REVIEW`；额度达到 15 MUST `PAUSE_REPAIR_LIMIT`。`resume_review_decision` MUST 重置下一组额度。
-- **FR-049**：所有非终态且需要用户选择/批准的暂停 MUST 返回 typed `USER_INPUT_REQUIRED`，包含当前合法 options 及必要 answer template；`INVALID_REVIEW` MUST 只允许 cancel。`DONE` MUST 只对应 `COMPLETED | CANCELED | FAILED` 的 canonical result，不得代表 conflict、pause 或等待。
-- **FR-050**：公共 MCP surface MUST 恰好包含 11 个工具：首选 composite `smartflow_review_turn` 加原有 10 个 primitive（execute/status/wait/claim/renew/submit-review/submit-leader-decision/resume/cancel/result）。兼容 primitive MUST 保留，但高层 Host workflow MUST NOT 用它们重建机械循环。
+- **FR-046**：Daemon restart MUST 先由 Host-turn coordinator 恢复 checkpoint，再重读 fresh state；checkpoint 存在时不得并行启动 ordinary Run recovery。Review deadline MUST 为 30 分钟；claim MUST 每 60 秒或到期前 30 秒续租；失败每 1 秒重试，连续三次 MUST durable pause。
+- **FR-047**：同一 `projectId + jobId` 的 Review turns MUST 串行化；所有 mutation MUST 使用 Project-wide stateVersion CAS，总计最多尝试四次（含首次，最多三次重试）并重读 fresh state；Daemon-internal operation request IDs MUST 从稳定 turn identity 派生。Stale Review/failure/answer continuation MUST 零副作用并只返回无敏感路径的当前 `NOT_READY`。
+- **FR-048**：Daemon MUST 只产生四种机械计划：`ACCEPT` 要求 `APPROVE + 100% + no blocking finding`；`REPAIR` 要求当前 blocking findings 且 `autoRepairRounds < 15`，并只使用其 fingerprints；无 actionable finding MUST `PAUSE_INVALID_REVIEW`；额度达到 15 MUST `PAUSE_REPAIR_LIMIT`。Owning Host 选择继续时 MUST 携带 active turn 的相同 `turnToken`，将 `resume_review_decision` 作为 `smartflow_review_turn` answer 提交；HostTurnCoordinator MUST 内部调用 Daemon resume mechanics、清除 checkpoint、将 `autoRepairRounds` 重置为 0，并授予下一组最多 15 轮。
+- **FR-049**：所有非终态且需要用户选择/批准的暂停 MUST 返回 typed `USER_INPUT_REQUIRED`，包含当前合法 options 及必要 answer template；`INVALID_REVIEW` MUST 只允许 cancel。`DONE` MUST 只对应 `COMPLETED | CANCELED | FAILED` 并直接包含 canonical `ResultOutput`；其形状 MUST 与独立 `smartflow_result` 响应一致，但不得通过调用该公开 API 生成，也不得代表 conflict、pause 或等待。
+- **FR-050**：公共 MCP surface MUST 恰好包含六个工具：`smartflow_execute`、`smartflow_review_turn`、`smartflow_status`、`smartflow_resume`、`smartflow_cancel`、`smartflow_result`。唯一公开 Review 编排路径 MUST 是 `smartflow_execute → smartflow_review_turn*`；status/resume/cancel/result MUST 是独立 Run management APIs，而不是 Review continuation 或第二条 Review 编排路径。公开 `smartflow_resume` MUST 仅作为独立 paused-Run recovery API，active `hostTurn` 存在时 MUST NOT 充当 ReviewTurn answer 或绕过 ownership。`HostActionLoop` symbol 以及 `smartflow_wait`、`smartflow_claim_action`、`smartflow_renew_action_claim`、`smartflow_submit_review`、`smartflow_submit_leader_decision` 的公开 symbols、schemas、handlers、registrations、aliases MUST NOT exist；wait、Action claim/renew、Review submission、Leader decision、repair/Publish progression MUST 仅为 Daemon-internal mechanics。
 - **FR-051**：真实 pinned `@earendil-works/pi-coding-agent@0.83.0` 的 exports、Extension default export/`registerProvider()` host 和 RPC model-resolution 兼容 MUST 由独立、可复现、checked-in 的 installed-package evidence 证明；mocked `registerProvider`、source-tree tests、production-composition E2E 或 gitignored transcript MUST NOT 被视为该兼容证明。
 
 ### Key Entities
@@ -275,9 +275,9 @@ Host 保留两类非机械责任：执行 `CREATE | RESUME` Reviewer，并在 `U
 | ReviewAction | Daemon 待 claim 的审查动作 | Review attempt + Candidate + full changed paths |
 | ReviewerBinding | 闭环唯一 Reviewer session | Run + first reviewer session ID |
 | ReviewDecision | Reviewer 的结构化结果 | Action + synchronized task Hash + Candidate Hash + Reviewer session |
-| ReviewTurn | 首选复合 Host continuation | request/Host owner + `NOT_READY \| REVIEW_REQUIRED \| USER_INPUT_REQUIRED \| DONE` |
+| ReviewTurn | 唯一公开 Review continuation | request/Host owner + `NOT_READY \| REVIEW_REQUIRED \| USER_INPUT_REQUIRED \| DONE` |
 | HostTurnCheckpoint | Daemon 可恢复的复合 turn 内部阶段 | `hostTurnId + turnToken + revision + CLAIMING/AWAITING_*` |
-| AutomaticRepairBudget | 当前组自动 repair 轮次 | `autoRepairRounds`, limit 15, reset by `resume_review_decision` |
+| AutomaticRepairBudget | 当前组自动 repair 轮次 | `autoRepairRounds`, limit 15, reset by same-token `smartflow_review_turn` answer `resume_review_decision` through HostTurnCoordinator internal resume mechanics |
 | RepairItem | 自动 repair 的当前 Reviewer finding 输入 | current finding fingerprint；不得扩大批准范围 |
 | AutomaticReviewDecision | `ACCEPT \| REPAIR \| PAUSE_INVALID_REVIEW \| PAUSE_REPAIR_LIMIT` | current Review + counter + stable child request ID |
 | PublishResult | CAS 写回或 Bundle 事实 | Candidate + Review + automatic accept decision |
@@ -303,13 +303,13 @@ Host 保留两类非机械责任：执行 `CREATE | RESUME` Reviewer，并在 `U
 - 无法证明 Pi 进程树已停止：保持暂停，不生成 Candidate 或进入终态。
 - 自动写回返回 PARTIAL 或 UNKNOWN：进入 `PUBLISH_RECOVERY_BLOCKED`，保留逐路径事实。
 - `NOT_READY`、stale continuation、`USER_INPUT_REQUIRED` 或 `DONE` 试图携带 `worktreePath`：协议 Schema 拒绝；只允许已 claim 的 `REVIEW_REQUIRED`。
-- Daemon 在 durable `CLAIMING` 后、primitive claim 返回前崩溃：重启后通过稳定 child request ID 与 pending Action 对账，不重复 claim。
+- Daemon 在 durable `CLAIMING` 后、Daemon-internal Action claim 返回前崩溃：重启后通过稳定 internal operation request ID 与 pending Action 对账，不重复 claim。
 - Daemon 在 `AWAITING_REVIEW` 时重启：恢复相同 Host owner、turn token、Action/reviewAttempt 和 deadline，重建续租，不创建替代 Reviewer。
 - 同一 Run 收到并发 composite turns 或 Project state CAS 冲突：per-Run queue 串行；每次 retry 重读 fresh state，最多四次，不重复副作用。
 - claim lease 距离到期不足 30 秒：Daemon 优先续租；连续三次失败或 30 分钟 deadline 到达时 durable pause，不继续 Publish。
 - 旧 Review、failure 或 answer 携带曾经有效但当前 stale 的 token：不应用 continuation，不重新暴露 worktree，只返回当前 `NOT_READY`。
 - `INVALID_REVIEW` 收到非 cancel answer：拒绝；不得把无 actionable finding 的文本猜成 RepairItem。
-- 用户在 `AUTOMATIC_REPAIR_LIMIT` 选择继续：`resume_review_decision` 将当前组计数重置为零，但不替换 Reviewer binding 或 Task 范围。
+- 用户在 `AUTOMATIC_REPAIR_LIMIT` 选择继续：owning Host 携带 active `turnToken`，通过 `smartflow_review_turn` 提交 `resume_review_decision`；HostTurnCoordinator 内部调用 Daemon resume mechanics，将当前组计数重置为零，但不替换 Reviewer binding 或 Task 范围。
 - production-composition 两工具 E2E 通过但未加载真实 installed Pi host：只能关闭 orchestration criterion，不能关闭 FR-051/SC-020。
 
 ## Success Criteria
@@ -333,8 +333,8 @@ Host 保留两类非机械责任：执行 `CREATE | RESUME` Reviewer，并在 `U
 - **SC-015**：运行、恢复、取消和 Finalize 后扫描 workspace、Data Dir、argv、状态、session、Artifact 与日志，`models.json` 生成/读取次数为 0，API Key 明文泄露数为 0。
 - **SC-016**：对所有 composite turn 测试，输出种类只属于四态之一；`NOT_READY`、stale continuation、`USER_INPUT_REQUIRED` 和 `DONE` 的 `worktreePath` 出现次数为 0，只有成功 claim 的 `REVIEW_REQUIRED` 恰好提供一次当前路径。
 - **SC-017**：在 claim-intent、claimed-review、Review submission、repair decision 与等待用户输入各 checkpoint 注入 restart/CAS mismatch/重复请求后，重复 claim、Review、repair 和 Publish 次数均为 0；有效 deadline/renewal 恢复率为 100%。
-- **SC-018**：MCP Schema 与 handler registry 中工具数恰好为 11；旧 10 个 primitive 全部存在，`smartflow_submit_tool_decision` 不存在，高层 Host workflow 的工具名集合只包含 `smartflow_execute` 和 `smartflow_review_turn`。
-- **SC-019**：production runtime composition 的 E2E 仅通过 `smartflow_execute → smartflow_review_turn*` 完成至少一轮自动 repair、同一 Reviewer RESUME 和最终 terminal result；Host 发出的 primitive claim/renew/review/decision/resume 调用数为 0。
+- **SC-018**：MCP Schema 与 handler registry 中工具数恰好为六，名称集合严格等于 `{ smartflow_execute, smartflow_review_turn, smartflow_status, smartflow_resume, smartflow_cancel, smartflow_result }`；`HostActionLoop` symbol 与五个 named Review mechanics 的公开 symbols、schemas、handlers、registrations、aliases 数均为 0，对应 mechanics 仅从 Daemon 内部调用。
+- **SC-019**：production runtime composition 的 E2E 仅通过 `smartflow_execute → smartflow_review_turn*` 完成至少一轮自动 repair、同一 Reviewer RESUME 和最终 terminal `ResultOutput`；Review loop 中 Host 发出的 status/resume/cancel/result 调用数以及 wait/claim/renew/review/decision handler 调用数均为 0，Daemon-internal wait、Action claim/renew、Review submission、Leader decision 与 repair/Publish progression 不经过公共 MCP handler。
 - **SC-020**：真实 installed Pi 0.83.0 的 Extension/RPC compatibility 与经明确授权的 real-model 两工具 E2E 均必须产生 checked-in、可复现、已脱敏证据；在两类证据齐备前，FR-051、T190/T208、T192/T209 完成率不得标为 100%。
 
 ## Assumptions

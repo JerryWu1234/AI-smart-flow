@@ -9,7 +9,7 @@ import {
   type RepairRound
 } from "@smartflow/review";
 import { durableLeaderDecisionSchema, type RepairItem } from "@smartflow/protocol";
-import { StateStore, type ProjectState, type RunRecord } from "@smartflow/state-store";
+import { StateStore, type RunRecord } from "@smartflow/state-store";
 import {
   compileTaskManifest,
   taskManifestSchema,
@@ -196,7 +196,7 @@ export class RepairCoordinator {
       { parentManifest, firstTaskNumber: nextTaskNumber(parentManifest) }
     );
     if (assessed.pauseRequired) {
-      await this.pause(state, run, currentRound, assessed.noProgressCount, "REPAIR_NO_PROGRESS");
+      await this.pause(run, currentRound, assessed.noProgressCount, "REPAIR_NO_PROGRESS");
       return { phase: "PAUSED", code: "REPAIR_NO_PROGRESS" };
     }
 
@@ -240,7 +240,6 @@ export class RepairCoordinator {
       ? "REPAIR_TASKS_READY"
       : "REPAIR_USER_APPROVAL_REQUIRED";
     await this.pause(
-      state,
       run,
       currentRound,
       assessed.noProgressCount,
@@ -268,7 +267,6 @@ export class RepairCoordinator {
   }
 
   private async pause(
-    capturedState: ProjectState,
     run: RunRecord,
     round: RepairRound,
     noProgressCount: number,
