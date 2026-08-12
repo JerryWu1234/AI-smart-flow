@@ -80,3 +80,12 @@ Pi session files are supporting evidence. `state.json`, frozen Task, Revision an
 2. After Pi terminates, Daemon persists required session evidence outside the sandbox as an Artifact.
 3. `.smartflow-runtime/` is excluded or removed before Result Snapshot and Candidate generation.
 4. Candidate generation starts only after the process tree is reconciled; if termination cannot be proven, the Run pauses.
+
+## Pinned Pi SDK compatibility evidence
+
+1. The implementation dependency is pinned to `@earendil-works/pi-coding-agent@0.83.0`; compatibility is a runtime gate, not an assumption derived only from TypeScript mocks.
+2. A complete gate must load the actual installed package and prove the required exports, Extension default-export loading, official `registerProvider()` host behavior, and RPC selection/resolution of the one registered model without sending a model request.
+3. Mocked `pi.registerProvider`, source-tree-only tests, production-composition Review E2E, and a manually successful gitignored `.smartflow-e2e` run do not independently prove the installed package contract.
+4. Missing or incompatible real exports/Extension/RPC behavior must fail closed in Provider probing and CLI doctor; it must not report hard-coded support or fall back to another model path.
+5. Real-model acceptance transmits fixture content to the configured endpoint and therefore runs only after explicit authorization. Its evidence must be redacted, durable, and reviewable without credentials or internal absolute paths.
+6. T190/T208 track real installed SDK compatibility. T192/T209 track authorized real-model two-tool E2E. Both pairs remain open until their checked-in evidence exists.

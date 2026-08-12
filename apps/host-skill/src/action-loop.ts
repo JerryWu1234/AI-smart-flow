@@ -8,8 +8,15 @@ import {
   submitLeaderDecisionOutputSchema,
   waitOutputSchema,
   type ResultOutput,
-  type ReviewSubmission
+  type ReviewSubmission,
+  type ReviewTurnInput,
+  type ReviewTurnOutput
 } from "@smartflow/protocol";
+
+import {
+  planReviewDecision,
+  REPAIR_ROUND_LIMIT
+} from "@smartflow/review";
 
 import type { HostGateway } from "./approval.js";
 import {
@@ -31,8 +38,12 @@ export interface RepairLimitContext {
   result: ReviewSubmission;
 }
 
+export type UserInputContext = Extract<ReviewTurnOutput, { kind: "USER_INPUT_REQUIRED" }>;
+export type UserInputAnswer = NonNullable<ReviewTurnInput["answer"]>;
+
 export interface HostActionCallbacks {
   review?(context: ReviewActionContext): Promise<ReviewActionResult>;
+  answerUserInput?(context: UserInputContext): Promise<UserInputAnswer | undefined>;
   continueAfterRepairLimit?(context: RepairLimitContext): Promise<boolean>;
 }
 
@@ -53,7 +64,6 @@ export interface RunLoopInput {
 }
 
 const REVIEW_RETRY_LIMIT = 3;
-const REPAIR_ROUND_LIMIT = 15;
 
 export class HostActionLoop {
   private readonly gateway: HostGateway;
@@ -112,47 +122,26 @@ export class HostActionLoop {
         });
         const review = reviewResultSubmitOutputSchema.safeParse(reviewResponse);
         if (!review.success) continue;
-        const blockingFindings = [...new Map([
-          ...review.data.result.convergeFindings,
-          ...review.data.result.adversarialFindings
-        ].filter((finding) => finding.blocking).map((finding) => [
-          finding.fingerprint,
-          finding
-        ])).values()];
-        const complete =
-          review.data.result.verdict === "APPROVE" &&
-          review.data.result.completionPercentage === 100 &&
-          blockingFindings.length === 0;
-        if (complete) {
+        const plan = planReviewDecision({
+          result: review.data.result,
+          repairRounds
+        });
+        if (plan.kind === "ACCEPT" || plan.kind === "PAUSE_INVALID_REVIEW") {
           await this.gateway.call("smartflow_submit_leader_decision", {
-            requestId: requestId("accept"),
+            requestId: requestId(plan.kind === "ACCEPT" ? "accept" : "pause-invalid-review"),
             projectId: input.projectId,
             jobId: input.jobId,
             expectedRevision: review.data.revision,
             expectedStateVersion: review.data.stateVersion,
             reviewHash: review.data.reviewHash,
-            decision: "accept",
+            decision: plan.decision,
             repairItems: [],
-            reason: "Reviewer confirmed every approved task is 100% complete"
-          });
-          continue;
-        }
-        if (blockingFindings.length === 0) {
-          await this.gateway.call("smartflow_submit_leader_decision", {
-            requestId: requestId("pause-invalid-review"),
-            projectId: input.projectId,
-            jobId: input.jobId,
-            expectedRevision: review.data.revision,
-            expectedStateVersion: review.data.stateVersion,
-            reviewHash: review.data.reviewHash,
-            decision: "pause",
-            repairItems: [],
-            reason: "Reviewer did not provide actionable incomplete-task guidance"
+            reason: plan.reason
           });
           continue;
         }
         let expectedStateVersion = review.data.stateVersion;
-        if (repairRounds === REPAIR_ROUND_LIMIT) {
+        if (plan.kind === "PAUSE_REPAIR_LIMIT") {
           const paused = submitLeaderDecisionOutputSchema.parse(
             await this.gateway.call("smartflow_submit_leader_decision", {
               requestId: requestId("pause-repair-limit"),
@@ -163,7 +152,7 @@ export class HostActionLoop {
               reviewHash: review.data.reviewHash,
               decision: "pause",
               repairItems: [],
-              reason: "Automatic repair limit reached"
+              reason: plan.reason
             })
           );
           const shouldContinue = await this.callbacks.continueAfterRepairLimit?.({
@@ -198,11 +187,10 @@ export class HostActionLoop {
           expectedStateVersion,
           reviewHash: review.data.reviewHash,
           decision: "repair",
-          repairItems: blockingFindings.map((finding) => ({
-            source: "reviewer",
-            findingFingerprint: finding.fingerprint
-          })),
-          reason: "Reviewer reported incomplete approved tasks"
+          repairItems: plan.repairItems,
+          reason: plan.kind === "REPAIR"
+            ? plan.reason
+            : "Reviewer reported incomplete approved tasks"
         });
         repairRounds += 1;
         continue;
@@ -283,6 +271,7 @@ export class HostActionLoop {
       worktreePath: claim.action.worktreePath,
       taskSourceHash: claim.action.taskSourceHash,
       candidateHash: claim.action.candidateHash,
+      changedPaths: [...claim.action.changedPaths],
       reviewerSession: { ...claim.action.reviewerSession },
       piSessionId: claim.action.piSessionId
     };

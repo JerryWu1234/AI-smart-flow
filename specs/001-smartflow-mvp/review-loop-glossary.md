@@ -2,30 +2,33 @@
 
 | Term | Meaning |
 | --- | --- |
-| Leader | The Codex session that drives MCP calls, evaluates Review results, starts repair rounds, and accepts publish. |
-| Worker | The coding session that implements the approved tasks in the Run worktree. |
-| Reviewer | An independent Codex session that opens the Run worktree read-only, compares its synchronized `task.md` with the changed-file list, and reports task completion. |
-| Run worktree | The Run-scoped isolated Git worktree shared by the Worker for writes and the Reviewer for read-only inspection. It is not the user's original project worktree. |
-| Canonical task source | The original project's `task.md`; it is the sole source of truth for task content. |
-| Synchronized task | A byte-for-byte mirror of the canonical task source at the same relative path in the Run worktree, read by both Worker and Reviewer. |
-| Task-sync precondition | The canonical task source changes only while no Worker or Reviewer is active; mid-round task changes are outside the workflow contract. |
-| Claimed worktree path | The absolute Run-worktree path disclosed only after a trusted Leader claims the current Review Action. It is not exposed through ordinary status, logs, pauses, or Worker input. |
-| Bound Reviewer session | The first successfully created Reviewer session for a Run. Every later repair round resumes this same session. |
-| Full changed-file list | The complete set of changed files from the Run baseline through the current Candidate, supplied on every review round. |
-| Worktree review access | Read-only access for the Reviewer to inspect current files and diffs directly in the Run worktree. |
-| Review file-access boundary | Direct filesystem access to the claimed Run worktree; no opaque handle or Artifact/content query proxy exists. |
-| Context read | Read-only access to unchanged Run-worktree files when needed to understand a change; it does not expand the review scope beyond `task.md`. |
-| Bound-session failure | A lost or unrecoverable bound Reviewer session pauses the workflow and reports the root cause; it is never replaced. |
-| Pause notification | A concise user-facing report containing the root cause, completion percentage, and incomplete-task guidance only. |
-| Publish failure | A publish conflict or failure that retains the Candidate in a viewable paused state and reports only its root cause. |
-| External validation Agent | An independently run test, lint, or validation Agent whose outcome does not gate this review loop's publish decision. |
-| Review Action | The durable signal that a Worker result is ready for independent review. |
-| Repair feedback | The Reviewer task-level completion, reason, and suggestion passed separately to the Worker for the next coding round. |
-| Repair instruction | The subset of Review feedback for incomplete tasks only, applied against the synchronized full `task.md`. |
-| Completion percentage | The rounded arithmetic mean of all individual task completion percentages. |
-| Round limit | At most 15 repair rounds run automatically. The initial coding-and-review pass is excluded; continuing grants 15 additional repair rounds. |
-| No-progress observation | Repeated unchanged completion or feedback does not pause the loop early; the current 15-round allowance still applies. |
-| Viewable pause | A stopped run retains its Candidate and Review information for inspection, without publishing or cleanup. |
-| Reviewer creation retry | The Leader retries a failed Reviewer-session creation or transient network failure up to three times, then pauses with the root cause. |
-| Reviewer format retry | A bound Reviewer has up to three attempts to correct an invalid structured result; then the workflow pauses with the root cause. |
-| Publish | Applying an accepted Candidate to the original project after every approved task reaches 100%. |
+| Leader / Host | The user-facing strong-model session. It approves task intent, creates/restores the independent Reviewer, and is the only component that communicates with the user. It no longer reconstructs deterministic Review/repair/Publish mechanics. |
+| Daemon-owned mechanical orchestration | Frozen state-machine work performed by the Daemon: wait, claim/renew, validate Review, plan accept/repair/pause, continue approved-scope repair, and Publish. It is not a second user-facing Leader. |
+| Worker | The Pi Coding Agent session that implements the approved Revision in the isolated Run workspace. |
+| Reviewer | An independent native session executed by the Host. It rereads the synchronized Task and current files, scores every Task, and reports structured completion; the Daemon never creates or replaces it. |
+| Composite Review turn | One `smartflow_review_turn` request/response. It is the preferred continuation API after `smartflow_execute`. |
+| Four public states | The exclusive composite outputs: `NOT_READY`, `REVIEW_REQUIRED`, `USER_INPUT_REQUIRED`, and terminal-only `DONE`. |
+| `NOT_READY` | A no-path progress response with bounded `retryAfterMs`; also the safe response to stale continuation payloads. |
+| `REVIEW_REQUIRED` | A current Review Action that the Daemon has durably claimed. This is the only response allowed to expose `worktreePath`. |
+| `USER_INPUT_REQUIRED` | A durable nonterminal pause containing legal options and, when needed, a typed answer template. Only the Host may ask the user and submit the answer. |
+| `DONE` | A canonical terminal result for `COMPLETED`, `CANCELED`, or `FAILED`; never an alias for pause/conflict. |
+| `hostTurnId` | Stable identity of the Host instance that owns the active durable turn. Another Host cannot implicitly continue it. |
+| `turnToken` | Stable continuation token binding Review/failure/answer submissions to one Host turn and deriving idempotent child request IDs. |
+| Claim intent | Durable `CLAIMING` checkpoint written before the primitive Action claim, allowing a lost response to be reconciled safely. |
+| Persistent Host-turn stages | Internal schema-v4 stages `CLAIMING`, `AWAITING_REVIEW`, and `AWAITING_USER_INPUT`; they are not additional public API states. |
+| Run workspace | The Run-scoped isolated Git workspace shared by Pi for writes and Reviewer for read-only inspection; it is not the user's original project. |
+| Synchronized Task | The byte-for-byte approved Task copy at its canonical relative path inside the Run workspace, reread by Worker and Reviewer. |
+| Claimed worktree path | The absolute Run-workspace path disclosed only in `REVIEW_REQUIRED` after claim completion to the owning Host. It never appears in status, `NOT_READY`, pauses, stale continuations, logs, or terminal results. |
+| Bound Reviewer session | The first successful Reviewer session for the Run. The first Action requests `CREATE`; every later repair Action requests `RESUME` with the same session ID. |
+| Full changed-file list | The cumulative set from Run baseline through the current Candidate, supplied on every review round. |
+| Review deadline | Thirty minutes from the durable claim intent; expiry causes a durable Host-review-unavailable pause. |
+| Claim renewal | Daemon renewal every 60 seconds or 30 seconds before lease expiry. Transient failures retry after 1 second; three failures pause safely. |
+| Mechanical decision plan | One of `ACCEPT`, `REPAIR`, `PAUSE_INVALID_REVIEW`, or `PAUSE_REPAIR_LIMIT`, derived only from validated Review data and durable repair count. |
+| Automatic repair budget | Up to 15 daemon-started repair rounds per allowance. `resume_review_decision` grants another group by resetting `autoRepairRounds`. |
+| Invalid Review pause | Incomplete Review with no actionable blocking finding. It exposes only `cancel`; the system does not invent repair scope. |
+| Repair feedback | Current blocking Reviewer finding fingerprints converted into RepairItems for the next approved-scope Revision. |
+| Completion percentage | The rounded arithmetic mean of all individual Task completion percentages; automatic accept additionally requires every Task to be 100%. |
+| Stale continuation | A Review, failure, or answer whose token/current checkpoint no longer matches. It causes no side effect and returns current no-path progress. |
+| Primitive tools | The original ten MCP tools retained for compatibility/diagnostics. Together with `smartflow_review_turn`, the public surface has exactly 11 tools. |
+| Publish | Applying a 100%-approved, fully covered Candidate to the original project through conflict-checked CAS after the Daemon's deterministic accept. |
+| Viewable pause | A durable stopped Run that retains Candidate/Review evidence and legal recovery actions without false completion or cleanup. |

@@ -1,6 +1,6 @@
-# SmartFlow 4.0 Data Model
+# SmartFlow 4.1 Data Model
 
-These are design-level entities. Runtime implementation maps them to Zod schemas, `ArtifactRef` and project `state.json`.
+These are design-level entities. Runtime implementation maps them to Zod schemas, `ArtifactRef`, and the Project's schema-v4 `state.json`.
 
 ## ProjectRunIndex
 
@@ -16,7 +16,7 @@ interface ProjectRunIndex {
 }
 ```
 
-The canonical task-path binding is created atomically with the Run and released after terminal reconciliation. Different task paths may be active together; one project Publish lease serializes original-project writeback.
+The canonical task-path binding is created atomically with the Run and released after terminal reconciliation. Different task paths may be active together; all mutations use Project-wide CAS and one Project Publish lease serializes original-project writeback.
 
 ## TaskSourceArtifact and TaskManifestV3
 
@@ -38,7 +38,7 @@ interface TaskManifestV3 {
 }
 ```
 
-The original canonical task file is mirrored byte-for-byte to the same path in the Run worktree before each Worker attempt. Worker and Reviewer read that synchronized worktree file; TaskSourceArtifact remains audit evidence. TaskManifest contains no Provider field, permission policy, Broker tool definition or model credential.
+The original canonical task file is mirrored byte-for-byte to the same path in the Run workspace before each Worker attempt. Worker and Reviewer read that synchronized worktree file; TaskSourceArtifact remains audit evidence. TaskManifest contains no Provider field, permission policy, Broker tool definition, or model credential.
 
 ## PiRuntimeConfiguration and credential
 
@@ -67,11 +67,9 @@ interface ResolvedWorkerLaunchConfiguration {
 }
 ```
 
-The MCP server process environment is the sole user source. One instance resolves exactly one API/Base URL/model/API Key. `providerRuntimeConfigHash` covers the non-secret runtime configuration; the credential remains separate and only its digest participates in the daemon process fingerprint. The credential is never serialized into TaskManifest, Run state, session or Artifact data.
+The MCP server process environment is the sole user source. One instance resolves exactly one API/Base URL/model/API Key. `providerRuntimeConfigHash` covers non-secret runtime configuration; the credential remains separate and only its digest participates in the Daemon process fingerprint. No `models.json` entity or persisted model-registration record exists.
 
-The Pi child receives a fixed internal registration ID plus the resolved environment, and a bundled Extension registers the model in memory. The internal ID is not a SmartFlow Provider field. No `models.json` entity or persisted model-registration record exists.
-
-## GitWorkspaceSnapshot
+## Git workspace and snapshots
 
 ```ts
 interface GitWorkspaceSnapshot {
@@ -85,13 +83,7 @@ interface GitWorkspaceSnapshot {
   metadataArtifact: ArtifactRef;
   createdAt: string;
 }
-```
 
-`treeId` represents the effective active-workspace view, including allowed dirty and untracked content. Original-project absolute paths are internal only and are never sent to Pi or exposed through MCP.
-
-## GitRunWorkspaceRef
-
-```ts
 interface GitRunWorkspaceRef {
   runBaselineSnapshot: ArtifactRef;
   objectDirectory: string;
@@ -109,9 +101,9 @@ interface GitRevisionWorkspaceRef {
 }
 ```
 
-Revision 1 points to Run Baseline. Later Revisions point to the previous Result Snapshot. Pi receives only the current `root`; object store, temporary index and other Run directories remain outside its project-data sandbox policy.
+Revision 1 points to Run Baseline. Later Revisions point to the previous Result Snapshot. Pi receives only the current root; object store, index, original-project path, and other Run directories remain outside its project-data authority and public protocol.
 
-## PiWorkerAttempt
+## PiWorkerAttempt and PiSessionArtifact
 
 ```ts
 interface PiWorkerAttempt {
@@ -136,13 +128,7 @@ interface PiWorkerAttempt {
   startedAt: string;
   endedAt?: string;
 }
-```
 
-An Attempt is the durable identity of one Pi child execution. Host reconnect does not create a new Attempt while the child is alive. Crash recovery and each new Revision create a new Attempt/session. Deadline expiry records `TIMED_OUT` only after containment termination is reconciled. `processIdentity` and `containmentId` replace the generic Broker managed-process/effect ledgers.
-
-## PiSessionArtifact
-
-```ts
 interface PiSessionArtifact {
   attemptId: string;
   piSessionId: string;
@@ -154,9 +140,9 @@ interface PiSessionArtifact {
 }
 ```
 
-This is audit/recovery evidence, not the state machine truth. A missing/corrupt session Artifact may force a new Pi session but cannot change the frozen Task, Revision input or Result Snapshot.
+An Attempt is the durable identity of one Pi child execution. Host reconnect does not create a new Attempt while the child is alive. Crash recovery and every new Revision create a new Attempt/session. Session Artifact is evidence, not state-machine truth.
 
-## GitCandidateEvidence
+## Candidate evidence
 
 ```ts
 interface GitCandidateEvidence {
@@ -177,9 +163,9 @@ interface GitCandidateEvidence {
 }
 ```
 
-Formal Candidate and cumulative patch compare Run Baseline to current Result. `.smartflow-runtime/` and SmartFlow/Pi session temporaries are excluded before Result capture.
+Formal Candidate compares Run Baseline to current Result. `.smartflow-runtime/` and session temporaries are excluded before Result capture.
 
-## Review and decision entities
+## Review entities and durable Host turn
 
 ```ts
 interface ReviewerBinding {
@@ -197,15 +183,119 @@ interface ReviewDecision {
   reviewArtifact: ArtifactRef;
 }
 
-interface LeaderDecision {
+interface HostTurnIdentity {
+  turnToken: string;
+  hostTurnId: string;
   revision: number;
-  reviewHash: string;
-  decision: "accept" | "repair" | "pause";
-  repairItems?: RepairItem[];
+  startedAt: string;
 }
+
+type HostTurn =
+  | (HostTurnIdentity & {
+      stage: "CLAIMING";
+      actionId: string;
+      deadlineAt: string;
+    })
+  | (HostTurnIdentity & {
+      stage: "AWAITING_REVIEW";
+      actionId: string;
+      claimId: string;
+      reviewAttemptId: string;
+      deadlineAt: string;
+    })
+  | (HostTurnIdentity & {
+      stage: "AWAITING_USER_INPUT";
+      pauseCode: string;
+    });
 ```
 
-ReviewerBinding survives repair Revisions. ReviewDecision and LeaderDecision are current only for the bound Revision/Candidate and remain immutable audit history after invalidation.
+`CLAIMING` is durable before the primitive Action claim. `AWAITING_REVIEW` proves the claim context is reconciled and is the only stage from which the composite protocol discloses `worktreePath`. `AWAITING_USER_INPUT` persists a nonterminal typed pause. ReviewerBinding survives repair Revisions; HostTurn does not replace it.
+
+## Composite ReviewTurn protocol
+
+```ts
+interface ReviewTurnInput {
+  requestId: string;
+  projectId: string;
+  jobId: string;
+  hostTurnId: string;
+  turnToken?: string;
+  review?: { reviewerSessionId: string; result: ReviewSubmissionInput };
+  answer?: ResumeAction | RevisionApprovalAnswer;
+  reviewUnavailableReason?: string;
+}
+
+type ReviewTurnOutput =
+  | {
+      kind: "NOT_READY";
+      projectId: string;
+      jobId: string;
+      revision: number;
+      stateVersion: number;
+      phase: RunPhase;
+      retryAfterMs: number;
+      progress: { completed: number; total: number };
+    }
+  | {
+      kind: "REVIEW_REQUIRED";
+      projectId: string;
+      jobId: string;
+      revision: number;
+      stateVersion: number;
+      turnToken: string;
+      worktreePath: string;
+      reviewAttemptId: string;
+      taskSourceHash: string;
+      candidateHash: string;
+      changedPaths: string[];
+      reviewerSession:
+        | { mode: "CREATE" }
+        | { mode: "RESUME"; reviewerSessionId: string };
+      piSessionId: string;
+      deadlineAt: string;
+    }
+  | {
+      kind: "USER_INPUT_REQUIRED";
+      projectId: string;
+      jobId: string;
+      revision: number;
+      stateVersion: number;
+      turnToken: string;
+      pause: { code: string; message: string };
+      review?: ReviewSubmission;
+      repairDraft?: RepairDraft;
+      requiredInput?: RequiredRevisionInput;
+      options: Array<{ answer: string; description: string }>;
+    }
+  | { kind: "DONE"; result: ResultOutput };
+```
+
+`review`, `answer`, and `reviewUnavailableReason` are mutually exclusive and require `turnToken`. Stale continuations return current no-path `NOT_READY`. `DONE` is terminal-only.
+
+## Automatic repair counter and decision plan
+
+```ts
+interface RunReviewAutomation {
+  hostTurn?: HostTurn;
+  autoRepairRounds?: number;
+}
+
+type ReviewDecisionPlan =
+  | { kind: "ACCEPT"; decision: "accept"; repairItems: [] }
+  | { kind: "REPAIR"; decision: "repair"; repairItems: RepairItem[] }
+  | { kind: "PAUSE_INVALID_REVIEW"; decision: "pause"; repairItems: [] }
+  | { kind: "PAUSE_REPAIR_LIMIT"; decision: "pause"; repairItems: RepairItem[] };
+```
+
+`autoRepairRounds` counts daemon-started repairs in the current group and is incremented with automatic repair. `resume_review_decision` resets it to zero. Accept requires `APPROVE + 100% + no blocking finding`; repair uses only current blocking finding fingerprints and requires counter `< 15`; incomplete Review without actionable findings pauses invalid.
+
+## Concurrency and idempotency model
+
+- One in-memory queue serializes composite turns for each `projectId + jobId`.
+- Project `stateVersion` CAS remains the durable writer boundary; a composite operation makes at most four total attempts, including the initial attempt and up to three retries with a fresh reread.
+- Child request IDs are deterministic hashes of stable turn identity and operation scope.
+- Review deadline is 30 minutes. Claim renewal runs every 60 seconds or 30 seconds before lease expiry; transient failure retries after 1 second and three failures pause.
+- On restart, durable `hostTurn` is recovered before any legacy Run pipeline; ProjectRuntime rereads state and schedules no competing recovery while the checkpoint remains.
 
 ## Publish capability and result
 
@@ -228,23 +318,25 @@ interface PublishConflictResult {
 }
 ```
 
-Any touched-path conflict returns before the batch starts. PARTIAL or UNKNOWN results persist as `PUBLISH_RECOVERY_BLOCKED` and never become `COMPLETED`.
+Any touched-path conflict returns before the batch starts. PARTIAL or UNKNOWN persists as `PUBLISH_RECOVERY_BLOCKED` and never becomes `COMPLETED`.
 
-## RunRecord migration
+## RunRecord schema-v4 additions
 
-4.0 RunRecord retains Task, Revision chain, Git snapshots, Candidate, Review, decisions, publish, request receipts and cleanup status. It stores `workerAttempts: PiWorkerAttempt[]` and no longer stores:
+The Project state schema remains version 4. `RunRecord` retains Task, Revision chain, snapshots, Candidate, Review, publish, receipts, and cleanup, and includes:
 
-- `brokerSession`;
-- `effectExecutions`;
-- `managedProcesses`;
-- `workerBlock` or Worker tool-decision answer/receipt;
-- any Worker Provider-selection field or model credential.
+```ts
+interface RunRecordReviewTurnFields {
+  hostTurn?: HostTurn;
+  autoRepairRounds?: number;
+}
+```
 
-Old active records containing those fields are unsupported migration input and cannot be resumed or published as 4.0 Runs.
+It stores `workerAttempts: PiWorkerAttempt[]` and no longer stores Broker sessions, effects, managed-process ledgers, Worker block answers, Provider-selection fields, or model credentials. Old active records containing removed fields cannot resume or Publish as 4.x Runs.
 
 ## Lifecycle rules
 
-- Active Run: retain every Revision workspace/snapshot and every PiWorkerAttempt/session Artifact; forbid Git `gc`/`prune`.
-- Attempt terminal: persist terminal state and session Artifact, reconcile process tree, then clean Run-local Pi runtime files. Timeout uses the same order and cannot start a replacement Attempt until stop is proven.
-- Reconciled terminal Run: retain task/snapshot/Candidate/Review/Leader/Publish audit Artifacts and patch/bundle; delete temporary workspaces, indexes, runtime directories and object store.
-- Recovery: `state.json` references the exact task binding, Revision chain, Attempt and publish operation; it never infers state from mutable files, Pi session files or `events.jsonl`.
+- Active Run: retain every Revision workspace/snapshot, Attempt/session Artifact, Review history, Host turn, and repair count; forbid Git `gc`/`prune`.
+- Attempt terminal: persist terminal state and session Artifact, reconcile process tree, then clean Run-local Pi runtime files.
+- Review turn: persist claim intent before claim; persist claimed context before path disclosure; clear checkpoint only through a current CAS-bound transition.
+- Reconciled terminal Run: retain task/snapshot/Candidate/Review/automatic-decision/Publish audit Artifacts and patch/bundle; delete temporary workspaces, indexes, runtime directories, and object store.
+- Recovery: `state.json` references exact task binding, Revision, Attempt, Host turn, and Publish operation; it never infers state from mutable files, timers, queues, session files, or `events.jsonl`.

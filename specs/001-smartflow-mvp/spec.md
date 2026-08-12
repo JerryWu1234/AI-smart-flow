@@ -2,32 +2,45 @@
 
 # SmartFlow MVP Feature Specification
 
-**Feature ID**: `001-smartflow-mvp`  
-**Feature Branch**: `001-smartflow-mvp`  
-**Status**: Current  
-**Version**: 4.0.0  
-**Created**: 2026-07-20  
-**Last Updated**: 2026-08-05
-**Input**: Replace the OpenCode Worker and the custom file-operation Broker with `@earendil-works/pi-coding-agent`, use the MCP process configuration directly for one Pi model without `models.json`, and retain Run-scoped isolated workspaces, Leader-owned MCP/user interaction, Review, and Publish.
+**Feature ID**: `001-smartflow-mvp`
+**Feature Branch**: `001-smartflow-mvp`
+**Status**: Current
+**Version**: 4.1.0
+**Created**: 2026-07-20
+**Last Updated**: 2026-08-11
+**Input**: Preserve the sandboxed Pi Worker and safe Candidate/Publish design while adopting Solution D: Daemon-owned deterministic orchestration behind one preferred `smartflow_review_turn` continuation API, with Host-only Reviewer execution and user interaction.
 
 ## Product Decision
 
-SmartFlow 4.0 固定使用 `@earendil-works/pi-coding-agent` SDK 执行 Worker。SmartFlow 不再实现文件、搜索、编辑或 Shell Broker；Pi 直接使用官方 `read`、`bash`、`edit`、`write`、`grep`、`find`、`ls` 工具。
+SmartFlow 4.1 固定使用 `@earendil-works/pi-coding-agent` SDK 执行 Worker。SmartFlow 不实现文件、搜索、编辑或 Shell Broker；Pi 直接使用官方 `read`、`bash`、`edit`、`write`、`grep`、`find`、`ls` 工具。
 
-安全边界从“逐工具审批”简化为“整个进程强制隔离”：Pi Worker 及其子进程运行在 OS sandbox 中，项目与用户数据只能访问当前 Run 的 isolated workspace；运行所需 Node.js、系统库和 Pi SDK 路径只读。Pi 可修改该 workspace 内任意项目文件，可执行任意 Shell 命令并访问网络，但不能访问原始项目、SmartFlow 状态目录、其他 Run workspace 或宿主用户的其他文件。
+安全边界是整个进程的强制隔离：Pi Worker 及其子进程运行在 OS sandbox 中，项目与用户数据只能访问当前 Run 的 isolated workspace；运行所需 Node.js、系统库和 Pi SDK 路径只读。Pi 可修改该 workspace 内任意项目文件，可执行 Shell 与网络访问，但不能访问原始项目、SmartFlow 状态目录、其他 Run workspace 或宿主用户数据。
 
-Review 主线保持不变：
+Review 主线采用方案 D：
 
 ```text
-Task → Pi Worker → Candidate → Review Action → Bound Reviewer → Leader
-                                                            ├─ accept → Publish
-                                                            ├─ repair → New Revision → New Pi session
-                                                            └─ pause
+Host: smartflow_execute
+→ Daemon: Pi Worker → Candidate → Review Action
+→ Host: smartflow_review_turn
+   ├─ NOT_READY → bounded poll
+   ├─ REVIEW_REQUIRED → Host CREATE/RESUME independent Reviewer
+   │                    → submit same turnToken
+   │                    → Daemon deterministic policy:
+   │                       ├─ 100% valid → accept → Publish
+   │                       ├─ actionable incomplete + budget → repair Revision
+   │                       ├─ invalid/no guidance → USER_INPUT_REQUIRED
+   │                       └─ 15 rounds reached → USER_INPUT_REQUIRED
+   ├─ USER_INPUT_REQUIRED → Host asks user and submits typed answer
+   └─ DONE → terminal canonical result
 ```
 
-Host/Leader 保留 MCP 与全部用户交互；Pi Worker 不接收 SmartFlow MCP。当前迁移不向 Pi 动态注入 Host/global Skills，但允许 Pi 使用随项目一起进入 isolated workspace 的项目本地资源。
+Host/Leader 保留 MCP、独立 Reviewer 的创建/恢复与全部用户交互；Daemon 承担等待、Action claim/renew、Review 提交、确定性 accept/repair/pause、同范围 repair 与 Publish 的机械编排。Daemon 不创建 Reviewer，不解释开放式用户意图，也不得扩大批准范围。Pi Worker 不接收 SmartFlow MCP。当前迁移不动态注入 Host/global Skills，但允许 Pi 使用已进入 isolated workspace 的项目本地资源。
 
-启动 SmartFlow MCP server 时传入的环境变量是 Pi 模型配置的唯一用户来源。每个 MCP server 实例只绑定一个模型和一个 endpoint；用户明确选择该 endpoint 遵循的标准 API 协议。SmartFlow 不要求用户维护 Pi 配置文件，也不得生成或读取 `models.json`，而是在 Pi 子进程内通过官方运行时扩展接口直接注册该模型。
+`smartflow_review_turn` 是 `smartflow_execute` 后的首选高层入口，只返回 `NOT_READY | REVIEW_REQUIRED | USER_INPUT_REQUIRED | DONE`。旧 10 个 primitive 工具继续公开用于兼容和低层控制；总 MCP surface 恰好 11 个工具。只有 durable claim 后的 `REVIEW_REQUIRED` 可向 owning Host 暴露 `worktreePath`。
+
+启动 SmartFlow MCP server 时传入的环境变量仍是 Pi 模型配置唯一用户来源。每个 MCP server 实例绑定一个模型和 endpoint；SmartFlow 不生成或读取 `models.json`，而在 Pi 子进程内通过官方 Extension 接口注册模型。
+
+Current decision details are normative in [adr-daemon-owned-review-turn.md](adr-daemon-owned-review-turn.md), [contracts/review-turn.md](contracts/review-turn.md), and [implementation-map.md](implementation-map.md). The historical Host-orchestration ADR is superseded.
 
 ## User Scenarios & Testing
 
@@ -71,38 +84,41 @@ Pi Coding Agent SDK 在当前 Run 的 isolated workspace 中运行，直接使�
 
 ---
 
-### User Story 3 — Reviewer 审查累计 Candidate，Leader 决定下一步（Priority: P1）
+### User Story 3 — Host 执行 Reviewer，Daemon 自动编排闭环（Priority: P1）
 
-Pi Worker 完成后生成不可变 Candidate。Host 创建或恢复绑定 Reviewer，Reviewer 对当前 Revision 的完整结果和累计变更负责，Leader 最终选择 accept、repair 或 pause。
+Pi Worker 完成后生成不可变 Candidate。Host 通过 `smartflow_review_turn` 获得已 claim 的 Review 请求，创建或恢复绑定 Reviewer 并提交结果；Daemon 随后按冻结策略自动 accept/repair/pause，不要求 Host 重放 primitive 状态机。
 
-**Why this priority**: Pi 只负责实现；Review 和用户决策边界不能因 Provider 迁移而改变。
+**Why this priority**: Reviewer 独立性、用户交互边界和机械编排持久性必须同时成立；任一方职责混淆都会造成重复副作用、不可恢复 claim 或第二个用户 Leader。
 
-**Independent Test**: 完成首轮和一轮 repair，确认 Reviewer 绑定保持不变、每轮读取最新完整结果，Leader 未 accept 前不发布。
+**Independent Test**: 只在 Host 高层调用 `smartflow_execute` 与 `smartflow_review_turn`，完成首轮 Review、Daemon restart、一轮自动 repair、Reviewer RESUME 和最终 Publish；确认 worktree path 只在已 claim 的 Review 响应中出现。
 
 **Acceptance Scenarios**:
 
-1. **Given** 有效 Candidate 已形成，**When** Review Action 创建，**Then** 它绑定当前任务、Revision、Candidate 和全部 changed paths。
-2. **Given** 首轮 Review，**When** Host 处理 Action，**Then** 创建独立 Reviewer session；后续 Revision 恢复同一 Reviewer session。
-3. **Given** Reviewer 返回 `REQUEST_CHANGES` 或路径覆盖不完整，**When** Leader 提交 accept，**Then** 协议拒绝。
-4. **Given** Leader 选择 repair，**When** 修复项有效且范围已批准，**Then** 创建新 Revision，并从上一 Result Snapshot 启动新的 Pi session。
-5. **Given** Reviewer 已批准，**When** Leader 仍不满意，**Then** Leader 可提交结构化 RepairItem 开始新 Revision。
+1. **Given** Worker 尚未产生当前 Review Action，**When** Host 调用复合 turn，**Then** 返回无 `worktreePath` 的 `NOT_READY` 与 bounded `retryAfterMs`。
+2. **Given** 当前 Candidate 已产生，**When** Daemon durable 写 claim intent 并成功 claim/reconcile，**Then** 返回 `REVIEW_REQUIRED`、稳定 `turnToken`、完整 changed paths、deadline 和首轮 `CREATE`/后续 `RESUME`。
+3. **Given** Host 收到 `REVIEW_REQUIRED`，**When** 执行 Reviewer，**Then** Reviewer session 与 Pi session 分离，每轮重读同步 Task、最新完整 Result Workspace 和累计 Candidate。
+4. **Given** Review 为 `APPROVE + 100% + no blocker`，**When** Host 用同一 token 提交，**Then** Daemon 自动 accept 并进入 Publish，不要求 Host 调用 decision primitive。
+5. **Given** Review 不完整且包含 blocking findings，**When** 当前自动 repair 轮次少于 15，**Then** Daemon 只使用当前 finding fingerprints 创建同范围新 Revision，并由新 Pi session 实现、原 Reviewer RESUME。
+6. **Given** Review 不完整但没有 actionable blocking finding，**When** Daemon 规划下一步，**Then** durable pause 为 `INVALID_REVIEW`，复合 turn 返回 `USER_INPUT_REQUIRED` 且只允许 cancel。
+7. **Given** 当前组已完成 15 个自动 repair 轮次，**When** Review 仍不完整，**Then** 保留 Candidate/Review 并返回 `AUTOMATIC_REPAIR_LIMIT`；用户可通过 Host 提交 `resume_review_decision` 授予下一组。
+8. **Given** 旧 token、旧 Candidate 或另一个 `hostTurnId` 提交 continuation，**When** Daemon 校验，**Then** 不产生副作用；stale continuation 只返回无路径当前状态，非 owning Host 被拒绝。
 
 ---
 
-### User Story 4 — Leader 安全发布或取得交付包（Priority: P1）
+### User Story 4 — Daemon 在 Review 门槛后安全发布或暂停（Priority: P1）
 
-只有当前 Review 可接受且 Leader 明确 accept 后，SmartFlow 才尝试把 Candidate 写回原始项目。
+只有当前 Review 达到 `APPROVE + 100% + FULL + no blocker` 时，Daemon 的确定性策略才可 accept 并尝试把 Candidate 写回原始项目。发布冲突、能力不足或未知结果必须 durable pause，而不是伪报 `DONE`。
 
-**Why this priority**: Publish 是 isolated workspace 与用户真实项目之间唯一允许的写入通道。
+**Why this priority**: Publish 是 isolated workspace 与用户真实项目之间唯一允许的写入通道；自动化不能削弱 Review 门槛或 CAS 保护。
 
-**Independent Test**: 分别测试无冲突发布、相关路径漂移和写回能力不足，确认结果为 committed、零写入 conflict 或 DeliveryBundle。
+**Independent Test**: 分别测试自动 accept 后的无冲突发布、相关路径漂移和写回能力不足，确认结果为 committed、零写入 conflict 或 DeliveryBundle；Host 高层不调用 decision/publish primitive。
 
 **Acceptance Scenarios**:
 
-1. **Given** 当前 Review 可接受且 Leader accept，**When** 发布前 Hash 与 expected HEAD 均匹配，**Then** Candidate 通过项目级串行临界区写回。
+1. **Given** 当前 Review 满足全部自动 accept 条件，**When** Daemon 执行机械决策，**Then** 获取项目级 Publish lease 并基于 expected HEAD/Candidate Hash 写回。
 2. **Given** Candidate 涉及的原始项目路径已漂移，**When** 发布，**Then** 返回 `PRECHECK_CONFLICT`、冲突路径和 `0/N`，且零写入。
 3. **Given** Adapter 无法证明原子批量写回，**When** 发布，**Then** 生成 Patch/DeliveryBundle，不修改原始项目。
-4. **Given** Publish 返回 PARTIAL 或 UNKNOWN，**When** 状态落盘，**Then** 进入 `PUBLISH_RECOVERY_BLOCKED`，不得伪报 completed。
+4. **Given** Publish 返回 PARTIAL 或 UNKNOWN，**When** 状态落盘，**Then** 进入 `PUBLISH_RECOVERY_BLOCKED` 并通过 `USER_INPUT_REQUIRED` 暴露，不得伪报 terminal `DONE`。
 
 ---
 
@@ -118,8 +134,8 @@ Pi Worker 完成后生成不可变 Candidate。Host 创建或恢复绑定 Review
 
 1. **Given** Daemon 和 Pi Worker 仍存活，**When** Host 断开后重连同一 Task，**Then** 继续同一 job、attempt 和 Pi session。
 2. **Given** Pi Worker 或 Daemon 崩溃且状态可恢复，**When** 恢复同一 Revision，**Then** 使用同一 job、Revision 和 isolated workspace 创建新的 attempt/Pi session。
-3. **Given** Leader批准同一 Task 的 repair 或补充并创建新 Revision，**When** Worker 启动，**Then** 从上一 Result Snapshot 创建新的 Pi session。
-4. **Given** 用户提出独立新功能，**When** Leader 分类请求，**Then** 创建新的 Task/Run/Pi session，不复用旧 Run。
+3. **Given** Daemon 自动批准同范围 repair，或 Host/用户批准同一 Task 的补充 Revision，**When** Worker 启动，**Then** 从上一 Result Snapshot 创建新的 Pi session。
+4. **Given** 用户提出独立新功能，**When** Host/Leader 分类请求，**Then** 创建新的 Task/Run/Pi session，不复用旧 Run。
 5. **Given** 用户取消 Run，**When** Daemon 执行取消，**Then** Pi Worker 及全部子进程被终止，状态和 lease 完成对账。
 6. **Given** Pi Attempt 超过冻结的运行时限，**When** deadline 到达，**Then** Daemon 终止完整进程树，将 Attempt 持久化为 `TIMED_OUT`，并把 Run 置为可由 Leader 重试、创建新 Revision 或取消的 `PAUSED`；停止事实不可证明时保持恢复阻塞。
 
@@ -156,15 +172,19 @@ type RepairItem =
 
 Reviewer 来源必须指向当前 Review finding。Leader 来源必须绑定当前任务范围；空原因、未知任务和越界路径必须拒绝。
 
-### Leader decision matrix
+### Daemon decision matrix
 
-| 当前 Review | `accept` | `repair` | `pause` |
-|---|---:|---:|---:|
-| `APPROVE` + FULL + 无 blocker | 允许 | 允许 | 允许 |
-| `REQUEST_CHANGES` | 禁止 | 允许 | 允许 |
-| `BLOCKED` | 禁止 | 允许 | 允许 |
-| 任一路径 MISSING | 禁止 | 允许 | 允许 |
-| Artifact/Hash/session 不匹配 | 禁止 | 禁止 | 系统暂停 |
+复合流程中的 accept/repair/pause 由 Daemon 根据已验证 Review 与 durable `autoRepairRounds` 机械规划；Host 不重复提交 primitive decision。兼容 primitive 仍可表达显式低层操作，但不得绕过以下门槛。
+
+| 当前 Review / counter | 计划 | 结果 |
+|---|---|---|
+| `APPROVE` + 100% + FULL + 无 blocker | `ACCEPT` | 自动进入安全 Publish |
+| 有 blocking findings 且 counter `< 15` | `REPAIR` | 只把当前 finding fingerprints 转为 RepairItems，新 Revision/new Pi session |
+| 不完整但无 actionable blocking finding | `PAUSE_INVALID_REVIEW` | durable `INVALID_REVIEW`，只允许 cancel |
+| 有 findings 且 counter `>= 15` | `PAUSE_REPAIR_LIMIT` | durable `AUTOMATIC_REPAIR_LIMIT`，等待用户是否继续下一组 |
+| Artifact/Hash/session/Host ownership 不匹配 | 无计划 | 拒绝或安全暂停，不得 Publish |
+
+Host 保留两类非机械责任：执行 `CREATE | RESUME` Reviewer，并在 `USER_INPUT_REQUIRED` 时向用户取得合法答案。`resume_review_decision` 重置 counter，授予下一组最多 15 个自动 repair 轮次。
 
 ## Requirements
 
@@ -197,18 +217,18 @@ Reviewer 来源必须指向当前 Review finding。Leader 来源必须绑定当�
 - **FR-017**：有效 Candidate MUST 直接产生绑定当前 Hash 与全部 changed paths 的 Review Action。
 - **FR-018**：首轮 MUST 创建独立 Reviewer session；后续 Revision MUST 恢复同一 Reviewer session。
 - **FR-019**：Reviewer 每轮 MUST 重读冻结任务与最新完整 Result Workspace；最终 verdict MUST 覆盖累计 Candidate。
-- **FR-020**：Reviewer 结果 MUST 返回 Leader；Reviewer 未通过或路径覆盖不完整时 Leader MUST NOT accept。
-- **FR-021**：Leader repair MUST 包含至少一个合法 RepairItem，并创建新 Revision；新 Revision 以上一 Result Snapshot 为输入并创建新的 Pi session。
-- **FR-022**：无进展观测 MUST NOT 在 15 个自动返工轮次额度耗尽前提前暂停；额度耗尽后 MUST 保留 Candidate 并暂停等待用户决定是否继续下一组 15 轮。
+- **FR-020**：Host MUST 使用当前 `turnToken` 提交 Reviewer 结果；Daemon MUST 校验 Action、Revision、Task/Candidate Hash、Reviewer binding 与 changed-path coverage。Host 的职责止于 Reviewer 执行，不得在高层流程重放机械 decision。
+- **FR-021**：Daemon 自动 repair MUST 包含至少一个来自当前 blocking finding fingerprint 的 RepairItem，并创建同一批准范围的新 Revision；新 Revision 以上一 Result Snapshot 为输入并创建新的 Pi session，Reviewer binding 保持不变。
+- **FR-022**：每组最多自动执行 15 个 repair 轮次；无进展不得在额度耗尽前提前暂停，但无 actionable finding 的无效 Review MUST 立即进入 `INVALID_REVIEW`。额度耗尽后保留 Candidate/Review 并等待用户决定；`resume_review_decision` 重置下一组额度。
 
 #### State, recovery and publish
 
-- **FR-023**：Daemon MUST 承载后台长任务；MCP mutation MUST 快速返回，`state.json` MUST 是唯一恢复事实。
+- **FR-023**：Daemon MUST 承载后台长任务与方案 D 的机械编排；MCP mutation MUST 快速返回，`state.json` MUST 是唯一恢复事实，首选 Host continuation MUST 是 `smartflow_review_turn`。
 - **FR-024**：同一规范化任务路径同时最多一个 Active Run；不同任务文件 MAY 并行，但状态与 workspace MUST 按 job 隔离。
 - **FR-025**：每次 Worker 执行 MUST 持久化 `attemptId`、Pi session 标识、Sandbox containment 标识、generation 和 Revision 绑定。
 - **FR-026**：Host 重连且 Worker 存活时 MUST 继续同一 Pi session；进程崩溃恢复同一 Revision 时 MUST 创建新 attempt/Pi session；新 Revision MUST 创建新 Pi session。
 - **FR-027**：取消 MUST 终止 Pi Worker 及全部子进程，对账进程和 Action 后再进入终态。
-- **FR-028**：发布 MUST 要求当前 Review 可接受且 Leader 明确 accept，并在项目级串行临界区执行。
+- **FR-028**：发布 MUST 要求当前 Review 满足 `APPROVE + 100% + FULL + no blocker`，并由 Daemon 的确定性 `ACCEPT` 计划在项目级串行临界区执行；Host 高层不得绕过门槛或重复 accept。
 - **FR-029**：自动写回 MUST 支持 expected-old-hash、稳定 operationId、结果查询和严格 `atomicBatchCas` 或本地 `preflightBatchWrite`；否则只能生成 DeliveryBundle。
 - **FR-030**：发布冲突 MUST 对全部 Candidate 路径原子零写入，并返回冲突路径、`0/N`、`activeWorkspaceChanged=false` 和 Patch/DeliveryBundle。
 - **FR-031**：PARTIAL 或 UNKNOWN MUST 进入 `PUBLISH_RECOVERY_BLOCKED`；不得转换为 completed 或自动重试。
@@ -226,6 +246,19 @@ Reviewer 来源必须指向当前 Review finding。Leader 来源必须绑定当�
 - **FR-040**：SmartFlow MUST 将已校验的 MCP 配置直接传入 isolated Pi 子进程，并通过 Pi 官方运行时扩展接口在内存中注册该模型；MUST NOT 生成、读取或要求用户提供 `models.json`，也不得读取宿主用户级 Pi 模型配置。
 - **FR-041**：API Key MUST 只存在于 MCP/Daemon/Pi 子进程内存和子进程环境中，不得进入 argv、runtime config hash、Manifest、Run 状态、session、Artifact、日志或错误文本；Daemon MAY 仅以不可逆摘要检测凭据轮换。
 
+#### Composite Review turn and daemon orchestration
+
+- **FR-042**：批准 Run 的首选高层协议 MUST 是一次 `smartflow_execute` 后重复调用 `smartflow_review_turn`；该复合工具 MUST 只返回 `NOT_READY | REVIEW_REQUIRED | USER_INPUT_REQUIRED | DONE`，`NOT_READY` MUST 提供 bounded `retryAfterMs`。
+- **FR-043**：Daemon MUST 负责 wait、Review Action claim/renew、Review submission、确定性 accept/repair/pause、已批准范围 repair continuation 与 Publish progression；Host MUST 只负责 Reviewer session 的 CREATE/RESUME 和全部用户交互，Daemon MUST NOT 创建、替换或模拟 Reviewer。
+- **FR-044**：每个 active Review turn MUST 绑定 `hostTurnId + turnToken + revision`。首轮 Reviewer mode MUST 为 `CREATE`，后续 MUST 为同一 session 的 `RESUME`；只有 durable claim/reconciliation 完成后的 `REVIEW_REQUIRED` MAY 暴露 `worktreePath`，且 Reviewer session MUST 与当前 Pi session 分离。
+- **FR-045**：Project state MUST 保持 schema version 4，并在 Run 中 durable 保存 `hostTurn` 三阶段 `CLAIMING | AWAITING_REVIEW | AWAITING_USER_INPUT` 与 `autoRepairRounds`；checkpoint MUST durable-first，不能从日志、timer、Host 请求或 session 文件推断。
+- **FR-046**：Daemon restart MUST 先由 Host-turn coordinator 恢复 checkpoint，再重读 fresh state；checkpoint 存在时不得并行启动 legacy recovery。Review deadline MUST 为 30 分钟；claim MUST 每 60 秒或到期前 30 秒续租；失败每 1 秒重试，连续三次 MUST durable pause。
+- **FR-047**：同一 `projectId + jobId` 的 composite turns MUST 串行化；所有 mutation MUST 使用 Project-wide stateVersion CAS，总计最多尝试四次（含首次，最多三次重试）并重读 fresh state；child request IDs MUST 从稳定 turn identity 派生。Stale Review/failure/answer continuation MUST 零副作用并只返回无敏感路径的当前 `NOT_READY`。
+- **FR-048**：Daemon MUST 只产生四种机械计划：`ACCEPT` 要求 `APPROVE + 100% + no blocking finding`；`REPAIR` 要求当前 blocking findings 且 `autoRepairRounds < 15`，并只使用其 fingerprints；无 actionable finding MUST `PAUSE_INVALID_REVIEW`；额度达到 15 MUST `PAUSE_REPAIR_LIMIT`。`resume_review_decision` MUST 重置下一组额度。
+- **FR-049**：所有非终态且需要用户选择/批准的暂停 MUST 返回 typed `USER_INPUT_REQUIRED`，包含当前合法 options 及必要 answer template；`INVALID_REVIEW` MUST 只允许 cancel。`DONE` MUST 只对应 `COMPLETED | CANCELED | FAILED` 的 canonical result，不得代表 conflict、pause 或等待。
+- **FR-050**：公共 MCP surface MUST 恰好包含 11 个工具：首选 composite `smartflow_review_turn` 加原有 10 个 primitive（execute/status/wait/claim/renew/submit-review/submit-leader-decision/resume/cancel/result）。兼容 primitive MUST 保留，但高层 Host workflow MUST NOT 用它们重建机械循环。
+- **FR-051**：真实 pinned `@earendil-works/pi-coding-agent@0.83.0` 的 exports、Extension default export/`registerProvider()` host 和 RPC model-resolution 兼容 MUST 由独立、可复现、checked-in 的 installed-package evidence 证明；mocked `registerProvider`、source-tree tests、production-composition E2E 或 gitignored transcript MUST NOT 被视为该兼容证明。
+
 ### Key Entities
 
 | 实体 | 作用 | 核心绑定 |
@@ -239,12 +272,15 @@ Reviewer 来源必须指向当前 Review finding。Leader 来源必须绑定当�
 | PiSessionArtifact | 完成或中断后保留的会话证据 | attempt + session metadata/artifact Hash |
 | Candidate | Baseline 到当前结果的累计差异 | Revision + snapshots + canonical ops + evidence Hash |
 | RevisionPatch | 相邻 Revision 的修复证据 | previous result + current result |
-| ReviewAction | Host 待处理审查动作 | Review attempt + Candidate |
+| ReviewAction | Daemon 待 claim 的审查动作 | Review attempt + Candidate + full changed paths |
 | ReviewerBinding | 闭环唯一 Reviewer session | Run + first reviewer session ID |
 | ReviewDecision | Reviewer 的结构化结果 | Action + synchronized task Hash + Candidate Hash + Reviewer session |
-| RepairItem | Reviewer 或 Leader 的修复输入 | current finding 或 code/task/path/reason |
-| LeaderDecision | accept / repair / pause | current Review |
-| PublishResult | CAS 写回或 Bundle 事实 | Candidate + Review + LeaderDecision |
+| ReviewTurn | 首选复合 Host continuation | request/Host owner + `NOT_READY \| REVIEW_REQUIRED \| USER_INPUT_REQUIRED \| DONE` |
+| HostTurnCheckpoint | Daemon 可恢复的复合 turn 内部阶段 | `hostTurnId + turnToken + revision + CLAIMING/AWAITING_*` |
+| AutomaticRepairBudget | 当前组自动 repair 轮次 | `autoRepairRounds`, limit 15, reset by `resume_review_decision` |
+| RepairItem | 自动 repair 的当前 Reviewer finding 输入 | current finding fingerprint；不得扩大批准范围 |
+| AutomaticReviewDecision | `ACCEPT \| REPAIR \| PAUSE_INVALID_REVIEW \| PAUSE_REPAIR_LIMIT` | current Review + counter + stable child request ID |
+| PublishResult | CAS 写回或 Bundle 事实 | Candidate + Review + automatic accept decision |
 | ActiveTaskBinding | 防止同一任务文件重复启动 | canonical task path + jobId + terminal state |
 
 ## Edge Cases
@@ -266,6 +302,15 @@ Reviewer 来源必须指向当前 Review finding。Leader 来源必须绑定当�
 - Artifact 缺失或 Hash 错误：进入 `INTEGRITY_BLOCKED`。
 - 无法证明 Pi 进程树已停止：保持暂停，不生成 Candidate 或进入终态。
 - 自动写回返回 PARTIAL 或 UNKNOWN：进入 `PUBLISH_RECOVERY_BLOCKED`，保留逐路径事实。
+- `NOT_READY`、stale continuation、`USER_INPUT_REQUIRED` 或 `DONE` 试图携带 `worktreePath`：协议 Schema 拒绝；只允许已 claim 的 `REVIEW_REQUIRED`。
+- Daemon 在 durable `CLAIMING` 后、primitive claim 返回前崩溃：重启后通过稳定 child request ID 与 pending Action 对账，不重复 claim。
+- Daemon 在 `AWAITING_REVIEW` 时重启：恢复相同 Host owner、turn token、Action/reviewAttempt 和 deadline，重建续租，不创建替代 Reviewer。
+- 同一 Run 收到并发 composite turns 或 Project state CAS 冲突：per-Run queue 串行；每次 retry 重读 fresh state，最多四次，不重复副作用。
+- claim lease 距离到期不足 30 秒：Daemon 优先续租；连续三次失败或 30 分钟 deadline 到达时 durable pause，不继续 Publish。
+- 旧 Review、failure 或 answer 携带曾经有效但当前 stale 的 token：不应用 continuation，不重新暴露 worktree，只返回当前 `NOT_READY`。
+- `INVALID_REVIEW` 收到非 cancel answer：拒绝；不得把无 actionable finding 的文本猜成 RepairItem。
+- 用户在 `AUTOMATIC_REPAIR_LIMIT` 选择继续：`resume_review_decision` 将当前组计数重置为零，但不替换 Reviewer binding 或 Task 范围。
+- production-composition 两工具 E2E 通过但未加载真实 installed Pi host：只能关闭 orchestration criterion，不能关闭 FR-051/SC-020。
 
 ## Success Criteria
 
@@ -286,6 +331,11 @@ Reviewer 来源必须指向当前 Review finding。Leader 来源必须绑定当�
 - **SC-013**：四个受支持 API 值分别可将一个 MCP 配置模型注册到 Pi；每个 MCP server 实例可用模型数恰好为 1，Provider/模型 fallback 次数为 0。
 - **SC-014**：未提供可选模型参数时，冻结配置中的 context、max output、thinking 和 deadline 分别为 `1000000`、`384000`、`high`、`1800000ms`；合法覆盖值在同一 Revision 内保持不变。
 - **SC-015**：运行、恢复、取消和 Finalize 后扫描 workspace、Data Dir、argv、状态、session、Artifact 与日志，`models.json` 生成/读取次数为 0，API Key 明文泄露数为 0。
+- **SC-016**：对所有 composite turn 测试，输出种类只属于四态之一；`NOT_READY`、stale continuation、`USER_INPUT_REQUIRED` 和 `DONE` 的 `worktreePath` 出现次数为 0，只有成功 claim 的 `REVIEW_REQUIRED` 恰好提供一次当前路径。
+- **SC-017**：在 claim-intent、claimed-review、Review submission、repair decision 与等待用户输入各 checkpoint 注入 restart/CAS mismatch/重复请求后，重复 claim、Review、repair 和 Publish 次数均为 0；有效 deadline/renewal 恢复率为 100%。
+- **SC-018**：MCP Schema 与 handler registry 中工具数恰好为 11；旧 10 个 primitive 全部存在，`smartflow_submit_tool_decision` 不存在，高层 Host workflow 的工具名集合只包含 `smartflow_execute` 和 `smartflow_review_turn`。
+- **SC-019**：production runtime composition 的 E2E 仅通过 `smartflow_execute → smartflow_review_turn*` 完成至少一轮自动 repair、同一 Reviewer RESUME 和最终 terminal result；Host 发出的 primitive claim/renew/review/decision/resume 调用数为 0。
+- **SC-020**：真实 installed Pi 0.83.0 的 Extension/RPC compatibility 与经明确授权的 real-model 两工具 E2E 均必须产生 checked-in、可复现、已脱敏证据；在两类证据齐备前，FR-051、T190/T208、T192/T209 完成率不得标为 100%。
 
 ## Assumptions
 

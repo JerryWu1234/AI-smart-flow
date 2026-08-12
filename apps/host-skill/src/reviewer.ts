@@ -15,6 +15,7 @@ export interface HostReviewContext {
   worktreePath: string;
   taskSourceHash: string;
   candidateHash: string;
+  changedPaths: string[];
   reviewerSession: ReviewerSessionRequest;
   piSessionId: string;
 }

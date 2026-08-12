@@ -1,68 +1,89 @@
-# Reviewer 会话复用与 Leader 修复核对稿
+# Reviewer 会话复用与 Daemon 机械编排核对稿
 
-**状态**：现行设计
-**范围**：Candidate 形成后的 Review、Leader 决策和 repair 循环
-**说明**：本文件是行为核对稿，不替代 `tasks.md`。
+**状态**：现行设计（SmartFlow 4.1 / 方案 D）
+**范围**：Candidate 形成后的复合 Review turn、Reviewer 往返、自动 repair、用户暂停与 Publish
+**说明**：本文件是行为核对稿，不替代 `tasks.md`；规范接口见 [contracts/review-turn.md](contracts/review-turn.md)。
 
 ## Target Flow
 
 ```text
-Task
-→ Pi Worker
-→ Candidate + Review Action
-→ Host 绑定 Reviewer
-→ Reviewer 读取 Run worktree 中同步的原始任务文件与当前完整结果
-→ Review 返回 Leader
-   ├─ accept → Publish
-   ├─ repair → FIXING → PAUSED → 批准新 Revision
-   │                              ↓
-   │                         Pi Worker → 恢复同一 Reviewer
-   └─ pause  → PAUSED
+Host: smartflow_execute
+  ↓
+Host: smartflow_review_turn ── NOT_READY ── bounded poll ──┐
+  │                                                        │
+  ├─ REVIEW_REQUIRED → Host CREATE/RESUME Reviewer          │
+  │                    → submit same turnToken ──────────────┘
+  │
+  ├─ USER_INPUT_REQUIRED → Host asks user → typed answer ───┘
+  │
+  └─ DONE → terminal result
+
+Daemon after Review:
+  100% valid Review → automatic accept → Publish
+  actionable incomplete Review, rounds < 15 → automatic repair → new Revision
+  invalid/no-guidance Review → durable INVALID_REVIEW pause
+  rounds >= 15 → durable AUTOMATIC_REPAIR_LIMIT pause
 ```
 
 ## Ownership
 
-- Leader 是唯一业务决策者。
-- Pi Worker 只负责实现，不参与审查或用户交互。
-- Reviewer 只负责返回结构化审查结果，不宣布完成。
-- Host 负责创建或恢复 Reviewer session，并提交其结果。
-- Daemon 负责 Action、状态、Hash 和 session 绑定，不启动 Reviewer 进程。
-- 用户只与 Leader 交互。
+- Host/Leader 是唯一用户交互者，也是唯一可创建或恢复 Reviewer session 的组件。
+- Daemon 是机械编排唯一权威：等待、Action claim/renew、Review 提交、确定性 accept/repair/pause、同范围 repair Revision 与 Publish 推进。
+- Pi Worker 只负责实现，不参与 Review 或用户交互。
+- Reviewer 只负责审查并返回结构化结果，不调用 SmartFlow MCP、不宣布 Publish。
+- Daemon 不启动、不替换、不模拟 Reviewer；其自动决策不得扩大批准范围。
+
+## Composite Turn Contract
+
+### Initial/poll call
+
+Host 使用稳定 `hostTurnId` 调用 `smartflow_review_turn`，不携带 continuation。Daemon 最长 bounded wait 后返回四态之一：
+
+- `NOT_READY`：只含 phase/progress/`retryAfterMs`，不含 worktree path；
+- `REVIEW_REQUIRED`：claim 已 durable 完成，允许 Host 执行 Reviewer；
+- `USER_INPUT_REQUIRED`：只能由 Host 向用户取得选项或批准字段；
+- `DONE`：只对应 `COMPLETED | CANCELED | FAILED`。
+
+### Review continuation
+
+`REVIEW_REQUIRED` 提供 `turnToken`、`reviewAttemptId`、Task/Candidate Hash、完整 changed paths、`CREATE | RESUME`、Pi session provenance、deadline 和已 claim 的 worktree path。Host 提交：
+
+```ts
+{
+  turnToken,
+  review: {
+    reviewerSessionId,
+    result
+  }
+}
+```
+
+### Failure/answer continuation
+
+- Reviewer callback 不可用或三次格式修正均失败时，Host 以同一 `turnToken` 提交 `reviewUnavailableReason`。
+- `USER_INPUT_REQUIRED` 只能提交响应中列出的 `answer`；需要新 Revision 用户批准时必须完整提交 `tasksPath + approvedSourceHash + approval`。
+- continuation 三者互斥；缺少或过期 token 不产生副作用。
 
 ## Reviewer Session Contract
 
-### First round
+### First round (`CREATE`)
 
-1. Daemon 为当前 Candidate 创建新的 Review Action。
-2. Action 的 session mode 为 `CREATE`。
-3. Host claim Action，并创建独立 Reviewer session `S1`。
-4. `S1` 不能等于 Leader session 或任何 Pi Worker session。
-5. `S1` 直接读取启动时冻结的任务 Artifact、当前完整 Result Workspace 和累计 Candidate。
-6. Host 提交 Review 后，Daemon 将 `S1` 持久绑定到本闭环。
+1. Daemon 先 durable 写 `CLAIMING`，再 claim Review Action，最后 durable 写 `AWAITING_REVIEW`。
+2. 只有此时 `REVIEW_REQUIRED` 才暴露 claimed worktree path。
+3. Host 创建独立 Reviewer session `S1`；`S1` 不得等于 Host 或 Pi Worker session。
+4. `S1` 在该 worktree 中重读同步 Task、当前完整文件与 diff，并覆盖累计 changed paths。
+5. 提交成功后 Reviewer binding 与 Run 持久绑定。
 
-### Repair rounds
+### Repair rounds (`RESUME`)
 
-1. 每轮生成新的 Review Action、claim 和 reviewAttemptId。
-2. Action 的 session mode 为 `RESUME`，并携带绑定的 `S1`。
-3. Host 只能恢复 `S1`，不得创建 `S2`。
-4. `S1` 每轮重新读取当前 Revision 的不可变任务 Artifact、最新完整 Result Workspace 和累计 Candidate。
-5. 相邻 Revision Patch 与旧会话记忆只用于聚焦修复，不能替代审查最新完整结果。
+1. 新 Revision 使用新的 Pi session，生成从 Run baseline 到最新结果的累计 Candidate。
+2. 新 Review Action 必须请求 `RESUME S1`，Host 不得创建 `S2`。
+3. `S1` 每轮重新读取同步 Task 和最新完整结果；历史只能辅助理解，不能替代当前检查。
+4. 旧 Action、claim、Candidate、turnToken 或迟到结果都不得作用于新 Revision。
 
-### Failure behavior
+### Reviewer output
 
-- CREATE 成功但提交前中断：只允许恢复已创建的 session。
-- Reviewer 句柄丢失或 Host 无法恢复：`HOST_REVIEW_UNAVAILABLE`。
-- claim 过期：Action 回到 pending；迟到提交被拒绝。
-- Daemon 重启：从 `state.json` 的 `reviewHistory` 恢复 Reviewer session 绑定，不创建替代 session。
-
-## Review Requirements
-
-Reviewer 每轮完成两个视角：
-
-1. **Converge**：逐条检查任务、完成条件和实现差异。
-2. **Adversarial**：检查安全、并发、恢复、数据丢失和虚假成功风险。
-
-提交至少包含：
+Reviewer 必须逐 Task 给出 0–100 分；总分是算术平均后四舍五入。Daemon 归一化/校验为：
 
 ```ts
 interface ReviewSubmission {
@@ -75,118 +96,61 @@ interface ReviewSubmission {
 }
 ```
 
-Daemon 必须校验：
+所有 changed paths 都必须被覆盖；finding fingerprint 由稳定字段重算；Action、Revision、Task Hash、Candidate Hash 与 Reviewer binding 必须是当前值。
 
-- Action、claim、Revision、taskSourceHash 和 candidateHash 都是当前值；
-- reviewerSessionId 符合首轮 CREATE 或后续 RESUME 规则；
-- 全部 changed paths 都有覆盖记录；
-- finding fingerprint 可由稳定字段重算；
-- 提交没有引用旧 Candidate 或旧 Revision。
+## Daemon Decision Matrix
 
-## Leader Decision
+| Review | Durable plan | Host/User role |
+|---|---|---|
+| `APPROVE` + 100% + no blocking finding | `ACCEPT`，自动进入 Publish | 无机械确认 |
+| 有 blocking findings 且 `autoRepairRounds < 15` | `REPAIR`，仅引用当前 finding fingerprints | 无机械确认；Host 下一轮恢复 Reviewer |
+| 不完整但无 actionable blocking finding | `PAUSE_INVALID_REVIEW` | `USER_INPUT_REQUIRED`; 仅 `cancel` |
+| 有 findings 且 `autoRepairRounds >= 15` | `PAUSE_REPAIR_LIMIT` | 用户可选 `resume_review_decision` 或其他已允许动作 |
 
-Review 结果必须完整返回 Leader。Leader 只能选择：
+`resume_review_decision` 将自动 repair counter 重置为 0，授予下一组最多 15 轮。无进展观测不提前终止额度，但也不得绕过无 actionable finding 的 invalid Review 保护。
 
-```ts
-type LeaderDecision =
-  | { decision: "accept"; reason: string }
-  | { decision: "repair"; repairItems: RepairItem[]; reason: string }
-  | { decision: "pause"; reason: string };
-```
+## Durable Checkpoint and Recovery
 
-### Accept
-
-必须同时满足：
-
-- verdict 为 `APPROVE`；
-- 所有 changed paths 为 `FULL`；
-- 没有 blocking finding；
-- Review、Candidate 和 Revision Hash 均为当前值。
-
-任一条件不满足，协议必须拒绝 `accept`。Leader 不能覆盖 Reviewer 的阻塞结果。
-
-### Repair
-
-Leader 至少提交一个 RepairItem：
-
-```ts
-type RepairItem =
-  | {
-      source: "reviewer";
-      findingFingerprint: string;
-    }
-  | {
-      source: "leader";
-      code: string;
-      taskId: string;
-      path: string | null;
-      reason: string;
-    };
-```
-
-Reviewer 来源绑定当前 Review finding。Leader 来源用于“Reviewer 已批准，但 Leader 发现具体问题”等场景。
-
-Leader RepairItem 必须：
-
-- 包含稳定且非空的问题 code；
-- 原因具体且非空；
-- 关联当前 Task；
-- path 为空时回落到该 Task 的首个目标路径；
-- 显式 path 安全且位于项目内；
-- 不隐式扩大产品范围或权限。
-
-无法形成具体修复项时，Leader 应选择 `pause`，不能让 Worker 猜测。
-
-### Pause
-
-暂停必须持久化机器可读 code、原因和允许的恢复动作。需要用户选择、Reviewer 不可用、修复越界或无法安全判断时均可暂停。
-
-## Repair Revision
-
-Leader 选择 repair 后：
-
-1. Daemon 将 RepairItems 转换为具体修复任务草稿，进入 `FIXING`。
-2. 草稿持久化后进入 `PAUSED`，Host 校验并批准新的不可变 Revision 修复输入；原始任务文件保持不变。
-3. 仅纠正已批准范围时可批准 `LEADER_REPAIR` Revision；扩大产品范围时重新取得用户批准。
-4. 批准后进入 `PREPARING`，创建新 Revision 并失效旧 Candidate、ReviewAction、ReviewDecision、LeaderDecision 和 PublishResult。
-5. Pi Worker 从上一 Revision Result Tree 创建新的 Pi session 继续执行，并生成 Run Baseline 到最新 Result Tree 的累计 Candidate；相邻 Tree Patch 只作为本轮证据。
-6. Daemon 创建新 Review Action。
-7. Host 恢复原 Reviewer `S1` 完成复审。
-
-`reviewHistory` 中的 Reviewer session 绑定在同一闭环跨 Revision 保留；其他结果不得跨 Revision 继承。
-
-## Repair-round Stop
-
-系统可以比较相邻修复轮次的：
-
-- blocking finding fingerprint 集合；
-- RepairItem 对应路径的 Candidate Hash；
-- 问题是否实际减少。
-
-这些观测只用于记录进展，不得在额度耗尽前提前结束循环。初始编码后的 Review 不计入额度；后续自动返工最多执行 15 轮。第 15 轮复审仍未达到所有任务 100% 时，保留 Candidate 和 Review 信息并暂停，由用户决定是否继续。每次继续增加 15 轮额度。
+- `CLAIMING` 保存 `hostTurnId + turnToken + revision + actionId + deadlineAt`；claim response 丢失时从 durable pending Action 对账。
+- `AWAITING_REVIEW` 增加 `claimId + reviewAttemptId`；Daemon 每 60 秒或 lease 到期前 30 秒续租。
+- `AWAITING_USER_INPUT` 保存 pause code；重启后返回相同类型的用户请求。
+- Review 总 deadline 为 30 分钟；续租失败重试间隔 1 秒，连续三次失败进入 durable pause。
+- 同一 Run 的 turn 串行执行；Project state mutation 使用 CAS，每个 operation 总计最多尝试四次（含首次，最多三次重试）并在重试前重读。
+- Daemon 重启先恢复 `hostTurn`，随后重读 fresh state；checkpoint 未清除时不得并行启动 legacy pipeline recovery。
+- stable child request IDs 防止重复 claim、Review 提交、repair、resume 或 Publish。
 
 ## Acceptance Matrix
 
 | 场景 | 预期 |
 |---|---|
-| 首轮 Review | 创建一个独立 Reviewer session |
-| 第二轮 Review | 恢复首轮 session |
-| 第二轮新建另一 session | 拒绝 |
-| Reviewer 等于 Worker | 拒绝 |
-| Reviewer 未重读当前任务/实现 | 不能通过 |
-| Reviewer 未通过，Leader accept | 拒绝 |
-| Reviewer 批准，Leader 创建合法 RepairItem | 新 Revision |
-| RepairItem 空泛或越界 | 拒绝或暂停 |
-| 旧 Action/claim/Review 迟到 | 拒绝 |
-| Reviewer session 丢失 | `HOST_REVIEW_UNAVAILABLE` |
-| 15 个返工轮次后仍未全部 100% | 保留 Candidate 并暂停等待用户决定 |
-| Reviewer 只审本轮增量，未覆盖最新完整结果 | 不能通过 |
-| Leader accept 且审查条件满足 | 进入 Publish |
+| Worker 尚未形成 Review | `NOT_READY`，无 worktree path |
+| 首轮有效 Action | durable claim 后 `REVIEW_REQUIRED/CREATE` |
+| 第二轮 Review | `REVIEW_REQUIRED/RESUME S1` |
+| 第二轮新建 `S2` | 拒绝 |
+| Reviewer 等于 Pi session | 拒绝 |
+| stale Review/answer/failure | 无副作用的 no-path `NOT_READY` |
+| Daemon 在 claim intent 后崩溃 | 重启对账同一 Action，不重复 claim |
+| Daemon 在等待 Reviewer 时重启 | 恢复同一 token/action/attempt 并续租 |
+| 100% 有效 Review | 自动 accept/Publish |
+| 不完整且有 findings，低于 15 轮 | 自动 repair，新 Pi session，同一 Reviewer |
+| 不完整且无 findings | `INVALID_REVIEW`，只允许 cancel |
+| 第 15 轮仍不完整 | `AUTOMATIC_REPAIR_LIMIT`，等待用户选择 |
+| deadline 或三次 renew failure | durable Host-review-unavailable pause |
+| Pause/conflict | `USER_INPUT_REQUIRED`，不是 `DONE` |
+| 终态 | `DONE` + canonical result |
+| MCP 工具注册 | 恰好 11 个；高层 Host 使用 execute + review_turn |
+
+## Current Implementation Status
+
+The schemas, 11-tool registry, deterministic decision policy, Host-owner enforcement, claim/renew/restart recovery, self-contained pause protocol, complete Reviewer context, and production-composition repair scenario are implemented. Final semantic review found no actionable P0/P1/P2 and approved T204/T205. The remaining evidence items are:
+
+- T208/T209: installed Pi host compatibility and an explicitly authorized, checked-in real-model transcript remain open; the gated real-Pi test was intentionally not run.
 
 ## Non-goals
 
-- 不让 Daemon 启动 Codex CLI、Claude CLI 或其他 Reviewer。
-- 不引入第二个 Leader或 Worker 自审。
-- 不让 Review 通过代表项目已经运行成功。
-- 不新增独立的通用 test/lint/build verify/gate 阶段；Pi 可在 isolated workspace 中按 Task 需要运行项目命令。
-- 不修改 Git index、历史或远端。
+- 不让 Daemon 启动 Codex CLI、Claude CLI 或任何 Reviewer。
+- 不让 Daemon解释开放式用户意图、发明 RepairItem 或扩大批准范围。
+- 不移除旧 10 个 primitive MCP 工具。
+- 不让 Review 通过代表项目验证命令必然成功；SmartFlow 不新增通用 verify/gate。
+- 不以 mocked Pi Extension/RPC 测试替代真实 pinned Pi SDK 和 real-model E2E。
+- 不修改 Git 历史、远端或原始项目，除非通过受审查的 Publish。

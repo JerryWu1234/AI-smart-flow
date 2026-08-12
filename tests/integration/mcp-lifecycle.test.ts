@@ -1156,6 +1156,126 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     expect(await readFile(store.statePath)).toEqual(before);
   });
 
+  it("blocks primitive resume and claim while a composite Host turn owns the run", async () => {
+    const harness = await createRuntimeHarness();
+    activeHarnesses.push(harness);
+    const dataDirectory = resolve(harness.dataDir, "composite-host-owner");
+    const projectId = `project-${createHash("sha256")
+      .update(harness.projectDir, "utf8")
+      .digest("hex")
+      .slice(0, 40)}`;
+    const store = await createLifecycleStore(harness, "REVIEW_PENDING", {}, {
+      dataDirectory: resolve(dataDirectory, "projects", projectId),
+      projectId
+    });
+    const initial = await store.readState();
+    const initialRun = initial.runs["job-1"];
+    if (initialRun?.pendingAction?.type !== "REVIEW") {
+      throw new Error("composite owner fixture is missing its Review action");
+    }
+    const actionId = initialRun.pendingAction.actionId;
+    if (typeof actionId !== "string") {
+      throw new Error("composite owner fixture has an invalid Review action id");
+    }
+    const startedAt = new Date().toISOString();
+    await store.writeState({
+      ...initial,
+      stateVersion: initial.stateVersion + 1,
+      runs: {
+        ...initial.runs,
+        "job-1": {
+          ...initialRun,
+          phase: "PAUSED",
+          pause: {
+            code: "HOST_REVIEW_UNAVAILABLE",
+            resumeActions: ["retry_host_review", "cancel"]
+          },
+          hostTurn: {
+            stage: "AWAITING_USER_INPUT",
+            turnToken: "turn-owner",
+            hostTurnId: "host-owner",
+            revision: 1,
+            pauseCode: "HOST_REVIEW_UNAVAILABLE",
+            startedAt
+          }
+        }
+      },
+      updatedAt: startedAt
+    });
+    const runtime = new ProjectRuntime({ dataDirectory });
+    const paused = await store.readState();
+    const pausedBytes = await readFile(store.statePath);
+
+    await expect(runtime.handle({
+      id: "primitive-resume-owner-bypass",
+      method: "smartflow_resume",
+      payload: {
+        requestId: "primitive-resume-owner-bypass",
+        projectId,
+        jobId: "job-1",
+        resumeAction: "retry_host_review",
+        expectedRevision: 1,
+        expectedStateVersion: paused.stateVersion
+      }
+    })).rejects.toMatchObject({ code: "HOST_TURN_ACTIVE" });
+    expect(await readFile(store.statePath)).toEqual(pausedBytes);
+
+    await expect(runtime.handle({
+      id: "primitive-cancel-owner-bypass",
+      method: "smartflow_cancel",
+      payload: {
+        requestId: "primitive-cancel-owner-bypass",
+        projectId,
+        jobId: "job-1",
+        reason: "attacker cancellation",
+        expectedRevision: 1,
+        expectedStateVersion: paused.stateVersion
+      }
+    })).rejects.toMatchObject({ code: "HOST_TURN_ACTIVE" });
+    expect(await readFile(store.statePath)).toEqual(pausedBytes);
+
+    const claimableAt = new Date().toISOString();
+    await store.writeState({
+      ...paused,
+      stateVersion: paused.stateVersion + 1,
+      runs: {
+        ...paused.runs,
+        "job-1": {
+          ...initialRun,
+          phase: "REVIEW_PENDING",
+          pause: undefined,
+          hostTurn: {
+            stage: "CLAIMING",
+            turnToken: "turn-owner-claim",
+            hostTurnId: "host-owner",
+            revision: 1,
+            actionId,
+            startedAt: claimableAt,
+            deadlineAt: new Date(Date.now() + 30 * 60_000).toISOString()
+          }
+        }
+      },
+      updatedAt: claimableAt
+    });
+    const claimable = await store.readState();
+    const claimableBytes = await readFile(store.statePath);
+
+    await expect(runtime.handle({
+      id: "primitive-claim-owner-bypass",
+      method: "smartflow_claim_action",
+      payload: {
+        requestId: "primitive-claim-owner-bypass",
+        projectId,
+        jobId: "job-1",
+        expectedRevision: 1,
+        expectedStateVersion: claimable.stateVersion,
+        actionId,
+        hostTurnId: "host-attacker"
+      }
+    })).rejects.toMatchObject({ code: "HOST_TURN_ACTIVE" });
+    expect(await readFile(store.statePath)).toEqual(claimableBytes);
+  });
+
   it("keeps informational and illegal pause actions byte-identical", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
@@ -1349,6 +1469,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         "job-1": {
           ...leaderRun,
           phase: "PAUSED",
+          autoRepairRounds: 15,
           pause: { code: "LEADER_PAUSED", resumeActions: ["resume_review_decision", "cancel"] }
         }
       },
@@ -1369,6 +1490,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       }
     });
     expect(leaderResult).toMatchObject({ phase: "LEADER_DECISION" });
+    expect((await leaderStore.readState()).runs["job-1"]?.autoRepairRounds).toBe(0);
   });
 
   it("rejects retry_cancel combined with Revision approval fields", async () => {

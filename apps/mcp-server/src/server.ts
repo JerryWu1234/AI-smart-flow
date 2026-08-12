@@ -7,6 +7,7 @@ import {
   renewActionClaimInputSchema,
   resultInputSchema,
   resumeInputSchema,
+  reviewTurnInputSchema,
   statusInputSchema,
   submitLeaderDecisionInputSchema,
   submitReviewInputSchema,
@@ -25,17 +26,15 @@ export function createSmartFlowMcpServer(gateway: DaemonGateway): McpServer {
     { name: "smartflow", version: "0.1.0" },
     {
       instructions: [
-        "The MCP caller is the Leader and owns the Host loop.",
-        "After smartflow_execute, keep using smartflow_wait/status and handle every Review, repair Revision, and publish transition until the run completes or reaches a pause that requires the user.",
-        "For a REVIEW action, claim it and use this caller's native session capability: CREATE one independent Reviewer session once, or RESUME exactly the supplied session.",
-        "While that Reviewer is running, renew the claim until the result is ready.",
-        "The Reviewer must open the claimed Run worktree, reread its synchronized Task on every round, may read any worktree files needed for context, and must not run tests, lint, or builds.",
-        "The Reviewer returns task completion percentages plus a concise reason and implementation suggestion for each incomplete task; the overall percentage is the rounded arithmetic mean of all task percentages.",
-        "Retry Reviewer creation or transient failures up to three times; after creation, retry invalid output with that same session up to three times.",
-        "If any task is below 100%, submit all incomplete-task findings for repair and automatically approve a safe REPAIR_TASKS_READY Revision without user confirmation.",
-        "Reuse the bound Reviewer for the next full review. If every task is 100%, automatically accept so publishing starts.",
-        "The initial review does not count toward the repair limit. Pause after fifteen repair rounds and ask the user whether to grant another fifteen rounds.",
-        "Never ask the Daemon to create a Reviewer and never replace a lost bound Reviewer session."
+        "Start an approved run with smartflow_execute, then repeatedly call smartflow_review_turn until it returns DONE or USER_INPUT_REQUIRED.",
+        "When smartflow_review_turn returns NOT_READY, wait for retryAfterMs and call it again without calculating workflow state fields.",
+        "When it returns REVIEW_REQUIRED, use this caller's native session capability: CREATE one independent Reviewer session once, or RESUME exactly the supplied session, with the supplied worktreePath as its working directory.",
+        "The Reviewer must reread the synchronized Task on every round, may read worktree files needed for context, and must not run tests, lint, builds, or modify files.",
+        "The Reviewer returns every Task exactly once with an integer completion percentage; incomplete tasks also include a concise reason and implementation suggestion; completionPercentage is their rounded arithmetic mean.",
+        "Submit that result to smartflow_review_turn with the unchanged turnToken. The Daemon owns claim renewal, review decisions, safe repair approval, repair counting, and publish transitions.",
+        "When it returns USER_INPUT_REQUIRED, present its message and options to the user. If requiredInput.mode is COLLECT, collect every listed field and construct the complete structured answer only from the user's approved values. If its mode is CONFIRM, ask the user to confirm the supplied complete answer before returning it through the same tool.",
+        "Never ask the Daemon to create a Reviewer, never use the Worker session as Reviewer, and never replace a lost bound Reviewer session.",
+        "The lower-level status, wait, claim, renew, submit-review, leader-decision, resume, cancel, and result tools remain available only for backward-compatible manual orchestration."
       ].join(" ")
     }
   );
@@ -46,10 +45,21 @@ export function createSmartFlowMcpServer(gateway: DaemonGateway): McpServer {
     "smartflow_execute",
     {
       description:
-        "Start an approved run. The invoking MCP Host remains the Leader and must drive the automatic Review-repair loop through publish or a user-required pause.",
+        "Start an approved run. Continue only with smartflow_review_turn until it returns DONE or requires user input.",
       inputSchema: executeInputSchema
     },
     async (input) => toolResult(await handlers.smartflow_execute(input))
+  );
+
+  // Drive all deterministic workflow transitions while leaving only Review execution to the Host.
+  server.registerTool(
+    "smartflow_review_turn",
+    {
+      description:
+        "Single Host-loop entry point after smartflow_execute. Returns NOT_READY, REVIEW_REQUIRED, USER_INPUT_REQUIRED, or DONE. On REVIEW_REQUIRED, run or resume the specified independent Reviewer and return its task scores with the unchanged turnToken; the Daemon handles every mechanical transition and claim renewal.",
+      inputSchema: reviewTurnInputSchema
+    },
+    async (input) => toolResult(await handlers.smartflow_review_turn(input))
   );
 
   // Get the run's phase, progress, and pending human actions.

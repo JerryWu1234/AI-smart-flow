@@ -261,18 +261,39 @@ export const resumeActionSchema = z.enum([
   "export_bundle"
 ]);
 
+const reviewTurnInspectionActionSchema = z.enum([
+  "leader_append_repair_tasks",
+  "inspect_processes",
+  "inspect_recovery",
+  "inspect_conflict",
+  "inspect_repair_diff",
+  "inspect_no_progress",
+  "export_bundle"
+]);
+
+const reviewTurnMutableActionSchema = resumeActionSchema.exclude([
+  "leader_append_repair_tasks",
+  "inspect_processes",
+  "inspect_recovery",
+  "inspect_conflict",
+  "inspect_repair_diff",
+  "inspect_no_progress",
+  "export_bundle"
+]);
+
+export const revisionApprovalSchema = z
+  .object({
+    kind: z.enum(["USER", "LEADER_REPAIR"]),
+    parentRevision: positiveIntegerSchema.nullable(),
+    authorizedCriterionIds: z.array(z.string().min(1))
+  })
+  .strict();
+
 export const resumeInputSchema = stateMutationSchema.extend({
   resumeAction: resumeActionSchema,
   tasksPath: tasksPathSchema.optional(),
   approvedSourceHash: sha256Schema.optional(),
-  approval: z
-    .object({
-      kind: z.enum(["USER", "LEADER_REPAIR"]),
-      parentRevision: positiveIntegerSchema.nullable(),
-      authorizedCriterionIds: z.array(z.string().min(1))
-    })
-    .strict()
-    .optional()
+  approval: revisionApprovalSchema.optional()
 });
 export const resumeOutputSchema = mutationResultSchema;
 
@@ -360,6 +381,159 @@ export const resultOutputSchema = z
   })
   .strict();
 
+const reviewTurnReviewSchema = z
+  .object({
+    reviewerSessionId: identifierSchema,
+    result: reviewSubmissionInputSchema
+  })
+  .strict();
+
+const reviewTurnRevisionApprovalAnswerSchema = z.object({
+  action: z.literal("approve_new_manifest_revision"),
+  tasksPath: tasksPathSchema,
+  approvedSourceHash: sha256Schema,
+  approval: revisionApprovalSchema
+}).strict();
+
+const reviewTurnAnswerSchema = z.union([
+  reviewTurnMutableActionSchema.exclude(["approve_new_manifest_revision"]),
+  reviewTurnRevisionApprovalAnswerSchema
+]);
+
+const reviewTurnRevisionApprovalFieldsSchema = z.tuple([
+  z.literal("tasksPath"),
+  z.literal("approvedSourceHash"),
+  z.literal("approval")
+]);
+
+const reviewTurnRevisionApprovalFormSchema = z.object({
+  tasksPath: tasksPathSchema.nullable(),
+  approvedSourceHash: sha256Schema.nullable(),
+  approval: revisionApprovalSchema.nullable()
+}).strict();
+
+const reviewTurnRevisionApprovalRequiredInputSchema = z.discriminatedUnion("mode", [
+  z.object({
+    mode: z.literal("COLLECT"),
+    action: z.literal("approve_new_manifest_revision"),
+    fields: reviewTurnRevisionApprovalFieldsSchema,
+    inputForm: reviewTurnRevisionApprovalFormSchema
+  }).strict(),
+  z.object({
+    mode: z.literal("CONFIRM"),
+    action: z.literal("approve_new_manifest_revision"),
+    fields: reviewTurnRevisionApprovalFieldsSchema,
+    answer: reviewTurnRevisionApprovalAnswerSchema
+  }).strict()
+]);
+
+export const reviewTurnInputSchema = z
+  .object({
+    requestId: identifierSchema,
+    projectId: identifierSchema,
+    jobId: identifierSchema,
+    hostTurnId: identifierSchema,
+    turnToken: identifierSchema.optional(),
+    review: reviewTurnReviewSchema.optional(),
+    answer: reviewTurnAnswerSchema.optional(),
+    reviewUnavailableReason: z.string().trim().min(1).optional()
+  })
+  .strict()
+  .superRefine((input, context) => {
+    const submissions = [
+      input.review !== undefined,
+      input.answer !== undefined,
+      input.reviewUnavailableReason !== undefined
+    ].filter(Boolean).length;
+    if (submissions > 1) {
+      context.addIssue({
+        code: "custom",
+        message: "review, answer, and reviewUnavailableReason are mutually exclusive"
+      });
+    }
+    if (submissions > 0 && input.turnToken === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["turnToken"],
+        message: "turnToken is required when submitting a review, answer, or failure"
+      });
+    }
+  });
+
+const reviewTurnIdentitySchema = z.object({
+  projectId: identifierSchema,
+  jobId: identifierSchema,
+  revision: positiveIntegerSchema,
+  stateVersion: nonNegativeIntegerSchema
+});
+
+const reviewTurnNotReadySchema = reviewTurnIdentitySchema.extend({
+  kind: z.literal("NOT_READY"),
+  phase: runPhaseSchema,
+  retryAfterMs: z.number().int().min(1).max(30_000),
+  progress: z
+    .object({ completed: nonNegativeIntegerSchema, total: nonNegativeIntegerSchema })
+    .strict()
+}).strict();
+
+const reviewerSessionRequestSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("CREATE") }).strict(),
+  z.object({
+    mode: z.literal("RESUME"),
+    reviewerSessionId: identifierSchema
+  }).strict()
+]);
+
+const reviewTurnReviewRequiredSchema = reviewTurnIdentitySchema.extend({
+  kind: z.literal("REVIEW_REQUIRED"),
+  turnToken: identifierSchema,
+  worktreePath: z.string().min(1),
+  reviewAttemptId: identifierSchema,
+  taskSourceHash: sha256Schema,
+  candidateHash: sha256Schema,
+  changedPaths: z.array(z.string().min(1)),
+  reviewerSession: reviewerSessionRequestSchema,
+  piSessionId: identifierSchema,
+  deadlineAt: z.iso.datetime({ offset: true })
+}).strict();
+
+const reviewTurnUserInputRequiredSchema = reviewTurnIdentitySchema.extend({
+  kind: z.literal("USER_INPUT_REQUIRED"),
+  turnToken: identifierSchema,
+  pause: z
+    .object({
+      code: z.string().min(1),
+      message: z.string().min(1)
+    })
+    .strict(),
+  result: resultOutputSchema,
+  review: reviewSubmissionSchema.optional(),
+  repairDraft: repairDraftSchema.optional(),
+  requiredInput: reviewTurnRevisionApprovalRequiredInputSchema.optional(),
+  inspectionOptions: z.array(z.object({
+    action: reviewTurnInspectionActionSchema,
+    description: z.string().min(1)
+  }).strict()),
+  options: z.array(z.object({
+    answer: reviewTurnMutableActionSchema,
+    description: z.string().min(1)
+  }).strict()).min(1)
+}).strict();
+
+const reviewTurnDoneSchema = z
+  .object({
+    kind: z.literal("DONE"),
+    result: resultOutputSchema
+  })
+  .strict();
+
+export const reviewTurnOutputSchema = z.discriminatedUnion("kind", [
+  reviewTurnNotReadySchema,
+  reviewTurnReviewRequiredSchema,
+  reviewTurnUserInputRequiredSchema,
+  reviewTurnDoneSchema
+]);
+
 export const mcpToolSchemas = {
   smartflow_execute: { input: executeInputSchema, output: executeOutputSchema },
   smartflow_status: { input: statusInputSchema, output: statusOutputSchema },
@@ -376,7 +550,8 @@ export const mcpToolSchemas = {
   },
   smartflow_resume: { input: resumeInputSchema, output: resumeOutputSchema },
   smartflow_cancel: { input: cancelInputSchema, output: cancelOutputSchema },
-  smartflow_result: { input: resultInputSchema, output: resultOutputSchema }
+  smartflow_result: { input: resultInputSchema, output: resultOutputSchema },
+  smartflow_review_turn: { input: reviewTurnInputSchema, output: reviewTurnOutputSchema }
 } as const;
 
 export type ExecuteInput = z.infer<typeof executeInputSchema>;
@@ -405,3 +580,5 @@ export type CancelInput = z.infer<typeof cancelInputSchema>;
 export type CancelOutput = z.infer<typeof cancelOutputSchema>;
 export type ResultInput = z.infer<typeof resultInputSchema>;
 export type ResultOutput = z.infer<typeof resultOutputSchema>;
+export type ReviewTurnInput = z.infer<typeof reviewTurnInputSchema>;
+export type ReviewTurnOutput = z.infer<typeof reviewTurnOutputSchema>;

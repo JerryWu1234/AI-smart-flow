@@ -3,6 +3,7 @@ export * from "./cancel-manager.js";
 export * from "./config.js";
 export * from "./daemon-launcher.js";
 export * from "./job-runner.js";
+export * from "./host-turn-coordinator.js";
 export * from "./local-ipc-client.js";
 export * from "./local-ipc-server.js";
 export * from "./main.js";

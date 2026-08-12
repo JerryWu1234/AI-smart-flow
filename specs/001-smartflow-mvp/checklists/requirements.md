@@ -1,7 +1,8 @@
-# Specification Quality Checklist: SmartFlow MVP 4.0
+# Specification Quality Checklist: SmartFlow MVP 4.1
 
-**Purpose**: Validate specification completeness and quality before implementation planning  
+**Purpose**: Validate specification completeness, Solution D ownership, and implementation traceability
 **Created**: 2026-08-05
+**Updated**: 2026-08-11
 **Feature**: [spec.md](../spec.md)
 
 ## Content Quality
@@ -10,6 +11,7 @@
 - [x] Product behavior is separated from SDK and storage design details
 - [x] User stories are prioritized and independently testable
 - [x] All mandatory specification sections are complete
+- [x] The superseded Host-orchestration ADR is preserved as history and linked to the current ADR
 
 ## Requirement Completeness
 
@@ -26,19 +28,49 @@
 - [x] API Key non-persistence and redaction requirements are measurable
 - [x] Timeout, process-tree termination and recovery-blocked behavior are explicit
 - [x] MCP/API/UI/log absolute-path non-disclosure is explicit and measurable
-- [x] Candidate, Review, Leader and Publish boundaries remain testable
-- [x] Edge cases cover path escape, task source drift, concurrent Runs and publish recovery
+- [x] Candidate, Review, automatic decision and Publish boundaries remain testable
+- [x] Edge cases cover path escape, task source drift, concurrent Runs and Publish recovery
+
+## Solution D Completeness
+
+- [x] Preferred Host API is explicitly `smartflow_execute → smartflow_review_turn`
+- [x] Public output is exactly `NOT_READY | REVIEW_REQUIRED | USER_INPUT_REQUIRED | DONE`
+- [x] `DONE` is terminal-only; pauses/conflicts remain typed user-input states
+- [x] Only claimed `REVIEW_REQUIRED` exposes `worktreePath`; stale/poll/pause/terminal outputs do not
+- [x] Host owns Reviewer CREATE/RESUME and all user interaction; Daemon never creates a Reviewer
+- [x] Daemon owns deterministic wait/claim/renew/accept/repair/pause/Publish mechanics
+- [x] Schema-v4 `hostTurn` covers `CLAIMING | AWAITING_REVIEW | AWAITING_USER_INPUT`
+- [x] `hostTurnId + turnToken + revision` ownership and stale-continuation behavior are explicit
+- [x] Per-Run serialization, Project-wide CAS, stable child request IDs, and at most four total CAS attempts (initial plus up to three retries) are explicit
+- [x] Thirty-minute deadline, 60-second renew, 30-second margin, 1-second retry and three-failure pause are explicit
+- [x] Mechanical plans `ACCEPT | REPAIR | PAUSE_INVALID_REVIEW | PAUSE_REPAIR_LIMIT` are complete
+- [x] Automatic repair budget is 15 and `resume_review_decision` grants the next group
+- [x] `INVALID_REVIEW` does not invent repair scope and offers only cancel
+- [x] Exactly 11 MCP tools are listed; the ten primitives remain compatible
+- [x] Restart recovery gives durable Host turn sole authority and rereads fresh state
 
 ## Feature Readiness
 
-- [x] Every functional requirement maps to an acceptance scenario or measurable outcome
+- [x] Every new functional requirement FR-042–FR-051 maps to a task, code path, and test/evidence row
+- [x] Every new success criterion SC-016–SC-020 has explicit evidence status
 - [x] Git Workspace, Revision and cleanup semantics are frozen
 - [x] Pi process containment and official-tool ownership are frozen
 - [x] In-memory Pi model registration and single-model scope are frozen
 - [x] Reviewer binding and cumulative Candidate semantics are frozen
-- [x] Atomic publish, conflict response and PARTIAL/UNKNOWN behavior are frozen
+- [x] Atomic Publish, conflict response and PARTIAL/UNKNOWN behavior are frozen
+- [x] Production-composition two-tool E2E is distinguished from real installed Pi/model evidence
+- [ ] Real pinned Pi 0.83.0 Extension/RPC host compatibility has checked-in, reproducible evidence (T190/T208)
+- [ ] Authorized real-model two-tool E2E has checked-in, auditable evidence (T192/T209)
+
+## Current Implementation Gaps
+
+- [ ] `changedPaths` from `REVIEW_REQUIRED` reaches the packaged Host Reviewer callback (T205)
+- [ ] A paused active Review preserves its owning `hostTurnId` or uses an explicit authorized handoff before another Host can reclaim (T204)
+- [ ] A successful claim whose response is lost schedules recovery/renewal from the durable claim lease, not only the 30-minute Review deadline (T204)
+- [ ] Every advertised composite pause is self-contained, including required approval fields and inspection options, and unanswered pauses do not call primitive `smartflow_result` (T205)
 
 ## Notes
 
 - SmartFlow 不新增通用 verify/gate 阶段；Pi 可以在 isolated workspace 内按任务需要运行项目命令。
-- Runtime/API field shapes are defined in the plan, data model and contracts; this checklist validates product requirements only.
+- Mocked `registerProvider`、production-composition tests 和 gitignored `.smartflow-e2e` 产物都不能单独关闭真实 SDK/model 验收项。
+- Runtime/API field shapes are defined in the plan, data model, and contracts; [implementation-map.md](../implementation-map.md) is the normative traceability index.

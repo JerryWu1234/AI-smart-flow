@@ -5,6 +5,7 @@ import type { HostGateway } from "./approval.js";
 import {
   validateHostReviewOutput,
   type HostReviewCallbackOutput,
+  type HostReviewContext,
   type HostReviewOutput
 } from "./reviewer.js";
 
@@ -31,7 +32,7 @@ describe("HostActionLoop Review lease", () => {
       taskSourceHash: digest,
       candidateHash: digest,
       reviewAttemptId: "review-attempt-1",
-      changedPaths: ["src/a.ts"],
+      changedPaths: ["src/a.ts", "src/b.ts"],
       reviewerSession: { mode: "CREATE" as const },
       piSessionId: "pi-session-1",
       expiresAt: "2026-07-20T00:15:00Z"
@@ -88,13 +89,8 @@ describe("HostActionLoop Review lease", () => {
         return Promise.reject(new Error(`Unexpected tool: ${toolName}`));
       }
     };
-    let reviewCalls = 0;
-    const loop = new HostActionLoop(gateway, {
-      review: (): Promise<HostReviewOutput> => {
-        reviewCalls += 1;
-        return reviewResult;
-      }
-    });
+    const review = vi.fn((): Promise<HostReviewOutput> => reviewResult);
+    const loop = new HostActionLoop(gateway, { review });
 
     const polling = loop.pollOnce({
       projectId: "project-1",
@@ -118,7 +114,17 @@ describe("HostActionLoop Review lease", () => {
     });
     await polling;
 
-    expect(reviewCalls).toBe(1);
+    expect(review.mock.calls).toEqual([[
+      {
+        reviewAttemptId: "review-attempt-1",
+        worktreePath: "/tmp/worktree",
+        taskSourceHash: digest,
+        candidateHash: digest,
+        changedPaths: ["src/a.ts", "src/b.ts"],
+        reviewerSession: { mode: "CREATE" },
+        piSessionId: "pi-session-1"
+      }
+    ]]);
     expect(renewals).toHaveLength(2);
     expect(renewals.map((request) => request.expectedStateVersion)).toEqual([2, 3]);
     expect(submissions).toHaveLength(1);
@@ -206,11 +212,12 @@ describe("HostActionLoop Review lease", () => {
 });
 
 describe("compact Reviewer completion result", () => {
-  const context = {
+  const context: HostReviewContext = {
     reviewAttemptId: "review-attempt-1",
     worktreePath: "/tmp/worktree",
     taskSourceHash: digest,
     candidateHash: digest,
+    changedPaths: ["src/a.ts", "src/b.ts"],
     reviewerSession: { mode: "CREATE" as const },
     piSessionId: "pi-session-1"
   };

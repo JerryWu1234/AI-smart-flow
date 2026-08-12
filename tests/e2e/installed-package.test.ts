@@ -85,7 +85,7 @@ function installedTasksSource(): string {
 
 ## M13 · Installed runtime
 
-- [ ] T057 Replace \`sum.js\` with exactly two exported functions: \`sum(a, b)\` returns \`a + b\`, and \`subtract(a, b)\` returns \`a - b\` — 验收：Reviewer confirms both functions and no unrelated file changes
+- [ ] T057 Replace \`sum.js\` with exactly two exported functions: \`sum(a, b)\` returns \`a + b\`, and \`subtract(a, b)\` returns \`a - b\`. If the Reviewer requests a dynamic repair marker during review, add that exact comment to \`sum.js\`. — 验收：Reviewer confirms both functions, any exact marker it requested, and no unrelated file changes
 `;
 }
 
@@ -94,6 +94,20 @@ function asRecord(value: unknown, context: string): Record<string, unknown> {
     throw new Error(`${context} did not return an object`);
   }
   return value as Record<string, unknown>;
+}
+
+function asArray(value: unknown, context: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`${context} did not return an array`);
+  return value;
+}
+
+function asStringArray(value: unknown, context: string): string[] {
+  return asArray(value, context).map((entry, index) => {
+    if (typeof entry !== "string") {
+      throw new Error(`${context}[${String(index)}] was not a string`);
+    }
+    return entry;
+  });
 }
 
 async function stopLaunchedDaemon(dataDirectory: string): Promise<void> {
@@ -233,7 +247,7 @@ describe("installed SmartFlow package", () => {
           "--eval",
           [
             `const skill = await import(${JSON.stringify(pathToFileURL(hostSkillEntry).href)});`,
-            'if (typeof skill.HostActionLoop !== "function" || typeof skill.validateHostReviewOutput !== "function") process.exit(1);',
+            'if (typeof skill.executeApprovedWorkflow !== "function" || typeof skill.approveTasksSource !== "function" || typeof skill.validateHostReviewOutput !== "function") process.exit(1);',
             'if ("CodexCliReviewerHost" in skill || "HostReviewer" in skill) process.exit(2);'
           ].join("\n")
         ],
@@ -283,18 +297,39 @@ describe("installed SmartFlow package", () => {
         {
           cwd: projectRoot,
           env: environment,
-          timeout: 600_000,
+          timeout: 1_200_000,
           maxBuffer: 30_000_000
         }
       );
       const lifecycle = parseJsonLine(lifecycleProcess.stdout);
       const scope = asRecord(lifecycle.scope, "installed lifecycle scope");
-      const execute = asRecord(lifecycle.execute, "installed execute result");
-      const reviewPending = asRecord(lifecycle.reviewPending, "installed review pending");
       const secondExecute = asRecord(lifecycle.secondExecute, "installed second execute result");
       const secondCanceled = asRecord(lifecycle.secondCanceled, "installed second canceled result");
       const result = asRecord(lifecycle.result, "installed result");
-      expect(secondExecute.jobId).not.toBe(execute.jobId);
+      const workflowToolNames = asStringArray(
+        lifecycle.workflowToolNames,
+        "installed workflow tool names"
+      );
+      const reviewerModes = asArray(lifecycle.reviewerModes, "installed reviewer modes")
+        .map((value, index) => asRecord(value, `installed reviewer mode ${String(index)}`));
+      const reviewChangedPaths = asArray(
+        lifecycle.reviewChangedPaths,
+        "installed review changed paths"
+      ).map((value, index) => asStringArray(
+        value,
+        `installed review changed paths ${String(index)}`
+      ));
+      if (typeof lifecycle.repairMarker !== "string") {
+        throw new Error("Installed lifecycle omitted its dynamic repair marker");
+      }
+      const repairMarker = lifecycle.repairMarker;
+      if (typeof lifecycle.reviewCalls !== "number" || !Number.isInteger(lifecycle.reviewCalls)) {
+        throw new Error("Installed lifecycle omitted its Reviewer call count");
+      }
+      const reviewCalls = lifecycle.reviewCalls;
+
+      expect(scope.jobId).toBe(result.jobId);
+      expect(secondExecute.jobId).not.toBe(result.jobId);
       expect(secondCanceled).toMatchObject({ phase: "CANCELED" });
       expect(result).toMatchObject({
         phase: "COMPLETED",
@@ -302,6 +337,47 @@ describe("installed SmartFlow package", () => {
         nextActions: [],
         publishOutcome: { status: "COMMITTED" }
       });
+      expect(typeof result.revision).toBe("number");
+      expect(result.revision as number).toBeGreaterThanOrEqual(2);
+
+      expect(new Set(workflowToolNames)).toEqual(new Set([
+        "smartflow_execute",
+        "smartflow_review_turn"
+      ]));
+      expect(workflowToolNames[0]).toBe("smartflow_execute");
+      expect(workflowToolNames.slice(1).every(
+        (toolName) => toolName === "smartflow_review_turn"
+      )).toBe(true);
+      for (const forbidden of [
+        "smartflow_wait",
+        "smartflow_status",
+        "smartflow_claim_action",
+        "smartflow_renew_action_claim",
+        "smartflow_submit_review",
+        "smartflow_submit_leader_decision",
+        "smartflow_resume",
+        "smartflow_result"
+      ]) {
+        expect(workflowToolNames).not.toContain(forbidden);
+      }
+
+      expect(reviewCalls).toBe(reviewerModes.length);
+      expect(reviewCalls).toBeGreaterThanOrEqual(2);
+      expect(reviewCalls).toBeLessThanOrEqual(3);
+      const firstReviewerMode = reviewerModes[0];
+      if (firstReviewerMode === undefined) throw new Error("Installed Reviewer was not called");
+      expect(firstReviewerMode.mode).toBe("CREATE");
+      if (typeof firstReviewerMode.reviewerSessionId !== "string") {
+        throw new Error("Installed Reviewer CREATE omitted its session ID");
+      }
+      const reviewerSessionId = firstReviewerMode.reviewerSessionId;
+      for (const reviewerMode of reviewerModes.slice(1)) {
+        expect(reviewerMode).toEqual({ mode: "RESUME", reviewerSessionId });
+      }
+      expect(reviewChangedPaths).toHaveLength(reviewCalls);
+      expect(reviewChangedPaths.every((paths) => paths.includes("sum.js"))).toBe(true);
+      expect(repairMarker).toMatch(/^\/\/ SMARTFLOW_DYNAMIC_REPAIR_[0-9a-f]{20}$/u);
+
       const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
       const deliveryBundle = artifacts
         .map((artifact) => asRecord(artifact, "result artifact"))
@@ -310,15 +386,18 @@ describe("installed SmartFlow package", () => {
       const taskSourceArtifact = artifacts
         .map((artifact) => asRecord(artifact, "result artifact"))
         .find((artifact) =>
-          String(artifact.relativePath).includes(`runs/${String(execute.jobId)}/`) &&
+          String(artifact.relativePath).includes(`runs/${String(result.jobId)}/`) &&
           String(artifact.relativePath).endsWith("/task-source.md")
         );
-      if (taskSourceArtifact === undefined) throw new Error("Installed result omitted frozen task source");
+      if (taskSourceArtifact === undefined) throw new Error("Installed result omitted task source artifact");
       expect(await readFile(resolve(
         daemonRoot,
         "projects",
         String(scope.projectId),
-        String(taskSourceArtifact.relativePath)
+        "runs",
+        String(result.jobId),
+        "revision-1",
+        "task-source.md"
       ), "utf8")).toBe(tasksSource);
       const bundleArtifactPath = resolve(
         daemonRoot,
@@ -350,10 +429,9 @@ describe("installed SmartFlow package", () => {
       const publishedSource = await readFile(resolve(projectRoot, "sum.js"), "utf8");
       expect(publishedSource).not.toBe(sourceBefore);
       expect(publishedSource).toContain("subtract");
+      expect(publishedSource).toContain(repairMarker);
       expect(`${lifecycleProcess.stdout}\n${lifecycleProcess.stderr}`).not.toContain("never-log-this");
-      expect(JSON.stringify({ execute, reviewPending, secondExecute, secondCanceled, result, exported, verified })).not.toContain(
-        "never-log-this"
-      );
+      expect(JSON.stringify({ lifecycle, exported, verified })).not.toContain("never-log-this");
     } catch (error) {
       throw new Error(
         `Installed MCP lifecycle failed at ${lifecycleStage}`,
@@ -363,5 +441,5 @@ describe("installed SmartFlow package", () => {
       await stopLaunchedDaemon(daemonRoot);
       await rm(root, { recursive: true, force: true });
     }
-  }, 900_000);
+  }, 2_400_000);
 });

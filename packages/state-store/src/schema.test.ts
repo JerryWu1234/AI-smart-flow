@@ -22,6 +22,38 @@ describe("ProjectState schema and recovery source", () => {
     ).toBe(false);
   });
 
+  it("persists strict Host review turns and automatic repair counts in schema v4", () => {
+    const run = createRunRecord({
+      phase: "REVIEWING",
+      autoRepairRounds: 7,
+      hostTurn: {
+        stage: "AWAITING_REVIEW",
+        turnToken: "turn-1",
+        hostTurnId: "host-turn-1",
+        revision: 1,
+        actionId: "review-action-1",
+        claimId: "claim-1",
+        reviewAttemptId: "review-attempt-1",
+        startedAt: "2026-08-11T10:00:00+00:00",
+        deadlineAt: "2026-08-11T10:30:00+00:00"
+      }
+    });
+    const state = createProjectState({ runs: { [run.jobId]: run } });
+    expect(projectStateSchema.parse(state).runs[run.jobId]).toMatchObject({
+      autoRepairRounds: 7,
+      hostTurn: { stage: "AWAITING_REVIEW", turnToken: "turn-1" }
+    });
+    expect(projectStateSchema.safeParse({
+      ...state,
+      runs: {
+        [run.jobId]: {
+          ...run,
+          hostTurn: { ...run.hostTurn, worktreePath: "/private/worktree" }
+        }
+      }
+    }).success).toBe(false);
+  });
+
   it("persists Pi Attempt session/containment identity and TIMED_OUT", () => {
     const run = createRunRecord({
       phase: "PAUSED",

@@ -11,6 +11,8 @@ import {
   renewActionClaimInputSchema,
   renewActionClaimOutputSchema,
   reviewSubmissionSchema,
+  reviewTurnInputSchema,
+  reviewTurnOutputSchema,
   runPhaseSchema,
   statusInputSchema,
   submitLeaderDecisionInputSchema,
@@ -21,7 +23,7 @@ import {
 const digest = "a".repeat(64);
 
 describe("smartflow.v5 protocol schemas", () => {
-  it("defines exactly the ten public MCP tools without Worker tool decisions", () => {
+  it("defines exactly the eleven public MCP tools without Worker tool decisions", () => {
     expect(Object.keys(mcpToolSchemas).sort()).toEqual([
       "smartflow_cancel",
       "smartflow_claim_action",
@@ -29,12 +31,192 @@ describe("smartflow.v5 protocol schemas", () => {
       "smartflow_renew_action_claim",
       "smartflow_result",
       "smartflow_resume",
+      "smartflow_review_turn",
       "smartflow_status",
       "smartflow_submit_leader_decision",
       "smartflow_submit_review",
       "smartflow_wait"
     ]);
     expect("smartflow_submit_tool_decision" in mcpToolSchemas).toBe(false);
+  });
+
+  it("models the single review-turn entry point without leaking worktree paths", () => {
+    const identity = {
+      projectId: "project-1",
+      jobId: "job-1",
+      revision: 1,
+      stateVersion: 3
+    };
+    const pausedResult = {
+      projectId: "project-1",
+      jobId: "job-1",
+      phase: "PAUSED" as const,
+      status: "PAUSED" as const,
+      artifacts: [],
+      nextActions: ["cancel"]
+    };
+    const reviewRequired = {
+      kind: "REVIEW_REQUIRED" as const,
+      ...identity,
+      turnToken: "turn-1",
+      worktreePath: "/private/run-worktree",
+      reviewAttemptId: "review-attempt-1",
+      taskSourceHash: digest,
+      candidateHash: "b".repeat(64),
+      changedPaths: ["src/a.ts"],
+      reviewerSession: { mode: "CREATE" as const },
+      piSessionId: "pi-session-1",
+      deadlineAt: "2026-08-11T12:30:00+00:00"
+    };
+    expect(reviewTurnOutputSchema.parse(reviewRequired)).toEqual(reviewRequired);
+    expect(reviewTurnOutputSchema.safeParse({
+      kind: "NOT_READY",
+      ...identity,
+      phase: "RUNNING",
+      retryAfterMs: 1_000,
+      progress: { completed: 0, total: 1 },
+      worktreePath: "/private/run-worktree"
+    }).success).toBe(false);
+    const userInput = {
+      kind: "USER_INPUT_REQUIRED" as const,
+      ...identity,
+      turnToken: "turn-2",
+      pause: { code: "REPAIR_NO_PROGRESS", message: "User action required" },
+      result: pausedResult,
+      inspectionOptions: [],
+      options: [{ answer: "cancel" as const, description: "Cancel the run" }]
+    };
+    expect(reviewTurnOutputSchema.parse(userInput)).toEqual(userInput);
+    expect(reviewTurnOutputSchema.safeParse({
+      ...userInput,
+      worktreePath: "/private/run-worktree"
+    }).success).toBe(false);
+    const repairDraft = {
+      sourceArtifact: { relativePath: "runs/job-1/repair.md", sha256: digest, size: 10 },
+      sourceHash: digest,
+      suggestedTasksPath: "tasks.md",
+      appendText: "repair task",
+      addedTaskLines: ["- [ ] T002 repair"],
+      reasons: ["scope change"],
+      approval: {
+        kind: "USER" as const,
+        parentRevision: 1,
+        authorizedCriterionIds: ["T002"]
+      }
+    };
+    const userApproval = {
+      kind: "USER_INPUT_REQUIRED" as const,
+      ...identity,
+      turnToken: "turn-user",
+      pause: { code: "REPAIR_USER_APPROVAL_REQUIRED", message: "Approval required" },
+      result: {
+        ...pausedResult,
+        nextActions: ["approve_new_manifest_revision", "cancel"],
+        repairDraft
+      },
+      repairDraft,
+      requiredInput: {
+        mode: "CONFIRM" as const,
+        action: "approve_new_manifest_revision" as const,
+        fields: ["tasksPath", "approvedSourceHash", "approval"] as const,
+        answer: {
+          action: "approve_new_manifest_revision" as const,
+          tasksPath: "tasks.md",
+          approvedSourceHash: digest,
+          approval: repairDraft.approval
+        }
+      },
+      inspectionOptions: [],
+      options: [
+        { answer: "approve_new_manifest_revision" as const, description: "Approve revision" },
+        { answer: "cancel" as const, description: "Cancel the run" }
+      ]
+    };
+    expect(reviewTurnOutputSchema.parse(userApproval)).toEqual(userApproval);
+    const genericApproval = {
+      kind: "USER_INPUT_REQUIRED" as const,
+      ...identity,
+      turnToken: "turn-generic-approval",
+      pause: { code: "APPROVED_SOURCE_DRIFT", message: "Approval required" },
+      result: {
+        ...pausedResult,
+        nextActions: ["approve_new_manifest_revision", "cancel"]
+      },
+      requiredInput: {
+        mode: "COLLECT" as const,
+        action: "approve_new_manifest_revision" as const,
+        fields: ["tasksPath", "approvedSourceHash", "approval"] as const,
+        inputForm: {
+          tasksPath: null,
+          approvedSourceHash: null,
+          approval: null
+        }
+      },
+      inspectionOptions: [],
+      options: [
+        { answer: "approve_new_manifest_revision" as const, description: "Approve revision" },
+        { answer: "cancel" as const, description: "Cancel the run" }
+      ]
+    };
+    expect(reviewTurnOutputSchema.parse(genericApproval)).toEqual(genericApproval);
+    expect(reviewTurnOutputSchema.safeParse({
+      ...genericApproval,
+      requiredInput: { ...genericApproval.requiredInput, inputForm: {} }
+    }).success).toBe(false);
+    expect(reviewTurnOutputSchema.safeParse({
+      ...genericApproval,
+      options: [{ answer: "inspect_conflict", description: "Inspect" }]
+    }).success).toBe(false);
+    const baseInput = {
+      requestId: "review-turn-request-1",
+      projectId: "project-1",
+      jobId: "job-1",
+      hostTurnId: "host-turn-1",
+      turnToken: "turn-1"
+    };
+    expect(reviewTurnInputSchema.safeParse({
+      ...baseInput,
+      review: {
+        reviewerSessionId: "reviewer-1",
+        result: {
+          completionPercentage: 100,
+          tasks: [{ id: "T001", completionPercentage: 100 }]
+        }
+      }
+    }).success).toBe(true);
+    expect(reviewTurnInputSchema.safeParse({
+      ...baseInput,
+      answer: "approve_new_manifest_revision"
+    }).success).toBe(false);
+    expect(reviewTurnInputSchema.safeParse({
+      ...baseInput,
+      answer: {
+        action: "approve_new_manifest_revision",
+        tasksPath: "tasks.md"
+      }
+    }).success).toBe(false);
+    expect(reviewTurnInputSchema.safeParse({
+      ...baseInput,
+      answer: "inspect_conflict"
+    }).success).toBe(false);
+    expect(reviewTurnInputSchema.safeParse({
+      ...baseInput,
+      answer: "export_bundle"
+    }).success).toBe(false);
+    expect(reviewTurnInputSchema.safeParse({
+      ...baseInput,
+      answer: userApproval.requiredInput.answer
+    }).success).toBe(true);
+    expect(reviewTurnInputSchema.safeParse({
+      ...baseInput,
+      answer: "cancel",
+      reviewUnavailableReason: "reviewer failed"
+    }).success).toBe(false);
+    expect(reviewTurnInputSchema.safeParse({
+      ...baseInput,
+      turnToken: undefined,
+      reviewUnavailableReason: "reviewer failed"
+    }).success).toBe(false);
   });
 
   it("records Pi Attempt session/containment identity", () => {

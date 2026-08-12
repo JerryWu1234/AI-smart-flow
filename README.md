@@ -14,3 +14,14 @@ Each Revision has a durable Pi Attempt/session. A live Host reconnect keeps that
 Each MCP server instance binds one model directly from `SMARTFLOW_PI_API`, `SMARTFLOW_PI_BASE_URL`, `SMARTFLOW_PI_MODEL` and `SMARTFLOW_PI_API_KEY`. Supported APIs are `openai-completions`, `openai-responses`, `anthropic-messages` and `google-generative-ai`. Optional context, output, thinking and Attempt deadline fields default to `1000000`, `384000`, `high` and `1800000ms`. SmartFlow registers the model in memory through a bundled Pi Extension and does not use `models.json`.
 
 Run `smartflow doctor --json` to verify Node, Pi, sandbox, model registration, signing and publish capabilities.
+
+## MCP workflow
+
+After approving a task source, call `smartflow_execute` once and then use only `smartflow_review_turn`. The turn API returns one of four states:
+
+- `NOT_READY`: wait for `retryAfterMs` and call it again.
+- `REVIEW_REQUIRED`: create or resume the specified independent Reviewer session in `worktreePath`, then return every task's completion score with the unchanged `turnToken`.
+- `USER_INPUT_REQUIRED`: present the message and available actions to the user, then return the selected action with the unchanged `turnToken`.
+- `DONE`: the run reached a terminal result.
+
+The Daemon owns status polling, Review claim renewal, Leader decisions, safe repair-revision approval, the fifteen-round repair limit, and publish transitions. The lower-level MCP lifecycle tools remain available for backward compatibility.

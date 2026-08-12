@@ -2,11 +2,12 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ProductionRuntimeComposition,
   ProjectRuntime,
+  ReviewCoordinator,
   type ProjectPipelineContext
 } from "@smartflow/daemon";
 import {
@@ -15,7 +16,11 @@ import {
   type HostGateway,
   type ReviewActionResult
 } from "@smartflow/host-skill";
-import type { RepairItem, ReviewSubmission } from "@smartflow/protocol";
+import type {
+  RepairItem,
+  ReviewSubmission,
+  ReviewTurnOutput
+} from "@smartflow/protocol";
 import type {
   CancelReceipt,
   ProviderProbeResult,
@@ -681,5 +686,364 @@ describe("production review repair loop", () => {
       .toEqual(Array.from({ length: 18 }, (_, index) => index + 1));
     expect(reviewer.observations.map((observation) => observation.sessionMode))
       .toEqual(["CREATE", ...Array.from({ length: 17 }, () => "RESUME")]);
+  }, 60_000);
+
+  it("keeps durable Host-turn recovery authoritative after a transient startup pause failure", async () => {
+    const harness = await createRuntimeHarness();
+    activeHarnesses.push(harness);
+    const tasksSource = createTasksSource({
+      tasks: `## M01 · Core
+
+- [ ] T001 Edit \`sum.js\` — 验收：Reviewer confirms the requested behavior`
+    });
+    await writeFile(resolve(harness.projectDir, "tasks.md"), tasksSource, "utf8");
+    const provider = new RepairLoopProvider();
+    const composition = new ProductionRuntimeComposition(
+      harness.dataDir,
+      undefined,
+      undefined,
+      provider
+    );
+    let runtime = new ProjectRuntime({
+      dataDirectory: harness.dataDir,
+      runPipeline: composition.runPipeline,
+      recover: composition.recover,
+      cancel: composition.cancel,
+      publish: composition.publish
+    });
+    const execute = await runtime.handle({
+      id: "host-recovery-execute",
+      method: "smartflow_execute",
+      payload: {
+        requestId: "host-recovery-execute",
+        projectRoot: harness.projectDir,
+        tasksPath: "tasks.md",
+        approvedSourceHash: sha256(tasksSource)
+      }
+    }) as { projectId: string; jobId: string };
+    const store = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
+    await waitForState(
+      store,
+      execute.jobId,
+      (state) => state.runs[execute.jobId]?.phase === "REVIEW_PENDING"
+    );
+    const requested = await runtime.handle({
+      id: "host-recovery-claim",
+      method: "smartflow_review_turn",
+      payload: {
+        requestId: "host-recovery-claim",
+        projectId: execute.projectId,
+        jobId: execute.jobId,
+        hostTurnId: "host-recovery-owner"
+      }
+    }) as ReviewTurnOutput;
+    expect(requested.kind).toBe("REVIEW_REQUIRED");
+
+    const claimedState = await store.readState();
+    const claimedRun = claimedState.runs[execute.jobId];
+    if (
+      claimedRun?.hostTurn?.stage !== "AWAITING_REVIEW" ||
+      claimedRun.pendingAction === undefined ||
+      typeof claimedRun.pendingAction.claimId !== "string"
+    ) throw new Error("durable review claim fixture missing");
+    const originalClaimId = claimedRun.pendingAction.claimId;
+    const expiredAt = new Date(Date.now() - 1).toISOString();
+    await store.writeState({
+      ...claimedState,
+      stateVersion: claimedState.stateVersion + 1,
+      runs: {
+        ...claimedState.runs,
+        [execute.jobId]: {
+          ...claimedRun,
+          pendingAction: {
+            ...claimedRun.pendingAction,
+            claimExpiresAt: expiredAt
+          },
+          hostTurn: {
+            ...claimedRun.hostTurn,
+            deadlineAt: expiredAt
+          },
+          updatedAt: expiredAt
+        }
+      },
+      updatedAt: expiredAt
+    });
+    runtime.dispose();
+
+    const legacyRecover = vi.fn(composition.recover);
+    const originalReportHostUnavailable = ReviewCoordinator.prototype.reportHostUnavailable.bind(
+      new ReviewCoordinator(store)
+    );
+    let reportCalls = 0;
+    const reportSpy = vi.spyOn(
+      ReviewCoordinator.prototype,
+      "reportHostUnavailable"
+    ).mockImplementation((state, input, now) => {
+      reportCalls += 1;
+      if (reportCalls === 1) throw new Error("transient startup pause failure");
+      return originalReportHostUnavailable(state, input, now);
+    });
+    runtime = new ProjectRuntime({
+      dataDirectory: harness.dataDir,
+      runPipeline: composition.runPipeline,
+      recover: legacyRecover,
+      cancel: composition.cancel,
+      publish: composition.publish
+    });
+
+    vi.useFakeTimers();
+    try {
+      await expect(runtime.recover()).resolves.toBeUndefined();
+      const afterRecovery = await store.readState();
+      expect(legacyRecover).not.toHaveBeenCalled();
+      expect(reportSpy).toHaveBeenCalledTimes(1);
+      expect(afterRecovery.runs[execute.jobId]).toMatchObject({
+        phase: "REVIEWING",
+        pendingAction: { claimId: originalClaimId },
+        hostTurn: { stage: "AWAITING_REVIEW" }
+      });
+
+      await vi.advanceTimersToNextTimerAsync();
+      await vi.waitFor(() => expect(reportSpy).toHaveBeenCalledTimes(2));
+      expect((await store.readState()).runs[execute.jobId]).toMatchObject({
+        phase: "PAUSED",
+        pause: { code: "HOST_REVIEW_UNAVAILABLE" }
+      });
+      expect(legacyRecover).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      reportSpy.mockRestore();
+      runtime.dispose();
+    }
+  }, 30_000);
+
+  it("drives repair and publish using only execute plus review_turn", async () => {
+    const harness = await createRuntimeHarness();
+    activeHarnesses.push(harness);
+    const tasksSource = createTasksSource({
+      tasks: `## M01 · Core
+
+- [ ] T001 Edit \`sum.js\` — 验收：Reviewer confirms the requested behavior`
+    });
+    await writeFile(resolve(harness.projectDir, "tasks.md"), tasksSource, "utf8");
+    const provider = new RepairLoopProvider((revision) => revision === 1 ? "1" : "stable");
+    const composition = new ProductionRuntimeComposition(
+      harness.dataDir,
+      undefined,
+      undefined,
+      provider
+    );
+    let runtime = new ProjectRuntime({
+      dataDirectory: harness.dataDir,
+      runPipeline: composition.runPipeline,
+      recover: composition.recover,
+      cancel: composition.cancel,
+      publish: composition.publish
+    });
+    const execute = await runtime.handle({
+      id: "review-turn-execute",
+      method: "smartflow_execute",
+      payload: {
+        requestId: "review-turn-execute",
+        projectRoot: harness.projectDir,
+        tasksPath: "tasks.md",
+        approvedSourceHash: sha256(tasksSource)
+      }
+    }) as { projectId: string; jobId: string };
+    const turnStore = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
+    let sequence = 0;
+    const nextTurn = async (
+      continuation: Record<string, unknown> = {}
+    ): Promise<ReviewTurnOutput> => {
+      let next = continuation;
+      for (;;) {
+        sequence += 1;
+        const turn = await runtime.handle({
+          id: `review-turn-${String(sequence)}`,
+          method: "smartflow_review_turn",
+          payload: {
+            requestId: `review-turn-${String(sequence)}`,
+            projectId: execute.projectId,
+            jobId: execute.jobId,
+            hostTurnId: "host-turn-e2e",
+            ...next
+          }
+        }) as ReviewTurnOutput;
+        if (turn.kind !== "NOT_READY") return turn;
+        await new Promise<void>((settle) => setTimeout(settle, 20));
+        next = {};
+      }
+    };
+
+    const first = await nextTurn();
+    expect(first).toMatchObject({
+      kind: "REVIEW_REQUIRED",
+      reviewerSession: { mode: "CREATE" }
+    });
+    if (first.kind !== "REVIEW_REQUIRED") throw new Error("first review was not requested");
+    runtime.dispose();
+    runtime = new ProjectRuntime({
+      dataDirectory: harness.dataDir,
+      runPipeline: composition.runPipeline,
+      recover: composition.recover,
+      cancel: composition.cancel,
+      publish: composition.publish
+    });
+    let recovered!: ReviewTurnOutput;
+    let stateVersionBeforeRenewal = 0;
+    vi.useFakeTimers();
+    try {
+      await runtime.recover();
+      recovered = await nextTurn();
+      stateVersionBeforeRenewal = (await turnStore.readState()).stateVersion;
+      await vi.advanceTimersByTimeAsync(60_000);
+    } finally {
+      vi.useRealTimers();
+    }
+    const renewed = await waitForState(
+      turnStore,
+      execute.jobId,
+      (state) => state.stateVersion > stateVersionBeforeRenewal
+    );
+    expect(renewed.runs[execute.jobId]?.pendingAction?.claimExpiresAt).toBeDefined();
+    expect(recovered).toMatchObject({
+      kind: "REVIEW_REQUIRED",
+      turnToken: first.turnToken,
+      reviewAttemptId: first.reviewAttemptId,
+      reviewerSession: { mode: "CREATE" }
+    });
+    if (recovered.kind !== "REVIEW_REQUIRED") {
+      throw new Error("review turn was not recovered after daemon restart");
+    }
+    const beforeTimeout = await turnStore.readState();
+    const timeoutRun = beforeTimeout.runs[execute.jobId];
+    if (timeoutRun?.hostTurn?.stage !== "AWAITING_REVIEW") {
+      throw new Error("recovered Host turn is not awaiting review");
+    }
+    const timeoutAt = new Date().toISOString();
+    await turnStore.writeState({
+      ...beforeTimeout,
+      stateVersion: beforeTimeout.stateVersion + 1,
+      runs: {
+        ...beforeTimeout.runs,
+        [execute.jobId]: {
+          ...timeoutRun,
+          hostTurn: {
+            ...timeoutRun.hostTurn,
+            deadlineAt: new Date(Date.now() - 1).toISOString()
+          },
+          updatedAt: timeoutAt
+        }
+      },
+      updatedAt: timeoutAt
+    });
+    const timedOut = await nextTurn();
+    expect(timedOut).toMatchObject({
+      kind: "USER_INPUT_REQUIRED",
+      pause: { code: "HOST_REVIEW_UNAVAILABLE" }
+    });
+    if (timedOut.kind !== "USER_INPUT_REQUIRED") {
+      throw new Error("expired review turn did not require user input");
+    }
+    expect(timedOut.options.map((option) => option.answer)).toContain("retry_host_review");
+    const retried = await nextTurn({
+      turnToken: timedOut.turnToken,
+      answer: "retry_host_review"
+    });
+    expect(retried).toMatchObject({
+      kind: "REVIEW_REQUIRED",
+      reviewerSession: { mode: "CREATE" }
+    });
+    if (retried.kind !== "REVIEW_REQUIRED") {
+      throw new Error("expired review turn was not reissued");
+    }
+    expect(retried.turnToken).not.toBe(first.turnToken);
+    const incomplete = normalizeFinding({
+      code: "REPAIR_REQUIRED",
+      criterionId: "T001",
+      path: "sum.js",
+      severity: "P1",
+      blocking: true,
+      summary: "The first revision needs a corrective implementation",
+      evidence: ["review_turn e2e incomplete finding"]
+    });
+    const beforeLimit = await turnStore.readState();
+    const limitedRun = beforeLimit.runs[execute.jobId];
+    if (limitedRun === undefined) throw new Error("run missing before repair-limit test");
+    const limitedAt = new Date().toISOString();
+    await turnStore.writeState({
+      ...beforeLimit,
+      stateVersion: beforeLimit.stateVersion + 1,
+      runs: {
+        ...beforeLimit.runs,
+        [execute.jobId]: {
+          ...limitedRun,
+          autoRepairRounds: 15,
+          updatedAt: limitedAt
+        }
+      },
+      updatedAt: limitedAt
+    });
+    const paused = await nextTurn({
+      turnToken: retried.turnToken,
+      review: {
+        reviewerSessionId: "reviewer-session-review-turn",
+        result: {
+          verdict: "REQUEST_CHANGES",
+          completionPercentage: 50,
+          convergeFindings: [incomplete],
+          adversarialFindings: [],
+          pathCoverage: { "sum.js": "FULL" },
+          residualRisks: []
+        }
+      }
+    });
+    expect(paused).toMatchObject({
+      kind: "USER_INPUT_REQUIRED",
+      pause: { code: "AUTOMATIC_REPAIR_LIMIT" },
+      review: { completionPercentage: 50 }
+    });
+    expect(JSON.stringify(paused)).not.toContain(first.worktreePath);
+    if (paused.kind !== "USER_INPUT_REQUIRED") {
+      throw new Error("repair limit did not require user input");
+    }
+    expect(paused.options.map((option) => option.answer)).toContain("resume_review_decision");
+    const second = await nextTurn({
+      turnToken: paused.turnToken,
+      answer: "resume_review_decision"
+    });
+    expect(second).toMatchObject({
+      kind: "REVIEW_REQUIRED",
+      reviewerSession: {
+        mode: "RESUME",
+        reviewerSessionId: "reviewer-session-review-turn"
+      }
+    });
+    if (second.kind !== "REVIEW_REQUIRED") throw new Error("second review was not requested");
+    const completed = await nextTurn({
+      turnToken: second.turnToken,
+      review: {
+        reviewerSessionId: "reviewer-session-review-turn",
+        result: {
+          verdict: "APPROVE",
+          completionPercentage: 100,
+          convergeFindings: [],
+          adversarialFindings: [],
+          pathCoverage: { "sum.js": "FULL" },
+          residualRisks: []
+        }
+      }
+    });
+    expect(completed).toMatchObject({
+      kind: "DONE",
+      result: { phase: "COMPLETED", status: "COMMITTED" }
+    });
+    expect(await readFile(resolve(harness.projectDir, "sum.js"), "utf8"))
+      .toContain('implementedRevision = "stable"');
+    const finalRun = (await turnStore.readState()).runs[execute.jobId];
+    expect(finalRun?.autoRepairRounds).toBe(1);
+    expect(finalRun?.hostTurn).toBeUndefined();
+    expect(provider.starts).toHaveLength(2);
+    runtime.dispose();
   }, 60_000);
 });

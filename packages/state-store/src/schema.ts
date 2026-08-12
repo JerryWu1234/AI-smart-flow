@@ -85,6 +85,32 @@ const canonicalRecordSchema = z.record(z.string(), canonicalValueSchema);
 
 export const workerAttemptSchema = piWorkerAttemptSchema;
 
+const hostTurnIdentitySchema = z.object({
+  turnToken: z.string().min(1).max(256),
+  hostTurnId: z.string().min(1).max(256),
+  revision: z.number().int().positive(),
+  startedAt: z.iso.datetime({ offset: true })
+});
+
+export const hostTurnSchema = z.discriminatedUnion("stage", [
+  hostTurnIdentitySchema.extend({
+    stage: z.literal("CLAIMING"),
+    actionId: z.string().min(1),
+    deadlineAt: z.iso.datetime({ offset: true })
+  }).strict(),
+  hostTurnIdentitySchema.extend({
+    stage: z.literal("AWAITING_REVIEW"),
+    actionId: z.string().min(1),
+    claimId: z.string().min(1),
+    reviewAttemptId: z.string().min(1),
+    deadlineAt: z.iso.datetime({ offset: true })
+  }).strict(),
+  hostTurnIdentitySchema.extend({
+    stage: z.literal("AWAITING_USER_INPUT"),
+    pauseCode: z.string().min(1)
+  }).strict()
+]);
+
 export const runRecordSchema = z
   .object({
     jobId: z.string().min(1),
@@ -101,10 +127,12 @@ export const runRecordSchema = z
     workerAttempts: z.array(workerAttemptSchema),
     candidate: artifactRefSchema.optional(),
     pendingAction: canonicalRecordSchema.optional(),
+    hostTurn: hostTurnSchema.optional(),
     review: artifactRefSchema.optional(),
     leaderDecision: artifactRefSchema.optional(),
     reviewHistory: z.array(canonicalRecordSchema).optional(),
     noProgressCount: z.number().int().nonnegative(),
+    autoRepairRounds: z.number().int().nonnegative().optional(),
     publish: publishAttemptSchema.optional(),
     deliveryBundle: artifactRefSchema.optional(),
     cancellation: canonicalRecordSchema.optional(),
@@ -258,6 +286,7 @@ export type GitRevisionWorkspace = z.infer<typeof gitRevisionWorkspaceSchema>;
 export type GitRunWorkspace = z.infer<typeof gitRunWorkspaceSchema>;
 export type PublishAttempt = z.infer<typeof publishAttemptSchema>;
 export type WorkerAttempt = z.infer<typeof workerAttemptSchema>;
+export type HostTurn = z.infer<typeof hostTurnSchema>;
 export type RunRecord = z.infer<typeof runRecordSchema>;
 export type ProjectState = z.infer<typeof projectStateSchema>;
 

@@ -88,9 +88,9 @@ const executeInput = {
 };
 
 describe("smartflow.v5 MCP handlers", () => {
-  it("registers all ten tools without Worker tool decisions and validates approvedSourceHash", async () => {
+  it("registers all eleven tools without Worker tool decisions and validates approvedSourceHash", async () => {
     const handlers = createToolHandlers(new FakeDaemonGateway());
-    expect(Object.keys(handlers)).toHaveLength(10);
+    expect(Object.keys(handlers)).toHaveLength(11);
     expect("smartflow_submit_tool_decision" in handlers).toBe(false);
     const first = await handlers.smartflow_execute(executeInput);
     const replay = await handlers.smartflow_execute(executeInput);

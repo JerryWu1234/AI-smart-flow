@@ -22,6 +22,7 @@ export function createRunRecord(overrides: Partial<RunRecord> = {}): RunRecord {
       size: 64
     },
     noProgressCount: 0,
+    autoRepairRounds: 0,
     workerAttempts: [],
     createdAt: "2026-07-20T10:00:00+08:00",
     updatedAt: "2026-07-20T10:00:00+08:00",

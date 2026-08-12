@@ -1,10 +1,10 @@
-# ADR: Host-Orchestrated Automatic Review Loop
+# ADR: Host-Orchestrated Automatic Review Loop (Historical)
 
 ## Status
 
-Accepted. The direct Run-worktree review update is pending implementation.
+Superseded on 2026-08-11 by [ADR: Daemon-Owned Mechanical Review Turn](adr-daemon-owned-review-turn.md). The text below is retained unchanged as historical rationale and MUST NOT be used as the current ownership contract.
 
-## Decision
+## Historical Decision
 
 `smartflow_execute` starts a Run. The Codex Leader then owns the complete
 orchestration loop:

@@ -110,6 +110,7 @@ export async function startSmartFlowDaemon(
     config,
     dataDirectory,
     async close(): Promise<void> {
+      projectRuntime.dispose();
       await server.close();
       logger.log({ level: "info", event: "daemon.stopped" });
     }

@@ -1,74 +1,102 @@
-# SmartFlow 4.0 Acceptance Walkthrough
+# SmartFlow 4.1 Acceptance Walkthrough
 
-This walkthrough validates the Pi migration, removal of Broker/OpenCode and retention of isolated Git Workspace, Review and Publish behavior.
+This walkthrough validates the Pi migration, removal of Broker/OpenCode, daemon-owned mechanical orchestration, the composite Review turn, and retained isolated Git Workspace/Publish behavior.
 
 ## 1. Freeze task and Pi configuration
 
-1. Start the MCP server with exactly one configured model: `SMARTFLOW_PI_API`, `SMARTFLOW_PI_BASE_URL`, `SMARTFLOW_PI_MODEL` and `SMARTFLOW_PI_API_KEY`.
-2. Omit optional model values and confirm the frozen configuration uses context `1000000`, max output `384000`, thinking `high` and Attempt deadline `1800000ms`; repeat with legal overrides.
-3. Start a Run from `tasks-a.md`; record canonical path, Task Artifact, `tasksSha256` and `providerRuntimeConfigHash` while confirming the API Key is absent from all recorded values.
-4. Confirm the canonical task file is mirrored to the Run worktree before Worker execution and the Reviewer reads that same worktree copy.
-5. Change effective Pi runtime config; confirm the active Revision pauses/fails instead of changing model or API.
-6. Start through a path alias; expect `TASK_ALREADY_ACTIVE` and no new Pi Attempt/workspace.
-7. Repeat configuration parsing with each supported API: `openai-completions`, `openai-responses`, `anthropic-messages`, `google-generative-ai`.
+1. Start the MCP server with exactly one configured model: `SMARTFLOW_PI_API`, `SMARTFLOW_PI_BASE_URL`, `SMARTFLOW_PI_MODEL`, and `SMARTFLOW_PI_API_KEY`.
+2. Omit optional values and confirm context `1000000`, max output `384000`, thinking `high`, and Attempt deadline `1800000ms`; repeat with legal overrides.
+3. Start a Run from `tasks-a.md`; record canonical path, Task Artifact, `tasksSha256`, and `providerRuntimeConfigHash` while confirming the API Key is absent.
+4. Confirm the canonical task file is mirrored to the Run workspace before Worker execution and the Reviewer reads that copy.
+5. Change effective Pi runtime config; confirm the active Revision pauses/fails instead of changing model/API.
+6. Start through a path alias; expect `TASK_ALREADY_ACTIVE` and no new Attempt/workspace.
+7. Repeat parsing with each API: `openai-completions`, `openai-responses`, `anthropic-messages`, `google-generative-ai`.
 
 ## 2. Start sandboxed Pi
 
-1. Confirm `ExecutionSandboxAdapter` launches the Pi SDK child and records Attempt, Pi session and containment identity.
-2. Confirm the child loads only the bundled SmartFlow model Extension and registers exactly one MCP-configured model through Pi's official runtime API.
+1. Confirm `ExecutionSandboxAdapter` launches the Pi SDK child and records Attempt, Pi session, and containment identity.
+2. Confirm the child loads only the bundled SmartFlow model Extension and registers one MCP-configured model through Pi's official runtime API.
 3. Confirm JSONL RPC ready/prompt/events/terminal flow over stdin/stdout.
-4. Confirm the child uses the frozen Task and never asks the user directly.
-5. Confirm Pi receives no SmartFlow MCP server or Host/global Skill directory.
-6. Place `models.json` canaries in the host Pi directory and workspace, then confirm neither is read and no new `models.json` is created anywhere in the Run.
+4. Confirm the child uses the frozen Task, receives no SmartFlow MCP/Host-global Skill, and never asks the user directly.
+5. Place `models.json` canaries in the host Pi directory and workspace; confirm neither is read and none is created.
 
 ## 3. Exercise Pi official tools
 
-1. Ask Pi to read, search, add, modify and delete project files, including `tasks.md` or `.specify` content inside the isolated workspace.
-2. Run Shell commands that create child processes, execute project test/lint/build and access a network fixture.
-3. Confirm these operations succeed without Broker receipts, effects or tool-decision Actions.
-4. Confirm Result Snapshot and Candidate contain project changes, not `.smartflow-runtime/` files.
+1. Ask Pi to read, search, add, modify, and delete project files, including `tasks.md` or `.specify` content inside the isolated workspace.
+2. Run Shell commands that create child processes, execute project test/lint/build, and access a network fixture.
+3. Confirm operations succeed without Broker receipts, effects, or tool-decision Actions.
+4. Confirm Result Snapshot/Candidate contain project changes, not `.smartflow-runtime/` files.
 
 ## 4. Prove filesystem isolation
 
-1. Attempt direct, absolute-path, symlink and subprocess access to the original project root; expect denial.
-2. Repeat for SmartFlow state, another Run workspace and a host-user sensitive directory; expect denial.
+1. Attempt direct, absolute-path, symlink, and subprocess access to the original project root; expect denial.
+2. Repeat for SmartFlow state, another Run workspace, and host-user sensitive data; expect denial.
 3. Confirm required Node/system/Pi SDK bootstrap files are read-only and do not expose user data.
 4. Confirm Publish has not run and original project Worktree/index/refs are unchanged.
-5. Put known absolute path canaries in SDK error, stack, Shell output and status data; confirm MCP/API/UI payloads, logs and finalized Artifacts expose only logical IDs or project-relative paths.
-6. Use the configured API Key as a canary; confirm it is absent from argv, runtime hash, TaskManifest, Run state, Pi session files, Artifacts, diagnostics and errors.
+5. Put absolute-path canaries in SDK errors, stacks, Shell output, and status; confirm external payloads/logs/Artifacts expose only logical IDs or relative paths.
+6. Use the API Key as a canary; confirm it is absent from argv, runtime hash, TaskManifest, state, session, Artifacts, diagnostics, and errors.
 
-## 5. Validate session and recovery rules
+## 5. Validate Pi session and Run recovery
 
-1. Disconnect/reconnect Host while Pi child lives; confirm job, Attempt and Pi session are unchanged.
+1. Disconnect/reconnect Host while Pi child lives; confirm job, Attempt, and Pi session are unchanged.
 2. Crash Pi child; confirm old Attempt is reconciled and one new Attempt/session starts on the same Revision/workspace.
-3. Restart Daemon; confirm recovery uses `state.json`, not an assumed live Pi session.
-4. Approve a repair Revision; confirm a new Pi session starts from previous Result Tree.
-5. Submit an independent feature; confirm Leader creates a new Task/Run/session.
-6. Cancel a Run; confirm the full Pi process tree exits before CANCELED becomes durable.
-7. Force an Attempt deadline; confirm the full Pi process tree exits, exactly one `TIMED_OUT` Attempt is durable, Run is `PAUSED`, and no replacement Attempt/Candidate appears before Leader recovery.
+3. Restart Daemon outside an active Review turn; confirm recovery uses `state.json`, not an assumed live Pi session.
+4. Complete a repair Revision; confirm a new Pi session starts from previous Result Tree.
+5. Submit an independent feature; confirm Host classifies it as a new Task/Run/session.
+6. Cancel a Run; confirm the full Pi process tree exits before CANCELED is durable.
+7. Force Attempt deadline; confirm zero surviving processes, exactly one `TIMED_OUT`, Run `PAUSED`, and no replacement before allowed recovery.
 
-## 6. Validate multi-Revision Candidate and Review
+## 6. Validate the two-tool Host workflow
 
-1. Record Run Baseline `A`.
-2. Complete Revision 1 as `A → B` and Review it with Reviewer `S1`.
-3. Complete repair Revision 2 as `B → C` using a new Pi session.
-4. Confirm formal Candidate is `A → C`, repair evidence is `B → C`, and Revision 1 evidence is immutable.
-5. Confirm Host resumes Reviewer `S1`; Pi session identity is not reused as Reviewer identity.
+1. Call `smartflow_execute` once with approved Task hash and record `projectId/jobId`.
+2. Thereafter call only `smartflow_review_turn` at the Host workflow level. Use one stable `hostTurnId` and a new idempotency `requestId` per call.
+3. On `NOT_READY`, confirm no `worktreePath` exists, wait `retryAfterMs`, and poll again.
+4. On first `REVIEW_REQUIRED`, confirm `reviewerSession.mode === "CREATE"`; create an independent Reviewer, read the synchronized Task/current files, and submit Review with the same `turnToken`.
+5. On later repair Review, confirm `mode === "RESUME"` with the original Reviewer session and a new Pi session.
+6. Do not call claim/renew/submit-review/leader-decision/resume primitives from the high-level workflow; inspect logs/spies to prove Daemon performed those mechanics.
+7. Confirm exactly 11 tools remain registered and all ten primitive tools are still callable by contract tests.
 
-## 7. Publish safely
+## 7. Validate Host-turn checkpoint, restart, and path safety
 
-1. With accepted Review, acquire Project Publish lease and publish a non-conflicting Candidate.
-2. Confirm all `N/N` paths are COMMITTED before COMPLETED.
-3. For two Runs touching the same path, publish the first and expect the second to return `PRECHECK_CONFLICT`, conflict paths, `0/N` and DeliveryBundle.
-4. Disable required batch capability; confirm only DeliveryBundle is produced.
-5. Simulate PARTIAL/UNKNOWN; confirm `PUBLISH_RECOVERY_BLOCKED`, never false COMPLETED.
+1. Pause immediately after durable `CLAIMING`; restart Daemon and confirm it reconciles one existing Action without duplicate claim.
+2. Restart during `AWAITING_REVIEW`; confirm the same `turnToken`, Action, reviewAttempt, Reviewer mode, and 30-minute deadline return.
+3. Advance 60 seconds and confirm claim lease renewal; verify renewal is scheduled no later than 30 seconds before expiry.
+4. Force three renewal failures with 1-second retry and confirm a durable Host-review-unavailable pause.
+5. Force the 30-minute deadline and confirm pause without stale path disclosure.
+6. Submit old Review/failure/answer continuations and confirm each causes no side effect and returns no-path `NOT_READY`.
+7. Attempt continuation with another `hostTurnId`; expect ownership rejection.
+8. Trigger concurrent composite calls and CAS mismatches; confirm per-Run serialization, at most four total attempts (initial plus up to three fresh-state retries), and no duplicate Review/repair/Publish.
+9. During restart confirm `ProjectRuntime` recovers Host turn first, rereads state, and does not schedule legacy recovery while `hostTurn` remains.
 
-## 8. Verify legacy removal
+## 8. Validate automatic Review decisions
 
-1. Confirm workspace packages and published dependencies contain no OpenCode binary/SDK, Claude Provider placeholder or execution-broker package.
-2. Confirm runtime/protocol/state have no Broker session, effects, managed-process ledger, workerBlock or `smartflow_submit_tool_decision`.
-3. Confirm deleted implementation tests are removed and replacement Pi containment/session tests pass.
-4. Reconcile a terminal Run; confirm temporary Workspace/runtime/index/object store are deleted while Task/Candidate/Review/Publish/session audit Artifacts remain verifiable.
-5. Confirm runtime code and CLI help contain none of `SMARTFLOW_WORKER`, `SMARTFLOW_MODEL_*`, `SMARTFLOW_PI_PROVIDER` or `SMARTFLOW_PI_CREDENTIAL_ENV`.
+1. Submit `APPROVE + 100% + no blocking finding`; confirm Daemon automatically accepts and progresses to Publish without a Host primitive decision.
+2. Submit incomplete Review with blocking findings; confirm only their fingerprints become RepairItems, `autoRepairRounds` increments, and an approved-scope Revision starts automatically.
+3. Submit incomplete Review with no actionable blocking finding; expect `USER_INPUT_REQUIRED/INVALID_REVIEW` and only `cancel`.
+4. Reach 15 automatic repair rounds; expect `USER_INPUT_REQUIRED/AUTOMATIC_REPAIR_LIMIT`, retained Candidate/Review, and no additional repair.
+5. Answer `resume_review_decision`; confirm counter resets and the next group can run up to 15 rounds.
+6. Confirm any pause/conflict is `USER_INPUT_REQUIRED`, while only `COMPLETED/CANCELED/FAILED` yields `DONE`.
 
-The installed real-model acceptance is intentionally opt-in because it sends the fixture task and project files to the configured model endpoint. Run it only after explicit approval with `SMARTFLOW_RUN_REAL_PI_E2E=1`, the four required `SMARTFLOW_PI_*` variables, and any optional capability overrides.
+## 9. Validate cumulative Candidate and safe Publish
+
+1. Record Baseline `A`; produce Revision 1 `A → B`, then repair Revision 2 `B → C`.
+2. Confirm formal Candidate is `A → C`, repair evidence is `B → C`, and old evidence is immutable.
+3. Confirm the same Reviewer examines the latest full result and cumulative changed paths.
+4. On automatic accept, acquire Project Publish lease and publish a non-conflicting Candidate; expect `N/N` before COMPLETED.
+5. For overlapping Runs, publish first then expect second `PRECHECK_CONFLICT`, full paths, `0/N`, and DeliveryBundle.
+6. Disable batch capability; confirm bundle only. Simulate PARTIAL/UNKNOWN; confirm `PUBLISH_RECOVERY_BLOCKED`, never false `DONE`.
+
+## 10. Verify legacy removal and evidence boundary
+
+1. Confirm packages/dependencies contain no OpenCode, Claude Provider placeholder, or execution-broker runtime.
+2. Confirm protocol/state contain no Broker session, effects, managed-process ledger, Worker block, or `smartflow_submit_tool_decision`.
+3. Confirm runtime/help contains none of `SMARTFLOW_WORKER`, `SMARTFLOW_MODEL_*`, `SMARTFLOW_PI_PROVIDER`, or `SMARTFLOW_PI_CREDENTIAL_ENV`.
+4. Reconcile a terminal Run; confirm temporary Workspace/runtime/index/object store are deleted while audit Artifacts remain.
+5. Run the local protocol, contract, integration, security, E2E, build, typecheck, lint, and diff checks listed by the repository.
+6. Treat the covered production-composition two-tool success as scenario evidence only.
+7. Confirm T204 coverage rejects cross-Host composite and primitive mutations, reconciles a lost successful claim from its durable lease, and recovers Host turns before legacy scheduling.
+8. Confirm T205 coverage forwards cumulative `changedPaths`, separates inspection actions from mutable answers, distinguishes revision `COLLECT` forms from complete `CONFIRM` answers, and returns embedded paused results without primitive `smartflow_result`.
+9. Keep T190/T208 open until pinned Pi 0.83.0's real exports, Extension registration, and RPC model resolution are exercised by a checked-in reproducible test.
+10. Keep T192/T209 open until an explicitly authorized real-model `execute → review_turn` run produces checked-in, auditable evidence. A gitignored `.smartflow-e2e` transcript is insufficient.
+
+The real-model acceptance sends fixture Task/project content to the configured endpoint. Run it only after explicit user authorization with `SMARTFLOW_RUN_REAL_PI_E2E=1`, all required `SMARTFLOW_PI_*` variables, and any capability overrides; never commit credentials or raw sensitive content.

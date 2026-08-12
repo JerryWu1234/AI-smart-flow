@@ -17,6 +17,7 @@ import {
   reportHostUnavailableInputSchema,
   renewActionClaimInputSchema,
   resumeInputSchema,
+  reviewTurnInputSchema,
   statusInputSchema,
   submitLeaderDecisionInputSchema,
   submitReviewInputSchema,
@@ -47,6 +48,7 @@ import { cleanupGitRunTemporaryState } from "@smartflow/workspace";
 
 import type { IpcRequest, IpcRequestHandler } from "./local-ipc-server.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
+import { HostTurnCoordinator } from "./host-turn-coordinator.js";
 import { ReviewCoordinator } from "./review-coordinator.js";
 import { verifyRunArtifacts } from "./recovery-manager.js";
 
@@ -291,7 +293,9 @@ function closedResumeRoute(
         ? { phase: "CANCELING", schedule: "cancel" }
         : undefined;
     case "resume_review_decision":
-      return code === "LEADER_PAUSED" && run.review !== undefined
+      return (
+        code === "AUTOMATIC_REPAIR_LIMIT" || code === "LEADER_PAUSED"
+      ) && run.review !== undefined
         ? { phase: "LEADER_DECISION", schedule: "none" }
         : undefined;
     case "retry_provider_probe":
@@ -400,10 +404,28 @@ export class ProjectRuntime {
   private readonly background = new Map<string, Promise<void>>();
   private readonly runtimeEpochId = randomUUID();
   private readonly providerRuntimeConfig: Readonly<Record<string, unknown>>;
+  private readonly hostTurns: HostTurnCoordinator;
 
   public constructor(private readonly options: ProjectRuntimeOptions) {
     this.projectsDirectory = resolve(options.dataDirectory, "projects");
     this.providerRuntimeConfig = options.providerRuntimeConfig ?? Object.freeze({});
+    this.hostTurns = new HostTurnCoordinator({
+      store: (projectId): StateStore => this.store(projectId),
+      status: (input): Promise<unknown> => this.status(input),
+      wait: (input): Promise<unknown> => this.wait(input),
+      claim: (input, internalOptions): Promise<unknown> =>
+        this.claimAction(input, internalOptions),
+      renew: (input, internalOptions): Promise<unknown> =>
+        this.renewActionClaim(input, internalOptions),
+      submitReview: (input, internalOptions): Promise<unknown> =>
+        this.submitReview(input, internalOptions),
+      reportHostUnavailable: (input, internalOptions): Promise<unknown> =>
+        this.reportHostUnavailable(input, internalOptions),
+      submitLeaderDecision: (input, internalOptions): Promise<unknown> =>
+        this.submitLeaderDecision(input, internalOptions),
+      resume: (input, internalOptions): Promise<unknown> => this.resume(input, internalOptions),
+      result: (input): Promise<unknown> => this.result(input)
+    });
   }
 
   public readonly handle: IpcRequestHandler = async (request: IpcRequest): Promise<unknown> => {
@@ -426,6 +448,8 @@ export class ProjectRuntime {
         return this.status(statusInputSchema.parse(request.payload));
       case "smartflow_wait":
         return this.wait(waitInputSchema.parse(request.payload));
+      case "smartflow_review_turn":
+        return this.hostTurns.turn(reviewTurnInputSchema.parse(request.payload));
       case "smartflow_claim_action":
         return this.claimAction(claimActionInputSchema.parse(request.payload));
       case "smartflow_renew_action_claim":
@@ -494,18 +518,31 @@ export class ProjectRuntime {
         );
         const currentRun = epoch.state.runs[run.jobId];
         if (currentRun === undefined) continue;
-        const context = this.pipelineContext(store, state.projectId, run.jobId, epoch.state);
+        await this.hostTurns.recoverRun(state.projectId, run.jobId);
+        const recoveredState = await store.readState();
+        const recoveredRun = recoveredState.runs[run.jobId];
+        if (recoveredRun === undefined || recoveredRun.hostTurn !== undefined) continue;
+        const context = this.pipelineContext(
+          store,
+          recoveredState.projectId,
+          run.jobId,
+          recoveredState
+        );
         if (this.options.recover !== undefined) {
           this.schedule(context, "recover");
-        } else if (currentRun.phase === "PREPARING") {
+        } else if (recoveredRun.phase === "PREPARING") {
           this.schedule(context, "pipeline");
-        } else if (currentRun.phase === "READY_TO_PUBLISH") {
+        } else if (recoveredRun.phase === "READY_TO_PUBLISH") {
           this.schedule(context, "publish");
-        } else if (currentRun.phase === "CANCELING") {
+        } else if (recoveredRun.phase === "CANCELING") {
           this.schedule(context, "cancel");
         }
       }
     }
+  }
+
+  public dispose(): void {
+    this.hostTurns.dispose();
   }
 
   public async execute(
@@ -598,6 +635,7 @@ export class ProjectRuntime {
           },
           workerAttempts: [],
           noProgressCount: 0,
+          autoRepairRounds: 0,
           createdAt: timestamp,
           updatedAt: timestamp
         };
@@ -672,11 +710,27 @@ export class ProjectRuntime {
     };
   }
 
-  private async claimAction(input: ReturnType<typeof claimActionInputSchema.parse>): Promise<unknown> {
+  private async claimAction(
+    input: ReturnType<typeof claimActionInputSchema.parse>,
+    internalOptions: { expectedHostTurnToken?: string } = {}
+  ): Promise<unknown> {
     const store = this.store(input.projectId);
-    const mutation = await this.mutate<unknown>(store, input.requestId, input, input.expectedStateVersion, input.expectedRevision,
+    const mutationPayload = Object.keys(internalOptions).length === 0
+      ? input
+      : { ...input, internalOptions };
+    const mutation = await this.mutate<unknown>(
+      store,
+      input.requestId,
+      mutationPayload,
+      input.expectedStateVersion,
+      input.expectedRevision,
       async (state) => {
-        await this.assertRunArtifacts(store, state, input.jobId);
+        const run = await this.assertRunArtifacts(store, state, input.jobId);
+        this.assertHostTurnAuthority(
+          run,
+          internalOptions.expectedHostTurnToken,
+          input.hostTurnId
+        );
         const coordinator = new ReviewCoordinator(store);
         const observation = await observeApprovedSource(state, input.jobId);
         if (!observation.matches) {
@@ -692,17 +746,26 @@ export class ProjectRuntime {
   }
 
   private async renewActionClaim(
-    input: ReturnType<typeof renewActionClaimInputSchema.parse>
+    input: ReturnType<typeof renewActionClaimInputSchema.parse>,
+    internalOptions: { expectedHostTurnToken?: string } = {}
   ): Promise<unknown> {
     const store = this.store(input.projectId);
+    const mutationPayload = Object.keys(internalOptions).length === 0
+      ? input
+      : { ...input, internalOptions };
     const mutation = await this.mutate<unknown>(
       store,
       input.requestId,
-      input,
+      mutationPayload,
       input.expectedStateVersion,
       input.expectedRevision,
       async (state) => {
-        await this.assertRunArtifacts(store, state, input.jobId);
+        const run = await this.assertRunArtifacts(store, state, input.jobId);
+        this.assertHostTurnAuthority(
+          run,
+          internalOptions.expectedHostTurnToken,
+          input.hostTurnId
+        );
         const coordinator = new ReviewCoordinator(store);
         const observation = await observeApprovedSource(state, input.jobId);
         if (!observation.matches) {
@@ -721,16 +784,23 @@ export class ProjectRuntime {
     return mutation.response;
   }
 
-  private async submitReview(input: ReviewResultSubmitInput): Promise<unknown> {
+  private async submitReview(
+    input: ReviewResultSubmitInput,
+    internalOptions: { expectedHostTurnToken?: string } = {}
+  ): Promise<unknown> {
     const store = this.store(input.projectId);
+    const mutationPayload = Object.keys(internalOptions).length === 0
+      ? input
+      : { ...input, internalOptions };
     const mutation = await this.mutate<unknown>(
       store,
       input.requestId,
-      input,
+      mutationPayload,
       input.expectedStateVersion,
       input.expectedRevision,
       async (state) => {
-        await this.assertRunArtifacts(store, state, input.jobId);
+        const run = await this.assertRunArtifacts(store, state, input.jobId);
+        this.assertHostTurnAuthority(run, internalOptions.expectedHostTurnToken);
         const coordinator = new ReviewCoordinator(store);
         const observation = await observeApprovedSource(state, input.jobId);
         if (!observation.matches) {
@@ -747,32 +817,86 @@ export class ProjectRuntime {
   }
 
   private async reportHostUnavailable(
-    input: ReturnType<typeof reportHostUnavailableInputSchema.parse>
+    input: ReturnType<typeof reportHostUnavailableInputSchema.parse>,
+    internalOptions: { expectedHostTurnToken?: string } = {}
   ): Promise<unknown> {
     const store = this.store(input.projectId);
+    const mutationPayload = Object.keys(internalOptions).length === 0
+      ? input
+      : { ...input, internalOptions };
     return (await this.mutate(
       store,
       input.requestId,
-      input,
+      mutationPayload,
       input.expectedStateVersion,
       input.expectedRevision,
-      (state) => new ReviewCoordinator(store).reportHostUnavailable(state, input)
+      (state) => {
+        const run = state.runs[input.jobId];
+        if (run === undefined) {
+          throw new ProjectRuntimeError("RUN_NOT_FOUND", `Unknown run: ${input.jobId}`);
+        }
+        this.assertHostTurnAuthority(run, internalOptions.expectedHostTurnToken);
+        return new ReviewCoordinator(store).reportHostUnavailable(state, input);
+      }
     )).response;
   }
 
-  private async submitLeaderDecision(input: ReturnType<typeof submitLeaderDecisionInputSchema.parse>): Promise<unknown> {
+  private async submitLeaderDecision(
+    input: ReturnType<typeof submitLeaderDecisionInputSchema.parse>,
+    internalOptions: {
+      automaticRepair?: boolean;
+      clearHostTurn?: boolean;
+      pauseCause?: "AUTOMATIC_REPAIR_LIMIT" | "INVALID_REVIEW";
+      expectedHostTurnToken?: string;
+    } = {}
+  ): Promise<unknown> {
     const store = this.store(input.projectId);
-    const mutation = await this.mutate<unknown>(store, input.requestId, input, input.expectedStateVersion, input.expectedRevision,
+    const mutationPayload = Object.keys(internalOptions).length === 0
+      ? input
+      : { ...input, internalOptions };
+    const mutation = await this.mutate<unknown>(
+      store,
+      input.requestId,
+      mutationPayload,
+      input.expectedStateVersion,
+      input.expectedRevision,
       async (state) => {
-        await this.assertRunArtifacts(store, state, input.jobId);
+        const run = await this.assertRunArtifacts(store, state, input.jobId);
+        this.assertHostTurnAuthority(run, internalOptions.expectedHostTurnToken);
         const coordinator = new ReviewCoordinator(store);
         const observation = await observeApprovedSource(state, input.jobId);
         if (!observation.matches) {
           return coordinator.pauseForApprovedSourceDrift(state, input.jobId, observation);
         }
         const review = await coordinator.submitLeaderDecision(state, input);
-        return { nextState: review.nextState, response: review.response };
-      });
+        const decidedRun = review.nextState.runs[input.jobId];
+        if (decidedRun === undefined) throw new ProjectRuntimeError("RUN_NOT_FOUND", input.jobId);
+        const adjustedRun: RunRecord = {
+          ...decidedRun,
+          ...(internalOptions.automaticRepair === true && input.decision === "repair"
+            ? { autoRepairRounds: (decidedRun.autoRepairRounds ?? 0) + 1 }
+            : {}),
+          ...(internalOptions.pauseCause === "AUTOMATIC_REPAIR_LIMIT"
+            ? {
+                pause: {
+                  code: "AUTOMATIC_REPAIR_LIMIT",
+                  resumeActions: ["resume_review_decision", "cancel"]
+                }
+              }
+            : internalOptions.pauseCause === "INVALID_REVIEW"
+              ? { pause: { code: "INVALID_REVIEW", resumeActions: ["cancel"] } }
+              : {}),
+          ...(internalOptions.clearHostTurn === true ? { hostTurn: undefined } : {})
+        };
+        return {
+          nextState: {
+            ...review.nextState,
+            runs: { ...review.nextState.runs, [input.jobId]: adjustedRun }
+          },
+          response: review.response
+        };
+      }
+    );
     if (isApprovedSourceDriftResponse(mutation.response)) {
       throw new ProjectRuntimeError("APPROVED_SOURCE_DRIFT", "Approved tasks source changed before Leader decision");
     }
@@ -785,18 +909,39 @@ export class ProjectRuntime {
     return mutation.response;
   }
 
-  private async resume(input: ReturnType<typeof resumeInputSchema.parse>): Promise<unknown> {
+  private async resume(
+    input: ReturnType<typeof resumeInputSchema.parse>,
+    internalOptions: {
+      clearHostTurn?: boolean;
+      resetAutoRepairRounds?: boolean;
+      expectedHostTurnToken?: string;
+    } = {}
+  ): Promise<unknown> {
     if (readOnlyResumeActions.has(input.resumeAction)) {
       throw new ProjectRuntimeError(
         "RESUME_ACTION_READ_ONLY",
         `${input.resumeAction} is exposed through status/result and cannot mutate Run state`
       );
     }
+    const resetAutoRepairRounds = internalOptions.resetAutoRepairRounds === true ||
+      input.resumeAction === "resume_review_decision";
     const store = this.store(input.projectId);
-    const mutation = await this.mutate(store, input.requestId, input, input.expectedStateVersion, input.expectedRevision,
+    const mutationPayload = Object.keys(internalOptions).length === 0
+      ? input
+      : { ...input, internalOptions };
+    const mutation = await this.mutate(
+      store,
+      input.requestId,
+      mutationPayload,
+      input.expectedStateVersion,
+      input.expectedRevision,
       async (state, nextStateVersion) => {
         const run = state.runs[input.jobId];
-        if (run === undefined || run.phase !== "PAUSED") {
+        if (run === undefined) {
+          throw new ProjectRuntimeError("RUN_NOT_FOUND", `Unknown run: ${input.jobId}`);
+        }
+        this.assertHostTurnAuthority(run, internalOptions.expectedHostTurnToken);
+        if (run.phase !== "PAUSED") {
           throw new ProjectRuntimeError("RESUME_NOT_ALLOWED", "Run is not paused");
         }
         if (!run.pause?.resumeActions.includes(input.resumeAction)) {
@@ -935,6 +1080,9 @@ export class ProjectRuntime {
             },
             workerAttempts: run.workerAttempts,
             noProgressCount: run.noProgressCount,
+            autoRepairRounds: resetAutoRepairRounds
+              ? 0
+              : (run.autoRepairRounds ?? 0),
             reviewHistory: run.reviewHistory,
             ...(run.recovery?.repairRound === undefined
               ? {}
@@ -1006,6 +1154,10 @@ export class ProjectRuntime {
                       }
                     }
                   : {}),
+                ...(internalOptions.clearHostTurn === true ? { hostTurn: undefined } : {}),
+                ...(resetAutoRepairRounds
+                  ? { autoRepairRounds: 0 }
+                  : {}),
                 updatedAt: now()
               }
             }
@@ -1038,6 +1190,7 @@ export class ProjectRuntime {
       (state, nextStateVersion) => {
         const run = state.runs[input.jobId];
         if (run === undefined) throw new ProjectRuntimeError("RUN_NOT_FOUND", input.jobId);
+        this.assertHostTurnAuthority(run, undefined);
         const nextRun: RunRecord = {
           ...run,
           phase: "CANCELING",
@@ -1095,6 +1248,30 @@ export class ProjectRuntime {
       throw new ProjectRuntimeError("PROJECT_ID_INVALID", "Invalid projectId");
     }
     return new StateStore(resolve(this.projectsDirectory, projectId));
+  }
+
+  private assertHostTurnAuthority(
+    run: RunRecord,
+    expectedHostTurnToken: string | undefined,
+    expectedHostTurnId?: string
+  ): void {
+    const hostTurn = run.hostTurn;
+    if (hostTurn === undefined) return;
+    if (expectedHostTurnToken === undefined) {
+      throw new ProjectRuntimeError(
+        "HOST_TURN_ACTIVE",
+        "Run is owned by an active composite Host turn"
+      );
+    }
+    if (
+      hostTurn.turnToken !== expectedHostTurnToken ||
+      (expectedHostTurnId !== undefined && hostTurn.hostTurnId !== expectedHostTurnId)
+    ) {
+      throw new ProjectRuntimeError(
+        "HOST_TURN_AUTHORITY_MISMATCH",
+        "Composite Host turn authority no longer matches durable state"
+      );
+    }
   }
 
   private async assertRunArtifacts(

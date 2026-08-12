@@ -45,6 +45,30 @@ describe("SmartFlow Pi model Extension", () => {
     expect(JSON.stringify(registerProvider.mock.calls)).not.toContain("secret-value");
   });
 
+  it("rejects numeric settings outside the safe-integer range", () => {
+    const environment = {
+      SMARTFLOW_PI_API: "openai-completions",
+      SMARTFLOW_PI_BASE_URL: "https://models.example.test/v1",
+      SMARTFLOW_PI_MODEL: "model-test",
+      SMARTFLOW_PI_CONTEXT_WINDOW: "1000000",
+      SMARTFLOW_PI_MAX_TOKENS: "384000",
+      SMARTFLOW_PI_THINKING: "high",
+      SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "1800000",
+      SMARTFLOW_PI_API_KEY: "secret-value"
+    };
+    for (const unsafe of [String(Number.MAX_SAFE_INTEGER + 1), "9".repeat(400)]) {
+      expect(() => createMcpModelRegistration({
+        ...environment,
+        SMARTFLOW_PI_CONTEXT_WINDOW: unsafe,
+        SMARTFLOW_PI_MAX_TOKENS: unsafe
+      })).toThrow(/positive safe integer/u);
+      expect(() => createMcpModelRegistration({
+        ...environment,
+        SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: unsafe
+      })).toThrow(/positive safe integer/u);
+    }
+  });
+
   it("rejects incomplete child configuration without exposing the API Key", () => {
     expect(() => createMcpModelRegistration({
       SMARTFLOW_PI_API: "openai-completions",
