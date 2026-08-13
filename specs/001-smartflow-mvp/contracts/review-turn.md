@@ -6,9 +6,9 @@
 
 ## Purpose and ownership
 
-`smartflow_review_turn` is the only public Review continuation entry point after an approved Run starts. The Daemon internally owns deterministic waiting, Review Action claim/renewal, Review submission, accept/repair/pause planning, approved-scope repair continuation, and Publish progression. The Host remains the only component allowed to create/resume a Reviewer session or communicate with the user. The Daemon never creates or replaces a Reviewer.
+`smartflow_review_turn` is the only public Review continuation entry point after an approved Run starts. The Daemon internally owns bounded polling, atomic Review begin/finalize, accept/repair/pause planning, approved-scope repair continuation, and Publish progression. The Host remains the only component allowed to create/resume a Reviewer session or communicate with the user. The Daemon never creates or replaces a Reviewer.
 
-The public MCP surface contains exactly six tools: `smartflow_execute`, `smartflow_review_turn`, `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`. The latter four are separate Run-management APIs, not Review continuations or a second Review orchestration path. Public `smartflow_resume` is an independent paused-Run recovery API; while an active `hostTurn` exists, it cannot submit a ReviewTurn answer or bypass ownership. The `HostActionLoop` symbol and public symbols, schemas, handlers, registrations, and aliases for `smartflow_wait`, `smartflow_claim_action`, `smartflow_renew_action_claim`, `smartflow_submit_review`, and `smartflow_submit_leader_decision` do not exist. Their Review orchestration operations are Daemon-internal mechanics only.
+The public MCP surface contains exactly six tools: `smartflow_execute`, `smartflow_review_turn`, `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`. The latter four are separate Run-management APIs, not Review continuations or a second Review orchestration path. Public `smartflow_resume` is an independent paused-Run recovery API; while an active `hostTurn` exists, it cannot submit a ReviewTurn answer or bypass ownership. The `HostActionLoop` and the old wait/claim/renew/submission/Leader primitive symbols, schemas, handlers, registrations, and aliases do not exist. The Daemon uses one atomic domain operation to begin Review and one to persist Review plus automatic decision.
 
 ## Input
 
@@ -47,16 +47,16 @@ type ReviewTurnOutput =
 
 ### `NOT_READY`
 
-Returns `projectId`, `jobId`, `revision`, `stateVersion`, current `phase`, `progress`, and bounded `retryAfterMs`. It never contains `worktreePath`, claim credentials, or Reviewer internals. The Host waits for `retryAfterMs` and calls the composite tool again with a new request ID.
+Returns `projectId`, `jobId`, `revision`, `stateVersion`, current `phase`, `progress`, and bounded `retryAfterMs`. It never contains `worktreePath`, turn authority, or Reviewer internals. The Host waits for `retryAfterMs` and calls the composite tool again with a new request ID.
 
 A stale `review`, `reviewUnavailableReason`, or `answer` continuation returns the current no-path `NOT_READY` state rather than replaying a side effect or redisclosing a worktree.
 
 ### `REVIEW_REQUIRED`
 
-Returned only after the Daemon has durably recorded claim intent, successfully claimed/reconciled the current Review Action, and persisted `AWAITING_REVIEW`. It includes:
+Returned only after one CAS mutation has validated the current Review context, moved the Run to `REVIEWING`, and persisted `AWAITING_REVIEW`. It includes:
 
 - `turnToken`, `reviewAttemptId`, `taskSourceHash`, `candidateHash`, and complete `changedPaths`;
-- the claimed `worktreePath`, disclosed only in this state to the owning Host;
+- the bound `worktreePath`, disclosed only in this state to the owning Host;
 - `reviewerSession: { mode: "CREATE" }` for the first round or `{ mode: "RESUME", reviewerSessionId }` thereafter;
 - the current `piSessionId` for provenance separation;
 - the fixed review `deadlineAt`.
@@ -65,9 +65,9 @@ The Host opens that worktree, rereads the synchronized Task and current files, e
 
 ### `USER_INPUT_REQUIRED`
 
-Returns a durable pause with `turnToken`, `pause.code`, `pause.message`, legal mutable `options`, separate read-only `inspectionOptions`, the canonical paused `result`, and, when needed, `requiredInput`. Revision approval uses `mode: "COLLECT"` with a non-submit-ready `inputForm` when user values are missing, or `mode: "CONFIRM"` with a complete schema-valid `answer` when all values are available. It may include current Review or repair draft evidence, but never the claimed worktree path.
+Returns a durable pause with `turnToken`, `pause.code`, `pause.message`, legal mutable `options`, separate read-only `inspectionOptions`, the canonical paused `result`, and, when needed, `requiredInput`. Revision approval uses `mode: "COLLECT"` with a non-submit-ready `inputForm` when user values are missing, or `mode: "CONFIRM"` with a complete schema-valid `answer` when all values are available. It may include current Review or repair draft evidence, but never the Review worktree path.
 
-- `AUTOMATIC_REPAIR_LIMIT` may offer `resume_review_decision`; the owning Host submits that answer through `smartflow_review_turn` with the active `turnToken`, after which HostTurnCoordinator invokes Daemon resume mechanics internally, resets `autoRepairRounds` to zero, and allows the next group of up to 15 rounds.
+- `AUTOMATIC_REPAIR_LIMIT` may offer `resume_review_decision`; the owning Host submits that answer through `smartflow_review_turn` with the active `turnToken`. HostTurnCoordinator atomically re-evaluates the stored Review with a reset allowance and proceeds directly to repair or another real pause.
 - `INVALID_REVIEW` offers only `cancel`; incomplete Review without actionable blocking findings is never converted into guessed repair work.
 - Other pause codes expose only actions already allowed by the Run's durable `resumeActions`.
 
@@ -79,20 +79,18 @@ Returned only when the Run is in `COMPLETED`, `CANCELED`, or `FAILED`. It direct
 
 ## Durable Host-turn checkpoint
 
-Project state remains schema version 4. Each Run may persist:
+Project state uses schema version 5. Schema-v4 state is migrated once at startup: safe active claim states become `AWAITING_REVIEW`, while ambiguous `REVIEWING` state is paused as `HOST_REVIEW_UNAVAILABLE`. Each Run may persist:
 
 ```ts
 type HostTurn =
-  | { stage: "CLAIMING"; turnToken: string; hostTurnId: string; revision: number;
-      actionId: string; startedAt: string; deadlineAt: string }
-  | { stage: "AWAITING_REVIEW"; turnToken: string; hostTurnId: string; revision: number;
-      actionId: string; claimId: string; reviewAttemptId: string;
+  | { stage: "AWAITING_REVIEW"; turnToken: string; hostTurnId: string;
+      revision: number; reviewAttemptId: string;
       startedAt: string; deadlineAt: string }
   | { stage: "AWAITING_USER_INPUT"; turnToken: string; hostTurnId: string;
       revision: number; pauseCode: string; startedAt: string };
 ```
 
-`RunRecord.autoRepairRounds` counts daemon-started repair rounds in the current allowance. The owning Host submits `resume_review_decision` through `smartflow_review_turn` with the active `turnToken`; HostTurnCoordinator invokes Daemon resume mechanics internally, clears the checkpoint, and resets the counter to zero. Checkpoints are durable-first and are not inferred from logs or an in-memory Host call.
+`RunRecord.autoRepairRounds` counts daemon-started repair rounds in the current allowance. The owning Host submits `resume_review_decision` through `smartflow_review_turn` with the active `turnToken`; HostTurnCoordinator atomically re-evaluates the stored Review with a reset counter. Checkpoints are durable-first and are not inferred from logs or an in-memory Host call.
 
 ## Mechanical decision policy
 
@@ -100,21 +98,21 @@ After validating a current Review, the Daemon uses one deterministic plan:
 
 | Review result | Plan | Effect |
 |---|---|---|
-| `APPROVE`, 100%, no blocking finding | `ACCEPT` | submit accept and progress to Publish |
-| Incomplete with one or more blocking findings and budget `< 15` | `REPAIR` | submit only reviewer-fingerprint RepairItems; create/approve same-scope repair Revision |
+| `APPROVE`, 100%, no blocking finding | `ACCEPT` | write Review and decision evidence in one mutation, then progress to Publish |
+| Incomplete with one or more blocking findings and budget `< 15` | `REPAIR` | write Review and decision evidence in one mutation, then create/approve the same-scope repair Revision |
 | Incomplete with no actionable blocking finding | `PAUSE_INVALID_REVIEW` | durable `INVALID_REVIEW`; only cancel |
 | Incomplete with actionable findings and budget `>= 15` | `PAUSE_REPAIR_LIMIT` | durable `AUTOMATIC_REPAIR_LIMIT`; ask whether to grant another 15 |
 
 The Host does not re-evaluate or resubmit these mechanical decisions. It still owns Reviewer execution and every user decision.
 
-## Serialization, CAS, and idempotency
+## CAS, idempotency, and deadline
 
-- All composite turns for one `projectId + jobId` execute through a per-Run queue.
-- Every state mutation uses Project-wide `stateVersion` CAS. An operation makes at most four total attempts, including the initial attempt and up to three retries after fresh rereads.
-- Daemon-internal operations use deterministic request IDs derived from the stable `turnToken`; retries cannot duplicate Action claim, Review persistence, repair, resume application, decision, or Publish effects.
-- Claim intent is persisted before the Daemon-internal Action claim. A lost response is reconciled from durable `pendingAction` and `hostTurn`.
-- The review deadline is 30 minutes. Claims renew every 60 seconds or 30 seconds before lease expiry, whichever is earlier. Transient renew failures retry after 1 second; three failures cause a durable Host-review-unavailable pause.
-- On Daemon restart, `HostTurnCoordinator.recoverRun()` is the sole Review-turn recovery authority while `hostTurn` exists. `ProjectRuntime` rereads fresh state afterward and does not start ordinary Run recovery until the checkpoint is cleared.
+- Every state mutation uses Project-wide `stateVersion` CAS; a competing writer yields a fresh no-path continuation rather than replaying a partial primitive sequence.
+- Daemon-internal operation request IDs are deterministic hashes of stable turn identity and operation scope.
+- Review begin is one mutation: context validation, `REVIEWING`, and `AWAITING_REVIEW` commit together. A lost response is reconstructed from that durable state without a second begin.
+- Review finalization is one domain operation: Review and automatic-decision artifacts are written before one state commit directly to `READY_TO_PUBLISH`, `FIXING`, or a real `PAUSED` state. New paths do not produce `LEADER_DECISION`.
+- The review deadline is one durable 30-minute timestamp. No short claim lease or renew loop exists.
+- On Daemon restart, `HostTurnCoordinator.recoverRun()` restores or expires `AWAITING_REVIEW` before ordinary Run recovery. `ProjectRuntime` rereads fresh state afterward and does not start competing recovery while a checkpoint remains.
 
 ## Public MCP surface
 
@@ -127,7 +125,7 @@ Exactly six tools are registered:
 5. `smartflow_cancel`
 6. `smartflow_result`
 
-`smartflow_execute → smartflow_review_turn*` is the sole public Review orchestration path. `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result` are separate Run-management APIs, not Review continuations or a second Review orchestration path. Public `smartflow_resume` is for independent paused-Run recovery and cannot answer or bypass an active `hostTurn`. The `HostActionLoop` symbol and public symbols, schemas, handlers, registrations, and aliases for `smartflow_wait`, `smartflow_claim_action`, `smartflow_renew_action_claim`, `smartflow_submit_review`, and `smartflow_submit_leader_decision` do not exist; those Review mechanics are Daemon-internal only.
+`smartflow_execute → smartflow_review_turn*` is the sole public Review orchestration path. `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result` are separate Run-management APIs, not Review continuations or a second Review orchestration path. Public `smartflow_resume` is for independent paused-Run recovery and cannot answer or bypass an active `hostTurn`. The old wait/claim/renew/submission/Leader primitive symbols, schemas, handlers, registrations, and aliases do not exist; Review begin and finalization are atomic Daemon domain operations.
 
 ## Implementation and tests
 

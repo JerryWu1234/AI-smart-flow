@@ -26,7 +26,7 @@ export function createSmartFlowMcpServer(gateway: DaemonGateway): McpServer {
         "When it returns REVIEW_REQUIRED, use this caller's native session capability: CREATE one independent Reviewer session once, or RESUME exactly the supplied session, with the supplied worktreePath as its working directory.",
         "The Reviewer must reread the synchronized Task on every round, may read worktree files needed for context, and must not run tests, lint, builds, or modify files.",
         "The Reviewer returns every Task exactly once with an integer completion percentage; incomplete tasks also include a concise reason and implementation suggestion; completionPercentage is their rounded arithmetic mean.",
-        "Submit that result to smartflow_review_turn with the unchanged turnToken. The Daemon owns claim renewal, review decisions, safe repair approval, repair counting, and publish transitions.",
+        "Submit that result to smartflow_review_turn with the unchanged turnToken. The Daemon owns the atomic Review transition, automatic decision, safe repair approval, repair counting, and publish progression.",
         "When it returns USER_INPUT_REQUIRED, present its message and options to the user. If requiredInput.mode is COLLECT, collect every listed field and construct the complete structured answer only from the user's approved values. If its mode is CONFIRM, ask the user to confirm the supplied complete answer before returning it through the same tool.",
         "Never ask the Daemon to create a Reviewer, never use the Worker session as Reviewer, and never replace a lost bound Reviewer session.",
         "Use smartflow_status, smartflow_resume, smartflow_cancel, and smartflow_result only for explicit run inspection, recovery, cancellation, and result retrieval; do not manually reproduce the composite Review flow."
@@ -49,7 +49,7 @@ export function createSmartFlowMcpServer(gateway: DaemonGateway): McpServer {
     "smartflow_review_turn",
     {
       description:
-        "Single Host-loop entry point after smartflow_execute. Returns NOT_READY, REVIEW_REQUIRED, USER_INPUT_REQUIRED, or DONE. On REVIEW_REQUIRED, run or resume the specified independent Reviewer and return its task scores with the unchanged turnToken; the Daemon handles every mechanical transition and claim renewal.",
+        "Single Host-loop entry point after smartflow_execute. Returns NOT_READY, REVIEW_REQUIRED, USER_INPUT_REQUIRED, or DONE. On REVIEW_REQUIRED, run or resume the specified independent Reviewer and return its task scores with the unchanged turnToken; the Daemon handles every atomic transition and the durable review deadline.",
       inputSchema: reviewTurnInputSchema
     },
     async (input) => toolResult(await handlers.smartflow_review_turn(input))

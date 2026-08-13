@@ -51,6 +51,41 @@ export class StateStore {
     });
   }
 
+  public async migrateState(): Promise<ProjectState> {
+    return enqueueStateWrite(this.statePath, async () => {
+      let bytes: Uint8Array;
+      try {
+        bytes = await readFile(this.statePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new StateStoreError("STATE_NOT_FOUND", `State file does not exist: ${this.statePath}`);
+        }
+        throw error;
+      }
+      try {
+        const value: unknown = JSON.parse(new TextDecoder().decode(bytes));
+        const originalVersion = typeof value === "object" && value !== null &&
+          "schemaVersion" in value
+          ? (value as { schemaVersion?: unknown }).schemaVersion
+          : undefined;
+        const migrated = projectStateSchema.parse(value);
+        if (originalVersion !== migrated.schemaVersion) {
+          await atomicWriteFile(
+            this.statePath,
+            Buffer.from(canonicalJson(migrated), "utf8")
+          );
+        }
+        return migrated;
+      } catch (error) {
+        if (error instanceof StateStoreError) throw error;
+        throw new StateStoreError(
+          "STATE_INVALID",
+          `State file is invalid: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    });
+  }
+
   public async readState(): Promise<ProjectState> {
     let bytes: Uint8Array;
     try {
@@ -67,11 +102,13 @@ export class StateStore {
         typeof value === "object" &&
         value !== null &&
         "schemaVersion" in value &&
-        (value as { schemaVersion?: unknown }).schemaVersion !== 4
+        !new Set([4, 5]).has(
+          (value as { schemaVersion?: unknown }).schemaVersion as number
+        )
       ) {
         throw new StateStoreError(
           "STATE_MIGRATION_UNSUPPORTED",
-          "SmartFlow 4.0 cannot resume pre-Pi active state"
+          "Unsupported SmartFlow project state schema version"
         );
       }
       return projectStateSchema.parse(value);

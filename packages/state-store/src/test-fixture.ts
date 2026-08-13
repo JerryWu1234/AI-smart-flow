@@ -43,7 +43,7 @@ export function createProjectState(overrides: Partial<ProjectState> = {}): Proje
       .map((run) => [run.canonicalTaskPath, run.jobId])
   );
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     projectId: "project-1",
     canonicalProjectRoot: "/project/source",
     stateVersion: 0,

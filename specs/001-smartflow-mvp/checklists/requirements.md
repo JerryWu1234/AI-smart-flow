@@ -36,19 +36,19 @@
 - [x] The only public Review orchestration path is `smartflow_execute → smartflow_review_turn*`
 - [x] The public MCP surface is exactly `smartflow_execute`, `smartflow_review_turn`, `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`
 - [x] `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result` are separate Run management APIs, not Review continuations or a second Review orchestration path; public `smartflow_resume` cannot answer or bypass an active `hostTurn`
-- [x] Wait, Action claim/renew, Review submission, and Leader decision are Daemon-internal mechanics with no public handler
-- [x] The public symbols, schemas, handlers, registrations, and aliases for the five named Review mechanics and the `HostActionLoop` symbol do not exist
+- [x] Review begin/finalization, deterministic decision planning, approved-scope repair, and Publish scheduling are Daemon domain operations rather than callable wait/claim/renew/Leader primitives
+- [x] The public and internal callable symbols, schemas, handlers, registrations, and aliases for the five legacy Review primitives and the `HostActionLoop` symbol do not exist
 - [x] Public output is exactly `NOT_READY | REVIEW_REQUIRED | USER_INPUT_REQUIRED | DONE`
 - [x] `DONE` is terminal-only; pauses/conflicts remain typed user-input states
-- [x] Only claimed `REVIEW_REQUIRED` exposes `worktreePath`; stale/poll/pause/terminal outputs do not
+- [x] Only atomically persisted `AWAITING_REVIEW` returns `REVIEW_REQUIRED` with `worktreePath`; stale/poll/pause/terminal outputs do not
 - [x] Host owns Reviewer CREATE/RESUME and all user interaction; Daemon never creates a Reviewer
-- [x] Daemon owns deterministic wait/claim/renew/accept/repair/pause/Publish mechanics
-- [x] Schema-v4 `hostTurn` covers `CLAIMING | AWAITING_REVIEW | AWAITING_USER_INPUT`
+- [x] Daemon owns atomic begin/finalize and deterministic accept/repair/pause/Publish mechanics
+- [x] Schema-v5 `hostTurn` covers `AWAITING_REVIEW | AWAITING_USER_INPUT`; startup migration removes schema-v4 claim/lease fields
 - [x] `hostTurnId + turnToken + revision` ownership and stale-continuation behavior are explicit
 - [x] Per-Run serialization, Project-wide CAS, stable child request IDs, and at most four total CAS attempts (initial plus up to three retries) are explicit
-- [x] Thirty-minute deadline, 60-second renew, 30-second margin, 1-second retry and three-failure pause are explicit
+- [x] One durable 30-minute Review deadline is explicit; no short lease, renewal loop, margin, or renewal-failure state exists
 - [x] Mechanical plans `ACCEPT | REPAIR | PAUSE_INVALID_REVIEW | PAUSE_REPAIR_LIMIT` are complete
-- [x] Automatic repair budget is 15; the owning Host submits `resume_review_decision` through `smartflow_review_turn` with the active `turnToken`, and HostTurnCoordinator internally resets the counter for the next group
+- [x] Automatic repair budget is 15; the owning Host submits `resume_review_decision` through `smartflow_review_turn` with the active `turnToken`, and HostTurnCoordinator atomically re-evaluates stored Review and resets the counter for the next group
 - [x] `INVALID_REVIEW` does not invent repair scope and offers only cancel
 - [x] Restart recovery gives durable Host turn sole authority and rereads fresh state
 
@@ -69,7 +69,7 @@
 
 - [x] `changedPaths` from `REVIEW_REQUIRED` reaches the packaged Host Reviewer callback (T205)
 - [x] A paused active Review preserves its owning `hostTurnId` or uses an explicit authorized handoff before another Host can reclaim (T204)
-- [x] A successful claim whose response is lost schedules recovery/renewal from the durable claim lease, not only the 30-minute Review deadline (T204)
+- [x] A lost atomic-begin response replays the same durable owner/token/Review attempt/deadline without another mutation or a lease-renewal loop (T204)
 - [x] Every advertised composite pause is self-contained, including required approval fields and inspection options, and unanswered pauses do not call the independent `smartflow_result` management API (T205)
 
 ## Notes

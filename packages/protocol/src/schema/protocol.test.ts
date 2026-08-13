@@ -8,16 +8,11 @@ import {
   mcpToolSchemas,
   piWorkerAttemptSchema,
   publishResultSchema,
-  renewActionClaimInputSchema,
-  renewActionClaimOutputSchema,
   reviewSubmissionSchema,
   reviewTurnInputSchema,
   reviewTurnOutputSchema,
   runPhaseSchema,
-  statusInputSchema,
-  submitLeaderDecisionInputSchema,
-  submitReviewInputSchema,
-  submitReviewOutputSchema
+  statusInputSchema
 } from "../index.js";
 
 const digest = "a".repeat(64);
@@ -238,32 +233,6 @@ describe("smartflow.v5 protocol schemas", () => {
     }).success).toBe(false);
   });
 
-  it("binds claim renewal to the current action, claim, and Host turn", () => {
-    const renewal = {
-      requestId: "renew-request-1",
-      projectId: "project-1",
-      jobId: "job-1",
-      expectedRevision: 1,
-      expectedStateVersion: 4,
-      actionId: "action-1",
-      claimId: "claim-1",
-      hostTurnId: "host-turn-1"
-    };
-    expect(renewActionClaimInputSchema.parse(renewal)).toEqual(renewal);
-    expect(renewActionClaimInputSchema.safeParse({
-      ...renewal,
-      hostTurnId: undefined
-    }).success).toBe(false);
-    expect(renewActionClaimOutputSchema.parse({
-      projectId: "project-1",
-      jobId: "job-1",
-      revision: 1,
-      stateVersion: 5,
-      phase: "REVIEWING",
-      expiresAt: "2026-07-20T00:05:00Z"
-    })).toBeDefined();
-  });
-
   it("rejects unknown input fields", () => {
     expect(() =>
       statusInputSchema.parse({ projectId: "p1", jobId: "j1", hidden: true })
@@ -357,61 +326,6 @@ describe("smartflow.v5 protocol schemas", () => {
       ...review,
       convergeFindings: [{ ...finding, evidence: [] }]
     }).success).toBe(false);
-    const submission = {
-      requestId: "request-1",
-      projectId: "project-1",
-      jobId: "job-1",
-      expectedRevision: 1,
-      expectedStateVersion: 3,
-      claimId: "claim-1",
-      reviewAttemptId: "review-attempt-1",
-      taskSourceHash: digest,
-      candidateHash: digest,
-      reviewerSessionId: "reviewer-1",
-      result: review
-    };
-    expect(submitReviewInputSchema.safeParse(submission).success).toBe(true);
-    expect(submitReviewInputSchema.safeParse({
-      ...submission,
-      result: {
-        completionPercentage: 75,
-        tasks: [
-          {
-            id: "T001",
-            completionPercentage: 50,
-            reason: "Required behavior is incomplete",
-            suggestion: "Implement the missing behavior"
-          },
-          { id: "T002", completionPercentage: 100 }
-        ]
-      }
-    }).success).toBe(true);
-    expect(submitReviewInputSchema.safeParse({
-      ...submission,
-      result: {
-        completionPercentage: 50,
-        tasks: [{ id: "T001", completionPercentage: 50 }]
-      }
-    }).success).toBe(false);
-    expect(submitReviewInputSchema.safeParse({
-      ...submission,
-      provenance: { forged: true }
-    }).success).toBe(false);
-    expect(submitReviewInputSchema.safeParse({
-      ...submission,
-      executeCurrentHostReview: true
-    }).success).toBe(false);
-    expect(submitReviewOutputSchema.parse({
-      projectId: "project-1",
-      jobId: "job-1",
-      revision: 1,
-      stateVersion: 4,
-      phase: "LEADER_DECISION",
-      reviewHash: digest,
-      reviewAttemptId: "review-attempt-1",
-      reviewerSessionId: "reviewer-1",
-      result: review
-    })).toBeDefined();
   });
 
   it("requires execute approval to bind the source hash", () => {
@@ -422,81 +336,6 @@ describe("smartflow.v5 protocol schemas", () => {
         requestId: "req-1"
       })
     ).toThrow();
-  });
-
-  it("binds repair decisions to explicit unique Reviewer or Leader items", () => {
-    const decision = {
-      requestId: "leader-request-1",
-      projectId: "project-1",
-      jobId: "job-1",
-      expectedRevision: 1,
-      expectedStateVersion: 5,
-      reviewHash: digest,
-      decision: "repair" as const,
-      reason: "repair selected review comment"
-    };
-    expect(submitLeaderDecisionInputSchema.safeParse(decision).success).toBe(false);
-    expect(submitLeaderDecisionInputSchema.safeParse({
-      ...decision,
-      reason: "   ",
-      repairItems: [{ source: "reviewer", findingFingerprint: digest }]
-    }).success).toBe(false);
-    expect(submitLeaderDecisionInputSchema.safeParse({
-      ...decision,
-      repairItems: [{ source: "reviewer", findingFingerprint: digest }]
-    }).success).toBe(true);
-    expect(submitLeaderDecisionInputSchema.safeParse({
-      ...decision,
-      repairItems: [
-        { source: "reviewer", findingFingerprint: digest },
-        { source: "reviewer", findingFingerprint: digest }
-      ]
-    }).success).toBe(false);
-    expect(submitLeaderDecisionInputSchema.safeParse({
-      ...decision,
-      repairItems: [{
-        source: "leader",
-        code: "LEADER_EXPECTATION_MISSED",
-        taskId: "T001",
-        path: "src/a.ts",
-        reason: "The result does not meet the approved task"
-      }]
-    }).success).toBe(true);
-    expect(submitLeaderDecisionInputSchema.safeParse({
-      ...decision,
-      repairItems: [{
-        source: "leader",
-        code: "LEADER_EXPECTATION_MISSED",
-        taskId: "T001",
-        path: "src/a.ts",
-        reason: "   "
-      }]
-    }).success).toBe(false);
-    expect(submitLeaderDecisionInputSchema.safeParse({
-      ...decision,
-      repairItems: [{
-        source: "leader",
-        code: "LEADER_EXPECTATION_MISSED",
-        taskId: "T001",
-        path: "   ",
-        reason: "unsafe blank path"
-      }]
-    }).success).toBe(false);
-    expect(submitLeaderDecisionInputSchema.safeParse({
-      ...decision,
-      repairItems: [{
-        source: "leader",
-        code: "LEADER_EXPECTATION_MISSED",
-        taskId: "T001",
-        path: "../outside.ts",
-        reason: "unsafe path"
-      }]
-    }).success).toBe(false);
-    expect(submitLeaderDecisionInputSchema.safeParse({
-      ...decision,
-      decision: "accept",
-      repairItems: [{ source: "reviewer", findingFingerprint: digest }]
-    }).success).toBe(false);
   });
 
   it("requires tasksPath to be relative and free of parent traversal", () => {
