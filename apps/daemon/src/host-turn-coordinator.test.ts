@@ -1,19 +1,25 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { ReviewTurnInput, ReviewTurnOutput } from "@smartflow/protocol";
 import {
   StateStore,
-  StateStoreError,
   type ProjectState,
   type RunRecord
 } from "@smartflow/state-store";
+import { compileTaskManifest } from "@smartflow/task-manifest";
+import { createTasksSource } from "../../../packages/task-manifest/src/test-fixture.js";
 import {
   createProjectState,
   createRunRecord
 } from "../../../packages/state-store/src/test-fixture.js";
+
+vi.mock("./recovery-manager.js", () => ({
+  verifyRunArtifacts: vi.fn(() => Promise.resolve(undefined))
+}));
 
 import {
   HostTurnCoordinator,
@@ -22,9 +28,11 @@ import {
 
 const digestA = "a".repeat(64);
 const digestB = "b".repeat(64);
+const digestC = "c".repeat(64);
 const nowText = "2026-08-11T10:00:00.000Z";
 const projectId = "project-1";
 const jobId = "job-1";
+const reviewDeadlineMs = 30 * 60_000;
 
 const temporaryDirectories: string[] = [];
 const coordinators: HostTurnCoordinator[] = [];
@@ -32,12 +40,15 @@ const coordinators: HostTurnCoordinator[] = [];
 afterEach(async () => {
   for (const coordinator of coordinators.splice(0)) coordinator.dispose();
   vi.useRealTimers();
+  vi.restoreAllMocks();
   await Promise.all(temporaryDirectories.splice(0).map((path) =>
     rm(path, { recursive: true, force: true })
   ));
 });
 
-function reviewAction(): Record<string, unknown> {
+function reviewAction(
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
   return {
     type: "REVIEW",
     actionId: "review-action-1",
@@ -48,7 +59,8 @@ function reviewAction(): Record<string, unknown> {
     changedPaths: ["src/a.ts"],
     reviewerSession: { mode: "CREATE" },
     piSessionId: "pi-session-1",
-    expiresAt: "2026-08-11T10:15:00.000Z"
+    expiresAt: "2026-08-11T10:15:00.000Z",
+    ...overrides
   };
 }
 
@@ -56,6 +68,11 @@ function reviewRun(overrides: Partial<RunRecord> = {}): RunRecord {
   return createRunRecord({
     phase: "REVIEW_PENDING",
     pendingAction: reviewAction(),
+    candidate: {
+      relativePath: "runs/job-1/revision-1/candidate.json",
+      sha256: digestB,
+      size: 2
+    },
     workspace: {
       relativePath: "worktrees/job-1",
       baselineHash: digestA,
@@ -63,22 +80,86 @@ function reviewRun(overrides: Partial<RunRecord> = {}): RunRecord {
       sandboxId: "sandbox-1",
       mutable: true
     },
+    workerAttempts: [{
+      attemptId: "attempt-1",
+      revision: 1,
+      generation: 0,
+      providerRuntimeConfigHash: digestC,
+      status: "COMPLETED",
+      piSessionId: "pi-session-1",
+      startedAt: "2026-08-11T09:30:00.000Z",
+      endedAt: "2026-08-11T09:59:00.000Z"
+    }],
     createdAt: nowText,
     updatedAt: nowText,
     ...overrides
   });
 }
 
-async function createStore(run: RunRecord): Promise<StateStore> {
+interface TestStore {
+  store: StateStore;
+  approvedSourcePath: string;
+}
+
+async function createStore(run: RunRecord): Promise<TestStore> {
   const directory = await mkdtemp(join(tmpdir(), "smartflow-host-turn-"));
   temporaryDirectories.push(directory);
-  const store = new StateStore(join(directory, projectId));
+  const store = new StateStore(join(directory, "data", projectId));
+  const tasksSource = createTasksSource({
+    tasks: "## M01 · Core\n\n- [ ] T001 Edit `src/a.ts` — 验收：review passes"
+  });
+  const canonicalTaskPath = join(directory, "tasks.md");
+  const compiled = compileTaskManifest(tasksSource, {
+    projectId,
+    jobId,
+    revision: 1,
+    canonicalTaskPath,
+    providerRuntimeConfig: { model: "test" },
+    approval: {
+      kind: "USER",
+      approvedAt: nowText,
+      parentRevision: null,
+      authorizedCriterionIds: ["T001:acceptance:1"]
+    }
+  });
+  const taskSource = await store.writeArtifact(
+    `runs/${jobId}/revision-1/task-source.md`,
+    Buffer.from(tasksSource, "utf8")
+  );
+  const taskManifest = await store.writeArtifact(
+    `runs/${jobId}/revision-1/task-manifest.json`,
+    compiled.artifactBytes
+  );
+  const candidate = await store.writeArtifact(
+    `runs/${jobId}/revision-1/candidate.json`,
+    Buffer.from("{}", "utf8")
+  );
+  const pendingAction = run.pendingAction?.type === "REVIEW"
+    ? {
+        ...run.pendingAction,
+        taskSourceHash: compiled.manifest.sourceHash,
+        candidateHash: candidate.sha256
+      }
+    : run.pendingAction;
+  const approvedSourcePath = resolve(store.dataDirectory, taskSource.relativePath);
+  const preparedRun: RunRecord = {
+    ...run,
+    canonicalTaskPath,
+    taskSource,
+    taskManifest,
+    candidate,
+    approvedTasks: {
+      path: approvedSourcePath,
+      sourceHash: compiled.manifest.sourceHash
+    },
+    pendingAction
+  };
   await store.initialize(createProjectState({
     projectId,
     canonicalProjectRoot: directory,
-    runs: { [run.jobId]: run }
+    runs: { [preparedRun.jobId]: preparedRun }
   }));
-  return store;
+  return { store, approvedSourcePath };
 }
 
 async function writeRun(
@@ -103,13 +184,25 @@ async function writeRun(
   });
 }
 
+function resultStatus(run: RunRecord):
+  | "RUNNING"
+  | "PAUSED"
+  | "COMMITTED"
+  | "FAILED"
+  | "CANCELED" {
+  if (run.phase === "COMPLETED") return "COMMITTED";
+  if (run.phase === "FAILED") return "FAILED";
+  if (run.phase === "CANCELED") return "CANCELED";
+  if (run.phase === "PAUSED") return "PAUSED";
+  return "RUNNING";
+}
+
 function resultFor(run: RunRecord, repairDraft?: Record<string, unknown>): Record<string, unknown> {
-  const terminal = run.phase === "COMPLETED";
   return {
     projectId,
     jobId,
     phase: run.phase,
-    status: terminal ? "COMMITTED" : run.phase === "PAUSED" ? "PAUSED" : "RUNNING",
+    status: resultStatus(run),
     artifacts: [],
     nextActions: run.pause?.resumeActions ?? [],
     ...(repairDraft === undefined ? {} : { repairDraft })
@@ -137,22 +230,19 @@ function createDependencies(
         phase: run.phase,
         revision: run.revision,
         stateVersion: state.stateVersion,
-        progress: { completed: run.phase === "REVIEW_PENDING" ? 1 : 0, total: 1 },
-        ...(run.phase === "REVIEW_PENDING" || run.phase === "REVIEWING"
-          ? { pendingAction: reviewAction() }
-          : {}),
+        progress: {
+          completed: new Set([
+            "REVIEW_PENDING",
+            "REVIEWING",
+            "READY_TO_PUBLISH",
+            "COMPLETED"
+          ]).has(run.phase) ? 1 : 0,
+          total: 1
+        },
+        ...(run.pendingAction === undefined ? {} : { pendingAction: run.pendingAction }),
         ...(run.pause === undefined ? {} : { pause: run.pause })
       };
     },
-    wait: async (input): Promise<unknown> => {
-      const summary = await createDependencies(store).status(input);
-      return { changed: false, stateVersion: input.afterStateVersion, summary };
-    },
-    claim: (): Promise<never> => unexpectedDependency("CLAIM"),
-    renew: (): Promise<never> => unexpectedDependency("RENEW"),
-    submitReview: (): Promise<never> => unexpectedDependency("REVIEW"),
-    reportHostUnavailable: (): Promise<never> => unexpectedDependency("UNAVAILABLE"),
-    submitLeaderDecision: (): Promise<never> => unexpectedDependency("DECISION"),
     resume: (): Promise<never> => unexpectedDependency("RESUME"),
     result: async (): Promise<unknown> => {
       const state = await store.readState();
@@ -160,6 +250,7 @@ function createDependencies(
       if (run === undefined) throw new Error("RUN_NOT_FOUND");
       return resultFor(run, repairDraft);
     },
+    schedule: (): void => undefined,
     ...overrides
   };
 }
@@ -170,687 +261,356 @@ function createCoordinator(dependencies: HostTurnCoordinatorDependencies): HostT
   return coordinator;
 }
 
-function claimedRun(run: RunRecord, claimExpiresAt: string): RunRecord {
+function initialInput(overrides: Partial<ReviewTurnInput> = {}): ReviewTurnInput {
   return {
-    ...run,
-    phase: "REVIEWING",
-    pendingAction: {
-      ...reviewAction(),
-      claimId: "claim-1",
-      hostTurnId: "host-1",
-      claimExpiresAt,
-      claimStatus: "CLAIMED"
-    },
-    hostTurn: {
-      stage: "AWAITING_REVIEW",
-      turnToken: "turn-current",
-      hostTurnId: "host-1",
-      revision: 1,
-      actionId: "review-action-1",
-      claimId: "claim-1",
-      reviewAttemptId: "review-attempt-1",
-      startedAt: nowText,
-      deadlineAt: "2026-08-11T10:30:00.000Z"
+    requestId: "review-turn-request-1",
+    projectId,
+    jobId,
+    hostTurnId: "host-1",
+    ...overrides
+  };
+}
+
+async function beginReview(
+  coordinator: HostTurnCoordinator,
+  input: ReviewTurnInput = initialInput()
+): Promise<Extract<ReviewTurnOutput, { kind: "REVIEW_REQUIRED" }>> {
+  const output = await coordinator.turn(input);
+  if (output.kind !== "REVIEW_REQUIRED") {
+    throw new Error(`Expected REVIEW_REQUIRED, received ${output.kind}`);
+  }
+  return output;
+}
+
+function completeTaskReview(): NonNullable<ReviewTurnInput["review"]> {
+  return {
+    reviewerSessionId: "reviewer-1",
+    result: {
+      completionPercentage: 100,
+      tasks: [{ id: "T001", completionPercentage: 100 }]
     }
   };
 }
 
-describe("HostTurnCoordinator safety and recovery", () => {
-  it.each([
-    { field: "review", value: {
-      reviewerSessionId: "reviewer-1",
-      result: { completionPercentage: 100, tasks: [{ id: "T001", completionPercentage: 100 }] }
-    } },
-    { field: "reviewUnavailableReason", value: "reviewer disappeared" },
-    { field: "answer", value: "cancel" }
-  ])("treats stale $field continuations as read-only NOT_READY", async ({ field, value }) => {
-    const store = await createStore(reviewRun());
-    const claim = vi.fn((): Promise<never> => Promise.reject(new Error("MUST_NOT_CLAIM")));
-    const coordinator = createCoordinator(createDependencies(store, { claim }));
-
-    const output = await coordinator.turn({
-      requestId: `stale-${field}`,
-      projectId,
-      jobId,
-      hostTurnId: "old-host",
-      turnToken: "turn-stale",
-      [field]: value
-    });
-
-    expect(output).toMatchObject({ kind: "NOT_READY", phase: "REVIEW_PENDING" });
-    expect(JSON.stringify(output)).not.toContain("worktreePath");
-    expect(claim).not.toHaveBeenCalled();
-    expect((await store.readState()).runs[jobId]?.hostTurn).toBeUndefined();
-  });
-
-  it("does not let another Host take over or retry a paused review turn", async () => {
-    const active = claimedRun(reviewRun(), "2026-08-11T10:05:00.000Z");
-    const store = await createStore({
-      ...active,
-      phase: "PAUSED",
-      pause: {
-        code: "HOST_REVIEW_UNAVAILABLE",
-        resumeActions: ["retry_host_review", "cancel"]
-      }
-    });
-    const claim = vi.fn((): Promise<never> => Promise.reject(new Error("MUST_NOT_CLAIM")));
-    const resume = vi.fn((): Promise<never> => Promise.reject(new Error("MUST_NOT_RESUME")));
-    const coordinator = createCoordinator(createDependencies(store, { claim, resume }));
-
-    await expect(coordinator.turn({
-      requestId: "paused-review-wrong-host",
-      projectId,
-      jobId,
-      hostTurnId: "host-2"
-    })).rejects.toThrow("HOST_TURN_OWNED_BY_ANOTHER_HOST");
-    expect((await store.readState()).runs[jobId]?.hostTurn).toMatchObject({
-      stage: "AWAITING_REVIEW",
-      hostTurnId: "host-1"
-    });
-
-    const prompt = await coordinator.turn({
-      requestId: "paused-review-owner",
-      projectId,
-      jobId,
-      hostTurnId: "host-1"
-    });
-    expect(prompt).toMatchObject({
-      kind: "USER_INPUT_REQUIRED",
-      options: [
-        { answer: "retry_host_review" },
-        { answer: "cancel" }
-      ]
-    });
-    if (prompt.kind !== "USER_INPUT_REQUIRED") {
-      throw new Error("USER input prompt missing");
+function incompleteTaskReview(): NonNullable<ReviewTurnInput["review"]> {
+  return {
+    reviewerSessionId: "reviewer-1",
+    result: {
+      completionPercentage: 50,
+      tasks: [{
+        id: "T001",
+        completionPercentage: 50,
+        reason: "The requested behavior is incomplete",
+        suggestion: "Implement the remaining behavior"
+      }]
     }
-    expect((await store.readState()).runs[jobId]?.hostTurn).toMatchObject({
-      stage: "AWAITING_USER_INPUT",
-      hostTurnId: "host-1",
-      turnToken: prompt.turnToken
-    });
+  };
+}
 
-    await expect(coordinator.turn({
-      requestId: "paused-review-wrong-host-retry",
-      projectId,
-      jobId,
-      hostTurnId: "host-2",
-      turnToken: prompt.turnToken,
-      answer: "retry_host_review"
-    })).rejects.toThrow("HOST_TURN_OWNED_BY_ANOTHER_HOST");
-    expect(claim).not.toHaveBeenCalled();
-    expect(resume).not.toHaveBeenCalled();
-  });
-
-  it("retries a project-wide CAS conflict with the same child request id", async () => {
-    const store = await createStore(reviewRun());
-    const requestIds: string[] = [];
-    let calls = 0;
-    const claim = vi.fn(async (input: Parameters<HostTurnCoordinatorDependencies["claim"]>[0]) => {
-      calls += 1;
-      requestIds.push(input.requestId);
-      if (calls === 1) {
-        await writeRun(store, (run) => ({ ...run, updatedAt: new Date().toISOString() }));
-        throw new StateStoreError("STATE_VERSION_MISMATCH", "competing run advanced project state");
-      }
-      const leaseExpiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
-      const next = await writeRun(store, (run) => ({
-        ...run,
-        phase: "REVIEWING",
-        pendingAction: {
-          ...run.pendingAction,
-          claimId: "claim-1",
-          hostTurnId: input.hostTurnId,
-          claimExpiresAt: leaseExpiresAt,
-          claimStatus: "CLAIMED"
-        }
-      }));
-      return {
-        claimId: "claim-1",
-        action: { ...reviewAction(), worktreePath: join(store.dataDirectory, "worktrees/job-1") },
-        stateVersion: next.stateVersion,
-        expiresAt: leaseExpiresAt
-      };
-    });
-    const coordinator = createCoordinator(createDependencies(store, { claim }));
-
-    const output = await coordinator.turn({
-      requestId: "claim-with-cas",
-      projectId,
-      jobId,
-      hostTurnId: "host-1"
-    });
-
-    expect(output).toMatchObject({ kind: "REVIEW_REQUIRED", reviewAttemptId: "review-attempt-1" });
-    expect(claim).toHaveBeenCalledTimes(2);
-    expect(new Set(requestIds).size).toBe(1);
-    expect((await store.readState()).runs[jobId]?.hostTurn?.stage).toBe("AWAITING_REVIEW");
-  });
-
-  it("renews before a near-expiry lease after restart and polling cannot postpone it", async () => {
+describe("HostTurnCoordinator simplified review state machine", () => {
+  it("begins Review in one state commit and replays the durable turn without another mutation", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(nowText));
-    const store = await createStore(claimedRun(reviewRun(), "2026-08-11T10:00:10.000Z"));
-    const renew = vi.fn(async () => {
-      const next = await writeRun(store, (run) => ({
-        ...run,
-        pendingAction: {
-          ...run.pendingAction,
-          claimExpiresAt: "2026-08-11T10:05:00.000Z"
-        }
-      }));
-      return {
-        projectId,
-        jobId,
-        revision: 1,
-        stateVersion: next.stateVersion,
-        phase: "REVIEWING",
-        expiresAt: "2026-08-11T10:05:00.000Z"
-      };
-    });
-    const coordinator = createCoordinator(createDependencies(store, { renew }));
-
-    await coordinator.recoverRun(projectId, jobId);
-    const polled = await coordinator.turn({
-      requestId: "poll-near-expiry",
-      projectId,
-      jobId,
-      hostTurnId: "host-1"
-    });
-    expect(polled.kind).toBe("REVIEW_REQUIRED");
-    expect(vi.getTimerCount()).toBe(1);
-    await vi.advanceTimersToNextTimerAsync();
-    await vi.waitFor(() => expect(renew).toHaveBeenCalledTimes(1));
-
-    expect(renew).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps daemon recovery available when an expired review pause report fails once", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(nowText));
-    const active = claimedRun(reviewRun(), "2026-08-11T10:05:00.000Z");
-    if (active.hostTurn?.stage !== "AWAITING_REVIEW") {
-      throw new Error("AWAITING_REVIEW fixture missing");
-    }
-    const store = await createStore({
-      ...active,
-      hostTurn: { ...active.hostTurn, deadlineAt: "2026-08-11T09:59:00.000Z" }
-    });
-    let reportCalls = 0;
-    const reportHostUnavailable = vi.fn(async (
-      input: Parameters<HostTurnCoordinatorDependencies["reportHostUnavailable"]>[0]
-    ) => {
-      reportCalls += 1;
-      if (reportCalls === 1) throw new Error("transient recovery pause failure");
-      const next = await writeRun(store, (run) => ({
-        ...run,
-        phase: "PAUSED",
-        pause: { code: "HOST_REVIEW_UNAVAILABLE", resumeActions: ["retry_host_review", "cancel"] },
-        lastError: {
-          code: "HOST_REVIEW_UNAVAILABLE",
-          stage: "review",
-          message: input.hostUnavailableReason,
-          retryable: true,
-          nextActions: ["retry_host_review", "cancel"],
-          artifacts: []
-        }
-      }));
-      return { projectId, jobId, revision: 1, stateVersion: next.stateVersion, phase: "PAUSED" };
-    });
-    const coordinator = createCoordinator(createDependencies(store, { reportHostUnavailable }));
-
-    await expect(coordinator.recoverRun(projectId, jobId)).resolves.toBeUndefined();
-    expect(reportHostUnavailable).toHaveBeenCalledTimes(1);
-    expect((await store.readState()).runs[jobId]?.phase).toBe("REVIEWING");
-    expect(vi.getTimerCount()).toBe(1);
-
-    await vi.advanceTimersToNextTimerAsync();
-    await vi.waitFor(() => expect(reportHostUnavailable).toHaveBeenCalledTimes(2));
-    expect((await store.readState()).runs[jobId]).toMatchObject({
-      phase: "PAUSED",
-      pause: { code: "HOST_REVIEW_UNAVAILABLE" }
-    });
-  });
-
-  it("durably pauses when repeated renewal rejection prevents maintaining the lease", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(nowText));
-    const store = await createStore(claimedRun(reviewRun(), "2026-08-11T10:05:00.000Z"));
-    const renew = vi.fn((): Promise<never> => Promise.reject(new Error("renewal rejected")));
-    const reportHostUnavailable = vi.fn(async (
-      input: Parameters<HostTurnCoordinatorDependencies["reportHostUnavailable"]>[0]
-    ) => {
-      const next = await writeRun(store, (run) => ({
-        ...run,
-        phase: "PAUSED",
-        pause: { code: "HOST_REVIEW_UNAVAILABLE", resumeActions: ["retry_host_review", "cancel"] },
-        lastError: {
-          code: "HOST_REVIEW_UNAVAILABLE",
-          stage: "review",
-          message: input.hostUnavailableReason,
-          retryable: true,
-          nextActions: ["retry_host_review", "cancel"],
-          artifacts: []
-        }
-      }));
-      return { projectId, jobId, revision: 1, stateVersion: next.stateVersion, phase: "PAUSED" };
-    });
-    const coordinator = createCoordinator(createDependencies(store, {
-      renew,
-      reportHostUnavailable
-    }));
-
-    await coordinator.recoverRun(projectId, jobId);
-    expect(vi.getTimerCount()).toBe(1);
-    await vi.advanceTimersToNextTimerAsync();
-    await vi.waitFor(() => expect(renew).toHaveBeenCalledTimes(1));
-    await vi.advanceTimersToNextTimerAsync();
-    await vi.waitFor(() => expect(renew).toHaveBeenCalledTimes(2));
-    await vi.advanceTimersToNextTimerAsync();
-    await vi.waitFor(() => expect(renew).toHaveBeenCalledTimes(3));
-    await vi.waitFor(() => expect(reportHostUnavailable).toHaveBeenCalledTimes(1));
-
-    expect(renew).toHaveBeenCalledTimes(3);
-    expect(reportHostUnavailable).toHaveBeenCalledTimes(1);
-    expect((await store.readState()).runs[jobId]).toMatchObject({
-      phase: "PAUSED",
-      pause: { code: "HOST_REVIEW_UNAVAILABLE" }
-    });
-  });
-
-  it("replays a pre-claim CLAIMING checkpoint after restart", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(nowText));
-    const turn = {
-      stage: "CLAIMING" as const,
-      turnToken: "turn-claiming",
-      hostTurnId: "host-1",
-      revision: 1,
-      actionId: "review-action-1",
-      startedAt: nowText,
-      deadlineAt: "2026-08-11T10:30:00.000Z"
-    };
-    const store = await createStore(reviewRun({ hostTurn: turn }));
-    const claim = vi.fn(async (input: Parameters<HostTurnCoordinatorDependencies["claim"]>[0]) => {
-      const next = await writeRun(store, (run) => ({
-        ...run,
-        phase: "REVIEWING",
-        pendingAction: {
-          ...run.pendingAction,
-          claimId: "claim-1",
-          hostTurnId: input.hostTurnId,
-          claimExpiresAt: "2026-08-11T10:05:00.000Z",
-          claimStatus: "CLAIMED"
-        }
-      }));
-      return {
-        claimId: "claim-1",
-        action: { ...reviewAction(), worktreePath: join(store.dataDirectory, "worktrees/job-1") },
-        stateVersion: next.stateVersion,
-        expiresAt: "2026-08-11T10:05:00.000Z"
-      };
-    });
-    const coordinator = createCoordinator(createDependencies(store, { claim }));
-
-    await coordinator.recoverRun(projectId, jobId);
-
-    expect(claim).toHaveBeenCalledTimes(1);
-    expect((await store.readState()).runs[jobId]?.hostTurn).toMatchObject({
-      stage: "AWAITING_REVIEW",
-      turnToken: "turn-claiming",
-      claimId: "claim-1"
-    });
-  });
-
-  it("clears an expired pre-claim checkpoint so it cannot retain Host ownership", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(nowText));
-    const store = await createStore(reviewRun({
-      hostTurn: {
-        stage: "CLAIMING",
-        turnToken: "turn-expired",
-        hostTurnId: "old-host",
-        revision: 1,
-        actionId: "review-action-1",
-        startedAt: "2026-08-11T09:00:00.000Z",
-        deadlineAt: "2026-08-11T09:30:00.000Z"
-      }
-    }));
-    const claim = vi.fn((): Promise<never> =>
-      Promise.reject(new Error("MUST_NOT_CLAIM_EXPIRED_INTENT"))
-    );
-    const coordinator = createCoordinator(createDependencies(store, { claim }));
-
-    const output = await coordinator.turn({
-      requestId: "replace-expired-claiming-owner",
-      projectId,
-      jobId,
-      hostTurnId: "replacement-host"
-    });
-
-    expect(output).toMatchObject({ kind: "NOT_READY", phase: "REVIEW_PENDING" });
-    expect(claim).not.toHaveBeenCalled();
-    expect((await store.readState()).runs[jobId]?.hostTurn).toBeUndefined();
-  });
-
-  it("keeps daemon recovery available when pre-claim replay fails", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(nowText));
-    const store = await createStore(reviewRun({
-      hostTurn: {
-        stage: "CLAIMING",
-        turnToken: "turn-recovery-failure",
-        hostTurnId: "host-1",
-        revision: 1,
-        actionId: "review-action-1",
-        startedAt: nowText,
-        deadlineAt: "2026-08-11T10:30:00.000Z"
-      }
-    }));
-    const claim = vi.fn((): Promise<never> =>
-      Promise.reject(new Error("recovery claim transport failed"))
-    );
-    const coordinator = createCoordinator(createDependencies(store, { claim }));
-
-    await expect(coordinator.recoverRun(projectId, jobId)).resolves.toBeUndefined();
-    expect(claim).toHaveBeenCalledTimes(1);
-    expect((await store.readState()).runs[jobId]?.hostTurn?.stage).toBe("CLAIMING");
-    expect(vi.getTimerCount()).toBe(1);
-
-    await vi.advanceTimersToNextTimerAsync();
-    await vi.waitFor(async () => {
-      expect((await store.readState()).runs[jobId]?.hostTurn?.stage).toBe("CLAIMING");
-      expect(vi.getTimerCount()).toBe(1);
-    });
-    await vi.advanceTimersToNextTimerAsync();
-    await vi.waitFor(async () => {
-      expect((await store.readState()).runs[jobId]?.hostTurn).toBeUndefined();
-    });
-  });
-
-  it("retries cleanup when the first expired pre-claim mutation fails", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(nowText));
-    const store = await createStore(reviewRun());
-    const claim = vi.fn((): Promise<never> => Promise.reject(new Error("claim transport failed")));
-    const coordinator = createCoordinator(createDependencies(store, { claim }));
-
-    await expect(coordinator.turn({
-      requestId: "failed-live-claim",
-      projectId,
-      jobId,
-      hostTurnId: "old-host"
-    })).rejects.toThrow("claim transport failed");
-    expect((await store.readState()).runs[jobId]?.hostTurn?.stage).toBe("CLAIMING");
-    expect(vi.getTimerCount()).toBe(1);
-
+    const { store } = await createStore(reviewRun());
     const writeState = vi.spyOn(store, "writeState");
-    writeState.mockRejectedValueOnce(new Error("transient cleanup write failure"));
+    const coordinator = createCoordinator(createDependencies(store));
+    const input = initialInput({ requestId: "atomic-begin" });
 
-    // The near-term reconciliation wake observes that the pre-claim deadline is still live.
-    await vi.advanceTimersToNextTimerAsync();
-    expect(writeState).not.toHaveBeenCalled();
-    expect((await store.readState()).runs[jobId]?.hostTurn?.stage).toBe("CLAIMING");
-    await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1));
+    const first = await beginReview(coordinator, input);
+    const afterFirst = await store.readState();
+    const second = await beginReview(coordinator, input);
 
-    // The deadline wake attempts cleanup; the injected first write failure must be retried.
-    await vi.advanceTimersToNextTimerAsync();
-    await vi.waitFor(() => expect(writeState).toHaveBeenCalledTimes(1));
-    expect((await store.readState()).runs[jobId]?.hostTurn?.stage).toBe("CLAIMING");
-    expect(vi.getTimerCount()).toBe(1);
-
-    await vi.advanceTimersToNextTimerAsync();
-    await vi.waitFor(async () => {
-      expect((await store.readState()).runs[jobId]?.hostTurn).toBeUndefined();
-    });
-  });
-
-  it("reconciles a committed five-minute claim when the claim response is lost", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(nowText));
-    const store = await createStore(reviewRun());
-    const claim = vi.fn(async (input: Parameters<HostTurnCoordinatorDependencies["claim"]>[0]) => {
-      await writeRun(store, (run) => ({
-        ...run,
-        phase: "REVIEWING",
-        pendingAction: {
-          ...run.pendingAction,
-          claimId: "claim-1",
-          hostTurnId: input.hostTurnId,
-          claimExpiresAt: "2026-08-11T10:05:00.000Z",
-          claimStatus: "CLAIMED"
-        }
-      }));
-      throw new Error("claim response was lost");
-    });
-    const reportHostUnavailable = vi.fn((): Promise<never> =>
-      Promise.reject(new Error("MUST_NOT_PAUSE"))
-    );
-    const coordinator = createCoordinator(createDependencies(store, {
-      claim,
-      reportHostUnavailable
-    }));
-
-    const output = await coordinator.turn({
-      requestId: "lost-claim-response",
-      projectId,
-      jobId,
-      hostTurnId: "host-1"
-    });
-
-    expect(output).toMatchObject({
-      kind: "REVIEW_REQUIRED",
-      reviewAttemptId: "review-attempt-1",
-      changedPaths: ["src/a.ts"]
-    });
-    expect(claim).toHaveBeenCalledTimes(1);
-    expect(reportHostUnavailable).not.toHaveBeenCalled();
-    expect((await store.readState()).runs[jobId]).toMatchObject({
+    expect(second).toEqual(first);
+    expect(writeState).toHaveBeenCalledTimes(1);
+    expect(afterFirst.stateVersion).toBe(1);
+    expect(afterFirst.runs[jobId]).toMatchObject({
       phase: "REVIEWING",
-      pendingAction: {
-        claimId: "claim-1",
-        claimExpiresAt: "2026-08-11T10:05:00.000Z"
-      },
       hostTurn: {
         stage: "AWAITING_REVIEW",
         hostTurnId: "host-1",
-        claimId: "claim-1",
-        deadlineAt: "2026-08-11T10:30:00.000Z"
-      }
-    });
-    expect(vi.getTimerCount()).toBe(1);
-  });
-
-  it("reconciles a post-claim CLAIMING checkpoint without claiming twice", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(nowText));
-    const run = claimedRun(reviewRun(), "2026-08-11T10:05:00.000Z");
-    const store = await createStore({
-      ...run,
-      hostTurn: {
-        stage: "CLAIMING",
-        turnToken: "turn-current",
-        hostTurnId: "host-1",
-        revision: 1,
-        actionId: "review-action-1",
-        startedAt: nowText,
-        deadlineAt: "2026-08-11T10:30:00.000Z"
-      }
-    });
-    const claim = vi.fn((): Promise<never> => Promise.reject(new Error("MUST_NOT_RECLAIM")));
-    const coordinator = createCoordinator(createDependencies(store, { claim }));
-
-    await coordinator.recoverRun(projectId, jobId);
-
-    expect(claim).not.toHaveBeenCalled();
-    expect((await store.readState()).runs[jobId]?.hostTurn).toMatchObject({
-      stage: "AWAITING_REVIEW",
-      claimId: "claim-1"
-    });
-  });
-
-  it("persists invalid-review cause and exposes only cancel", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(nowText));
-    const store = await createStore(claimedRun(reviewRun(), "2026-08-11T10:05:00.000Z"));
-    const pauseCauses: unknown[] = [];
-    const normalizedReview = {
-      verdict: "REQUEST_CHANGES" as const,
-      completionPercentage: 50,
-      convergeFindings: [],
-      adversarialFindings: [],
-      pathCoverage: { "src/a.ts": "FULL" as const },
-      residualRisks: []
-    };
-    const submitReview = vi.fn(async () => {
-      const next = await writeRun(store, (run) => ({
-        ...run,
-        phase: "LEADER_DECISION",
-        pendingAction: undefined
-      }));
-      return {
-        projectId,
-        jobId,
-        revision: 1,
-        stateVersion: next.stateVersion,
-        phase: "LEADER_DECISION",
-        reviewHash: digestA,
+        turnToken: first.turnToken,
         reviewAttemptId: "review-attempt-1",
-        reviewerSessionId: "reviewer-1",
-        result: normalizedReview
-      };
+        deadlineAt: "2026-08-11T10:30:00.000Z"
+      }
     });
-    const submitLeaderDecision = vi.fn(async (
-      _input: Parameters<HostTurnCoordinatorDependencies["submitLeaderDecision"]>[0],
-      options?: Parameters<HostTurnCoordinatorDependencies["submitLeaderDecision"]>[1]
-    ) => {
-      pauseCauses.push(options?.pauseCause);
-      const next = await writeRun(store, (run) => ({
-        ...run,
+    expect(afterFirst.runs[jobId]?.pendingAction).not.toHaveProperty("claimId");
+    expect(afterFirst.runs[jobId]?.pendingAction).not.toHaveProperty("claimExpiresAt");
+  });
+
+  it("keeps Review ownership bound to the Host that began the turn", async () => {
+    const { store } = await createStore(reviewRun());
+    const coordinator = createCoordinator(createDependencies(store));
+    await beginReview(coordinator);
+    const before = await store.readState();
+
+    await expect(coordinator.turn(initialInput({
+      requestId: "other-host",
+      hostTurnId: "host-2"
+    }))).rejects.toThrow("HOST_TURN_OWNED_BY_ANOTHER_HOST");
+
+    expect(await store.readState()).toEqual(before);
+  });
+
+  it("restores the single durable deadline after restart and pauses when it expires", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(nowText));
+    const { store } = await createStore(reviewRun());
+    const firstCoordinator = createCoordinator(createDependencies(store));
+    await beginReview(firstCoordinator);
+    firstCoordinator.dispose();
+
+    const recoveredCoordinator = createCoordinator(createDependencies(store));
+    await recoveredCoordinator.recoverRun(projectId, jobId);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(reviewDeadlineMs);
+    await vi.waitFor(async () => {
+      expect((await store.readState()).runs[jobId]).toMatchObject({
         phase: "PAUSED",
-        pause: { code: "INVALID_REVIEW", resumeActions: ["cancel"] }
-      }));
-      return { projectId, jobId, revision: 1, stateVersion: next.stateVersion, phase: "PAUSED" };
+        pause: { code: "HOST_REVIEW_UNAVAILABLE" },
+        hostTurn: {
+          stage: "AWAITING_USER_INPUT",
+          hostTurnId: "host-1"
+        }
+      });
     });
-    const coordinator = createCoordinator(createDependencies(store, {
-      submitReview,
-      submitLeaderDecision
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("finalizes an accepted Review and decision atomically before scheduling Publish", async () => {
+    const { store } = await createStore(reviewRun());
+    const schedule = vi.fn<HostTurnCoordinatorDependencies["schedule"]>();
+    const coordinator = createCoordinator(createDependencies(store, { schedule }));
+    const requested = await beginReview(coordinator);
+    const writeState = vi.spyOn(store, "writeState");
+
+    const output = await coordinator.turn(initialInput({
+      requestId: "accept-review",
+      turnToken: requested.turnToken,
+      review: completeTaskReview()
     }));
 
-    const output = await coordinator.turn({
+    expect(output).toMatchObject({ kind: "NOT_READY", phase: "READY_TO_PUBLISH" });
+    expect(writeState).toHaveBeenCalledTimes(1);
+    const state = await store.readState();
+    const run = state.runs[jobId];
+    if (run === undefined) throw new Error("accepted run missing");
+    expect(run).toMatchObject({ phase: "READY_TO_PUBLISH" });
+    expect(run.pendingAction).toBeUndefined();
+    expect(run.hostTurn).toBeUndefined();
+    expect(run.review).toBeDefined();
+    expect(run.leaderDecision).toBeDefined();
+    expect(run.reviewHistory).toHaveLength(1);
+    const reviewRef = run.review;
+    if (reviewRef === undefined) throw new Error("review missing");
+    const decisionRef = run.leaderDecision;
+    if (decisionRef === undefined) throw new Error("decision missing");
+    const review = JSON.parse(new TextDecoder().decode(
+      await store.readArtifact(reviewRef)
+    )) as Record<string, unknown>;
+    const decision = JSON.parse(new TextDecoder().decode(
+      await store.readArtifact(decisionRef)
+    )) as Record<string, unknown>;
+    expect(review.claimId).toBe(requested.turnToken);
+    expect(decision).toMatchObject({ decision: "accept", reviewHash: review.reviewHash });
+    expect(schedule).toHaveBeenCalledOnce();
+    expect(schedule).toHaveBeenCalledWith(expect.objectContaining({ kind: "publish" }));
+  });
+
+  it("finalizes actionable incomplete work directly to FIXING and schedules the repair pipeline", async () => {
+    const { store } = await createStore(reviewRun());
+    const schedule = vi.fn<HostTurnCoordinatorDependencies["schedule"]>();
+    const coordinator = createCoordinator(createDependencies(store, { schedule }));
+    const requested = await beginReview(coordinator);
+
+    const output = await coordinator.turn(initialInput({
+      requestId: "repair-review",
+      turnToken: requested.turnToken,
+      review: incompleteTaskReview()
+    }));
+
+    expect(output).toMatchObject({ kind: "NOT_READY", phase: "FIXING" });
+    const repairedRun = (await store.readState()).runs[jobId];
+    expect(repairedRun).toMatchObject({
+      phase: "FIXING",
+      autoRepairRounds: 1
+    });
+    expect(repairedRun?.pendingAction).toBeUndefined();
+    expect(repairedRun?.hostTurn).toBeUndefined();
+    expect(schedule).toHaveBeenCalledOnce();
+    expect(schedule).toHaveBeenCalledWith(expect.objectContaining({ kind: "pipeline" }));
+  });
+
+  it("requires user input for a non-actionable Review without producing LEADER_DECISION", async () => {
+    const { store } = await createStore(reviewRun());
+    const coordinator = createCoordinator(createDependencies(store));
+    const requested = await beginReview(coordinator);
+
+    const output = await coordinator.turn(initialInput({
       requestId: "invalid-review",
-      projectId,
-      jobId,
-      hostTurnId: "host-1",
-      turnToken: "turn-current",
+      turnToken: requested.turnToken,
       review: {
         reviewerSessionId: "reviewer-1",
-        result: { completionPercentage: 50, tasks: [{
-          id: "T001",
+        result: {
+          verdict: "REQUEST_CHANGES",
           completionPercentage: 50,
-          reason: "missing evidence",
-          suggestion: "review again"
-        }] }
+          convergeFindings: [],
+          adversarialFindings: [],
+          pathCoverage: { "src/a.ts": "FULL" },
+          residualRisks: []
+        }
       }
-    });
+    }));
 
-    expect(pauseCauses).toEqual(["INVALID_REVIEW"]);
     expect(output).toMatchObject({
       kind: "USER_INPUT_REQUIRED",
       pause: { code: "INVALID_REVIEW" },
       options: [{ answer: "cancel" }]
     });
-    expect(JSON.stringify(output)).not.toContain("resume_review_decision");
+    expect((await store.readState()).runs[jobId]).toMatchObject({
+      phase: "PAUSED",
+      pause: { code: "INVALID_REVIEW" },
+      hostTurn: { stage: "AWAITING_USER_INPUT" }
+    });
   });
 
-  it("exposes a separate collection form for a generic approval pause", async () => {
-    const store = await createStore(reviewRun({
-      phase: "PAUSED",
-      pendingAction: undefined,
-      pause: {
-        code: "APPROVED_SOURCE_DRIFT",
-        resumeActions: ["approve_new_manifest_revision", "cancel"]
-      }
+  it("requires user input at the repair limit and can directly restart automatic decision", async () => {
+    const { store } = await createStore(reviewRun({ autoRepairRounds: 15 }));
+    const schedule = vi.fn<HostTurnCoordinatorDependencies["schedule"]>();
+    const coordinator = createCoordinator(createDependencies(store, { schedule }));
+    const requested = await beginReview(coordinator);
+
+    const paused = await coordinator.turn(initialInput({
+      requestId: "repair-limit",
+      turnToken: requested.turnToken,
+      review: incompleteTaskReview()
     }));
-    const coordinator = createCoordinator(createDependencies(store));
-
-    const prompt = await coordinator.turn({
-      requestId: "generic-approval-prompt",
-      projectId,
-      jobId,
-      hostTurnId: "host-user"
-    });
-
-    expect(prompt).toMatchObject({
+    expect(paused).toMatchObject({
       kind: "USER_INPUT_REQUIRED",
-      requiredInput: {
-        mode: "COLLECT",
-        action: "approve_new_manifest_revision",
-        fields: ["tasksPath", "approvedSourceHash", "approval"],
-        inputForm: {
-          tasksPath: null,
-          approvedSourceHash: null,
-          approval: null
-        }
-      }
+      pause: { code: "AUTOMATIC_REPAIR_LIMIT" }
     });
-    if (prompt.kind !== "USER_INPUT_REQUIRED" || prompt.requiredInput === undefined) {
-      throw new Error("USER input form missing");
-    }
-    expect("answer" in prompt.requiredInput).toBe(false);
-  });
-
-  it("separates inspection actions from mutable options and embeds result evidence", async () => {
-    const evidenceResult = {
-      projectId,
-      jobId,
-      phase: "PAUSED" as const,
-      status: "PRECHECK_CONFLICT" as const,
-      artifacts: [],
-      nextActions: ["inspect_conflict", "cancel"],
-      publishPrecheck: {
-        conflicts: [{ path: "src/a.ts", reason: "HASH_MISMATCH" as const }],
-        publishedCount: 0 as const,
-        totalCount: 1,
-        activeWorkspaceChanged: false as const
-      }
-    };
-    const store = await createStore(reviewRun({
-      phase: "PAUSED",
-      pendingAction: undefined,
-      pause: {
-        code: "PUBLISH_CONFLICT",
-        resumeActions: ["inspect_conflict", "cancel"]
-      }
-    }));
-    const result = vi.fn((): Promise<unknown> => Promise.resolve(evidenceResult));
-    const coordinator = createCoordinator(createDependencies(store, { result }));
-
-    const prompt = await coordinator.turn({
-      requestId: "inspect-conflict-prompt",
-      projectId,
-      jobId,
-      hostTurnId: "host-user"
-    });
-
-    expect(prompt).toMatchObject({
-      kind: "USER_INPUT_REQUIRED",
-      result: evidenceResult
-    });
-    if (prompt.kind !== "USER_INPUT_REQUIRED") {
-      throw new Error("USER input prompt missing");
-    }
-    expect(prompt.inspectionOptions.map((option) => option.action)).toEqual([
-      "inspect_conflict"
+    if (paused.kind !== "USER_INPUT_REQUIRED") throw new Error("repair limit prompt missing");
+    expect(paused.options.map((option) => option.answer)).toEqual([
+      "resume_review_decision",
+      "cancel"
     ]);
-    expect(prompt.options.map((option) => option.answer)).toEqual(["cancel"]);
-    expect(prompt.result.publishPrecheck).toEqual(evidenceResult.publishPrecheck);
-    expect(result).toHaveBeenCalledTimes(1);
+
+    const resumed = await coordinator.turn(initialInput({
+      requestId: "repair-limit-resume",
+      turnToken: paused.turnToken,
+      answer: "resume_review_decision"
+    }));
+    expect(resumed).toMatchObject({ kind: "NOT_READY", phase: "FIXING" });
+    const resumedRun = (await store.readState()).runs[jobId];
+    expect(resumedRun).toMatchObject({
+      phase: "FIXING",
+      autoRepairRounds: 1
+    });
+    expect(resumedRun?.hostTurn).toBeUndefined();
+    expect(schedule).toHaveBeenCalledWith(expect.objectContaining({ kind: "pipeline" }));
   });
 
-  it("exposes and submits a complete USER revision approval template", async () => {
+  it("treats a stale turn token as read-only and rejects a mismatched bound Reviewer session", async () => {
+    const firstStore = await createStore(reviewRun());
+    const firstCoordinator = createCoordinator(createDependencies(firstStore.store));
+    await beginReview(firstCoordinator);
+    const before = await firstStore.store.readState();
+
+    const stale = await firstCoordinator.turn(initialInput({
+      requestId: "stale-token",
+      turnToken: "turn-stale",
+      review: completeTaskReview()
+    }));
+    expect(stale).toMatchObject({ kind: "NOT_READY", phase: "REVIEWING" });
+    expect(await firstStore.store.readState()).toEqual(before);
+
+    const boundRun = reviewRun({
+      pendingAction: reviewAction({
+        reviewAttemptId: "review-attempt-2",
+        reviewerSession: {
+          mode: "RESUME",
+          reviewerSessionId: "reviewer-bound"
+        }
+      }),
+      reviewHistory: [{
+        reviewAttemptId: "review-attempt-1",
+        reviewerSessionId: "reviewer-bound",
+        taskSourceHash: digestA,
+        candidateHash: digestB,
+        reviewHash: digestC
+      }]
+    });
+    const secondStore = await createStore(boundRun);
+    const secondCoordinator = createCoordinator(createDependencies(secondStore.store));
+    const requested = await beginReview(secondCoordinator, initialInput({
+      requestId: "bound-session-begin"
+    }));
+
+    await expect(secondCoordinator.turn(initialInput({
+      requestId: "bound-session-mismatch",
+      turnToken: requested.turnToken,
+      review: {
+        ...completeTaskReview(),
+        reviewerSessionId: "reviewer-other"
+      }
+    }))).rejects.toThrow("REVIEWER_SESSION_BINDING_MISMATCH");
+    expect((await secondStore.store.readState()).runs[jobId]?.phase).toBe("REVIEWING");
+  });
+
+  it("pauses safely when the approved task source hash changes before finalization", async () => {
+    const { store, approvedSourcePath } = await createStore(reviewRun());
+    const coordinator = createCoordinator(createDependencies(store));
+    const requested = await beginReview(coordinator);
+    await writeFile(approvedSourcePath, "changed approved source", "utf8");
+
+    const output = await coordinator.turn(initialInput({
+      requestId: "source-drift",
+      turnToken: requested.turnToken,
+      review: completeTaskReview()
+    }));
+
+    expect(output).toMatchObject({
+      kind: "USER_INPUT_REQUIRED",
+      pause: { code: "APPROVED_SOURCE_DRIFT" }
+    });
+    expect((await store.readState()).runs[jobId]).toMatchObject({
+      phase: "PAUSED",
+      pause: { code: "APPROVED_SOURCE_DRIFT" },
+      hostTurn: { stage: "AWAITING_USER_INPUT" }
+    });
+  });
+
+  it("persists Host unavailability without an external report primitive", async () => {
+    const { store } = await createStore(reviewRun());
+    const coordinator = createCoordinator(createDependencies(store));
+    const requested = await beginReview(coordinator);
+
+    const output = await coordinator.turn(initialInput({
+      requestId: "reviewer-unavailable",
+      turnToken: requested.turnToken,
+      reviewUnavailableReason: "reviewer process exited"
+    }));
+
+    expect(output).toMatchObject({
+      kind: "USER_INPUT_REQUIRED",
+      pause: { code: "HOST_REVIEW_UNAVAILABLE" }
+    });
+    expect((await store.readState()).runs[jobId]).toMatchObject({
+      phase: "PAUSED",
+      lastError: {
+        code: "HOST_REVIEW_UNAVAILABLE",
+        message: "HOST_REVIEW_UNAVAILABLE:reviewer process exited"
+      }
+    });
+  });
+
+  it("exposes a complete USER revision approval and forwards it through resume", async () => {
     const repairDraft = {
-      sourceArtifact: { relativePath: "runs/job-1/repair.md", sha256: digestA, size: 10 },
+      sourceArtifact: {
+        relativePath: "runs/job-1/repair.md",
+        sha256: digestA,
+        size: 10
+      },
       sourceHash: digestA,
       suggestedTasksPath: "tasks.md",
       appendText: "\n- [ ] T002 repair",
@@ -862,7 +622,7 @@ describe("HostTurnCoordinator safety and recovery", () => {
         authorizedCriterionIds: ["T002"]
       }
     };
-    const store = await createStore(reviewRun({
+    const { store } = await createStore(reviewRun({
       phase: "PAUSED",
       pendingAction: undefined,
       pause: {
@@ -871,62 +631,51 @@ describe("HostTurnCoordinator safety and recovery", () => {
       },
       recovery: { repairDraft }
     }));
-    const resumeInputs: unknown[] = [];
-    const resume = vi.fn(async (input: Parameters<HostTurnCoordinatorDependencies["resume"]>[0]) => {
-      resumeInputs.push(input);
-      const next = await writeRun(store, (run) => ({
+    const resume = vi.fn<HostTurnCoordinatorDependencies["resume"]>(async () => {
+      await writeRun(store, (run) => ({
         ...run,
         phase: "COMPLETED",
         pause: undefined,
         hostTurn: undefined
       }));
-      return { projectId, jobId, revision: 2, stateVersion: next.stateVersion, phase: "COMPLETED" };
+      return { phase: "COMPLETED" };
     });
     const coordinator = createCoordinator(createDependencies(store, { resume }, repairDraft));
 
-    const prompt = await coordinator.turn({
-      requestId: "user-prompt",
-      projectId,
-      jobId,
-      hostTurnId: "host-user"
-    });
+    const prompt = await coordinator.turn(initialInput({ requestId: "user-prompt" }));
     expect(prompt).toMatchObject({
       kind: "USER_INPUT_REQUIRED",
-      repairDraft,
       requiredInput: {
         mode: "CONFIRM",
         action: "approve_new_manifest_revision",
-        fields: ["tasksPath", "approvedSourceHash", "approval"],
         answer: {
-          action: "approve_new_manifest_revision",
           tasksPath: "tasks.md",
           approvedSourceHash: digestA,
           approval: repairDraft.approval
         }
       }
     });
-    if (
-      prompt.kind !== "USER_INPUT_REQUIRED" ||
-      prompt.requiredInput?.mode !== "CONFIRM"
-    ) {
+    if (prompt.kind !== "USER_INPUT_REQUIRED" || prompt.requiredInput?.mode !== "CONFIRM") {
       throw new Error("complete USER approval answer missing");
     }
-    const answer = prompt.requiredInput.answer;
-    const done = await coordinator.turn({
-      requestId: "user-answer",
-      projectId,
-      jobId,
-      hostTurnId: "host-user",
-      turnToken: prompt.turnToken,
-      answer
-    });
 
-    expect(done.kind).toBe("DONE");
-    expect(resumeInputs).toContainEqual(expect.objectContaining({
-      resumeAction: "approve_new_manifest_revision",
-      tasksPath: "tasks.md",
-      approvedSourceHash: digestA,
-      approval: repairDraft.approval
+    const done = await coordinator.turn(initialInput({
+      requestId: "user-answer",
+      turnToken: prompt.turnToken,
+      answer: prompt.requiredInput.answer
     }));
+    expect(done.kind).toBe("DONE");
+    expect(resume).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resumeAction: "approve_new_manifest_revision",
+        tasksPath: "tasks.md",
+        approvedSourceHash: digestA,
+        approval: repairDraft.approval
+      }),
+      expect.objectContaining({
+        clearHostTurn: true,
+        expectedHostTurnToken: prompt.turnToken
+      })
+    );
   });
 });

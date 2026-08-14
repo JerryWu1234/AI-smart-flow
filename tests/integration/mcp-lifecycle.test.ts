@@ -738,7 +738,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     );
   });
 
-  it("pauses the composite Review boundary on approved source drift and rejects the old turn", async () => {
+  it("pauses the composite Review boundary on approved source drift and replays the owned prompt", async () => {
       const harness = await createRuntimeHarness();
       activeHarnesses.push(harness);
       const tasksSource = createTasksSource();
@@ -793,12 +793,15 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         }
       });
       await writeFile(tasksPath, `${tasksSource}\nsource drift`, "utf8");
-      await expect(runtime.handle({
+      const firstPrompt = await runtime.handle({
         id: requestId,
         method: "smartflow_review_turn",
         payload
-      }))
-        .rejects.toMatchObject({ code: "APPROVED_SOURCE_DRIFT" });
+      }) as ReviewTurnOutput;
+      expect(firstPrompt).toMatchObject({
+        kind: "USER_INPUT_REQUIRED",
+        pause: { code: "APPROVED_SOURCE_DRIFT" }
+      });
       const paused = await store.readState();
       const pausedRun = paused.runs["job-1"];
       expect(pausedRun).toMatchObject({
@@ -1200,7 +1203,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     });
   });
 
-  it("routes a Leader pause back to the bound decision phase", async () => {
+  it("replays a stored Review decision directly without a Leader phase", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const dataDirectory = resolve(harness.dataDir, "closed-leader-resume");
@@ -1229,7 +1232,19 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       },
       updatedAt: new Date().toISOString()
     });
-    const leaderRuntime = new ProjectRuntime({ dataDirectory });
+    let publishCalls = 0;
+    let markPublishStarted!: () => void;
+    const publishStarted = new Promise<void>((settle) => {
+      markPublishStarted = settle;
+    });
+    const leaderRuntime = new ProjectRuntime({
+      dataDirectory,
+      publish: (): Promise<void> => {
+        publishCalls += 1;
+        markPublishStarted();
+        return Promise.resolve();
+      }
+    });
     const leaderPaused = await leaderStore.readState();
     const leaderResult = await leaderRuntime.handle({
       id: "resume-leader-decision",
@@ -1243,8 +1258,10 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         expectedStateVersion: leaderPaused.stateVersion
       }
     });
-    expect(leaderResult).toMatchObject({ phase: "LEADER_DECISION" });
+    expect(leaderResult).toMatchObject({ phase: "READY_TO_PUBLISH" });
     expect((await leaderStore.readState()).runs["job-1"]?.autoRepairRounds).toBe(0);
+    await publishStarted;
+    expect(publishCalls).toBe(1);
   });
 
   it("rejects retry_cancel combined with Revision approval fields", async () => {

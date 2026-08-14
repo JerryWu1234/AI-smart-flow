@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import {
   durableLeaderDecisionSchema,
@@ -247,7 +247,9 @@ export class RecoveryManager {
       case "REVIEW_PENDING":
         return this.result(state, run, "WAIT_FOR_HOST");
       case "REVIEWING":
-        return this.recoverReviewClaim(state, run);
+        return run.hostTurn?.stage === "AWAITING_REVIEW"
+          ? this.result(state, run, "WAIT_FOR_HOST")
+          : this.pause(state, run, "HOST_REVIEW_UNAVAILABLE:REVIEW_TURN_STATE_MISSING");
       case "LEADER_DECISION":
         return this.result(state, run, "WAIT_FOR_LEADER");
       case "READY_TO_PUBLISH":
@@ -320,39 +322,6 @@ export class RecoveryManager {
       undefined,
       recoveryEpoch
     );
-  }
-
-  private async recoverReviewClaim(state: ProjectState, run: RunRecord): Promise<RecoveryResult> {
-    const expiresAt = typeof run.pendingAction?.claimExpiresAt === "string"
-      ? run.pendingAction.claimExpiresAt
-      : typeof run.pendingAction?.expiresAt === "string"
-        ? run.pendingAction.expiresAt
-        : undefined;
-    if (expiresAt === undefined || Date.parse(expiresAt) > Date.now()) {
-      return this.result(state, run, "WAIT_FOR_HOST");
-    }
-    const pendingAction = { ...run.pendingAction };
-    delete pendingAction.claimId;
-    delete pendingAction.hostTurnId;
-    delete pendingAction.claimExpiresAt;
-    delete pendingAction.claimStatus;
-    delete pendingAction.status;
-    const committed = await this.commit(
-      state,
-      run,
-      "review:claim-expired",
-      { expiresAt },
-      (current) => ({
-        ...current,
-        phase: "REVIEW_PENDING",
-        pendingAction: {
-          ...pendingAction,
-          actionId: `review-action-${randomUUID()}`,
-          expiresAt: new Date(Date.now() + 15 * 60_000).toISOString()
-        }
-      })
-    );
-    return this.result(committed, committed.runs[run.jobId] ?? run, "WAIT_FOR_HOST");
   }
 
   private async recoverPublish(state: ProjectState, run: RunRecord): Promise<RecoveryResult> {

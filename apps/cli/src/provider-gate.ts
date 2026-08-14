@@ -75,7 +75,7 @@ export async function runInstalledPiGate(
     Buffer.from(tasksSource, "utf8")
   );
   await store.initialize({
-    schemaVersion: 4,
+    schemaVersion: 5,
     projectId: "installed-gate",
     canonicalProjectRoot: canonicalProject,
     stateVersion: 1,

@@ -19,20 +19,19 @@ Relative, absolute, and symlink aliases that identify the same file resolve to t
 
 - Different canonical task paths may execute and Review concurrently in the same Project.
 - Each Run has independent jobId, fence, generation, Task Artifact, Pi Attempts/sessions, containment identity, Git object store, Revision workspace, Action, Review history, `hostTurn`, automatic repair counter, and cancellation state.
-- Every `smartflow_review_turn` operation for one `projectId + jobId` is serialized through one per-Run queue. Two turns for the same Run cannot advance mechanics concurrently.
-- Project `state.json` remains one atomic recovery fact shared by all Runs. Every mutation takes the Project lock and validates `expectedStateVersion`; retry rereads fresh state before changing only the target Run and shared indexes.
-- Composite coordination makes at most four total CAS attempts, including the initial attempt and up to three retries after fresh rereads. It uses deterministic child request IDs derived from `turnToken`, so replay cannot duplicate claim, Review submission, decision, repair, resume, or Publish effects.
+- Concurrent `smartflow_review_turn` operations for one Run meet at the Project-wide CAS boundary; only one mutation commits and a stale contender returns a fresh no-path continuation.
+- Project `state.json` remains one atomic recovery fact shared by all Runs. Every mutation validates `expectedStateVersion` and changes only the target Run plus shared indexes.
+- Deterministic child request IDs derive from `turnToken`; a lost response is reconstructed from durable state without duplicating Review begin, finalization, repair, resume, or Publish effects.
 - There is no code-path reservation or automatic merge. Two Runs may produce overlapping Candidates; Publish resolves overlap.
 - Pi for one Run cannot read another Run workspace or session/runtime area.
 
 ## Durable Host-turn ownership
 
 - An active composite turn is owned by stable `hostTurnId + turnToken + revision`.
-- `CLAIMING` is written before Action claim. It binds the action and 30-minute deadline without exposing the worktree.
-- `AWAITING_REVIEW` is written only after claim/reconciliation and adds `claimId + reviewAttemptId`; only this stage may yield `REVIEW_REQUIRED` with `worktreePath`.
+- One CAS mutation validates current Review context and writes `REVIEWING + AWAITING_REVIEW + reviewAttemptId + deadlineAt`; only this stage may yield `REVIEW_REQUIRED` with `worktreePath`.
 - `AWAITING_USER_INPUT` durably records a pause that only the owning Host may answer through `smartflow_review_turn` with the active `turnToken`; public `smartflow_resume` cannot answer or bypass this checkpoint.
 - A different Host ID is rejected. A stale token causes no mutation and receives current no-path `NOT_READY`.
-- Claim renewal occurs every 60 seconds or 30 seconds before lease expiry. Retry after transient failure is 1 second; three failures pause the Run safely.
+- The only Review timer is the durable 30-minute deadline. No short claim lease or renew loop exists.
 
 ## Pi Attempt/session behavior
 
@@ -46,10 +45,10 @@ Relative, absolute, and symlink aliases that identify the same file resolve to t
 ## Review-turn recovery authority
 
 1. On Daemon startup, `ProjectRuntime` advances its runtime epoch under CAS.
-2. If a Run has durable `hostTurn`, `HostTurnCoordinator.recoverRun()` is the sole authority for claim reconciliation, deadline/lease checks, and renewal restoration.
+2. If a Run has durable `hostTurn`, `HostTurnCoordinator.recoverRun()` is the sole authority for restoring the Review turn and checking its single 30-minute deadline.
 3. `ProjectRuntime` then rereads fresh state. While `hostTurn` remains, it MUST NOT schedule ordinary pipeline/publish/cancel recovery for that Run.
-4. `CLAIMING` recovery either reconciles the existing claimed Action, reissues the idempotent claim, clears an unclaimed expired intent, or pauses an expired active claim.
-5. `AWAITING_REVIEW` recovery restores renewal or durably pauses an expired deadline/lease. `AWAITING_USER_INPUT` requires no background action and remains available to the owning Host.
+4. `AWAITING_REVIEW` recovery preserves the same owner, token, Review attempt, Reviewer session binding, and deadline. An expired deadline is durably converted to a typed user-input pause; recovery never recreates an Action or starts a lease-renewal loop.
+5. `AWAITING_USER_INPUT` requires no background action and remains available only to the owning Host.
 6. `state.json`, not in-memory queues/timers, Host requests, or Pi/Reviewer session files, is the recovery truth.
 
 ## Publish serialization

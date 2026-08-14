@@ -21,7 +21,6 @@ const stableActions: ReadonlyArray<[RunPhase, RecoveryAction]> = [
   ["RUNNING", "RESUME_WORKER"],
   ["FIXING", "PREPARE_REPAIR"],
   ["REVIEW_PENDING", "WAIT_FOR_HOST"],
-  ["REVIEWING", "WAIT_FOR_HOST"],
   ["LEADER_DECISION", "WAIT_FOR_LEADER"],
   ["READY_TO_PUBLISH", "RECHECK_PUBLISH_READINESS"],
   ["PAUSED", "NONE"]
@@ -45,6 +44,30 @@ describe("phase-complete crash recovery", () => {
     expect(first.action).toBe(expectedAction);
     expect(second.action).toBe(expectedAction);
     expect((await store.readState()).stateVersion).toBe(before.stateVersion);
+  });
+
+  it("safely pauses REVIEWING when its durable Host turn is missing", async () => {
+    const harness = await createRuntimeHarness();
+    harnesses.push(harness);
+    const store = await createLifecycleStore(harness, "REVIEWING");
+    const before = await store.readState();
+
+    const first = await new RecoveryManager(store, runtime).recover("job-1");
+    expect(first).toMatchObject({
+      phase: "PAUSED",
+      action: "BLOCKED",
+      reason: "HOST_REVIEW_UNAVAILABLE:REVIEW_TURN_STATE_MISSING"
+    });
+    const paused = await store.readState();
+    expect(paused.stateVersion).toBe(before.stateVersion + 1);
+    expect(paused.runs["job-1"]).toMatchObject({
+      phase: "PAUSED",
+      pause: { code: "HOST_REVIEW_UNAVAILABLE" }
+    });
+
+    expect(await new RecoveryManager(store, runtime).recover("job-1"))
+      .toMatchObject({ phase: "PAUSED", action: "NONE" });
+    expect((await store.readState()).stateVersion).toBe(paused.stateVersion);
   });
 
   it.each(["CANCELED", "FAILED"] as const)(

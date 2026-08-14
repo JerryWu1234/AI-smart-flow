@@ -9,8 +9,6 @@ import {
   structuredErrorSchema
 } from "./common.js";
 import {
-  hostActionSchema,
-  repairItemSchema,
   runPhaseSchema,
   runSummarySchema
 } from "./run-state.js";
@@ -64,48 +62,6 @@ export const statusInputSchema = z
   .object({ projectId: identifierSchema, jobId: identifierSchema })
   .strict();
 export const statusOutputSchema = runSummarySchema;
-
-export const waitInputSchema = z
-  .object({
-    projectId: identifierSchema,
-    jobId: identifierSchema,
-    afterStateVersion: nonNegativeIntegerSchema,
-    timeoutMs: z.number().int().min(0).max(30_000)
-  })
-  .strict();
-export const waitOutputSchema = z
-  .object({
-    changed: z.boolean(),
-    stateVersion: nonNegativeIntegerSchema,
-    summary: runSummarySchema
-  })
-  .strict();
-
-export const claimActionInputSchema = stateMutationSchema.extend({
-  actionId: identifierSchema,
-  hostTurnId: identifierSchema
-});
-export const claimedHostActionSchema = hostActionSchema.extend({
-  worktreePath: z.string().min(1)
-});
-export const claimActionOutputSchema = z
-  .object({
-    claimId: identifierSchema,
-    action: claimedHostActionSchema,
-    stateVersion: nonNegativeIntegerSchema,
-    expiresAt: z.iso.datetime({ offset: true })
-  })
-  .strict();
-
-export const renewActionClaimInputSchema = stateMutationSchema.extend({
-  actionId: identifierSchema,
-  claimId: identifierSchema,
-  hostTurnId: identifierSchema
-});
-export const renewActionClaimOutputSchema = mutationResultSchema.extend({
-  phase: z.literal("REVIEWING"),
-  expiresAt: z.iso.datetime({ offset: true })
-});
 
 const findingSchema = z
   .object({
@@ -176,68 +132,6 @@ export const reviewSubmissionInputSchema = z.union([
   reviewSubmissionSchema,
   taskCompletionReviewSchema
 ]);
-
-export const reviewResultSubmitInputSchema = stateMutationSchema.extend({
-  claimId: identifierSchema,
-  reviewAttemptId: identifierSchema,
-  taskSourceHash: sha256Schema,
-  candidateHash: sha256Schema,
-  reviewerSessionId: identifierSchema,
-  result: reviewSubmissionInputSchema
-});
-export const reviewResultSubmitOutputSchema = mutationResultSchema.extend({
-  reviewHash: sha256Schema,
-  reviewAttemptId: identifierSchema,
-  reviewerSessionId: identifierSchema,
-  result: reviewSubmissionSchema
-});
-
-export const reportHostUnavailableInputSchema = stateMutationSchema.extend({
-  claimId: identifierSchema,
-  hostUnavailableReason: z.string().min(1)
-});
-export const reportHostUnavailableOutputSchema = mutationResultSchema;
-export const submitReviewInputSchema = z.union([
-  reviewResultSubmitInputSchema,
-  reportHostUnavailableInputSchema
-]);
-export const submitReviewOutputSchema = z.union([
-  reviewResultSubmitOutputSchema,
-  reportHostUnavailableOutputSchema
-]);
-
-export const submitLeaderDecisionInputSchema = stateMutationSchema.extend({
-  reviewHash: sha256Schema,
-  decision: z.enum(["accept", "repair", "pause"]),
-  repairItems: z.array(repairItemSchema).default([]),
-  reason: z.string().trim().min(1)
-}).superRefine((input, context) => {
-  const repairItemKeys = input.repairItems.map((item) => item.source === "reviewer"
-    ? `reviewer:${item.findingFingerprint}`
-    : `leader:${item.code}:${item.taskId}:${item.path ?? ""}`);
-  if (new Set(repairItemKeys).size !== repairItemKeys.length) {
-    context.addIssue({
-      code: "custom",
-      path: ["repairItems"],
-      message: "repair items must be unique"
-    });
-  }
-  if (input.decision === "repair" && input.repairItems.length === 0) {
-    context.addIssue({
-      code: "custom",
-      path: ["repairItems"],
-      message: "repair requires at least one repair item"
-    });
-  }
-  if (input.decision !== "repair" && input.repairItems.length > 0) {
-    context.addIssue({
-      code: "custom",
-      path: ["repairItems"],
-      message: "only repair decisions may contain repair items"
-    });
-  }
-});
-export const submitLeaderDecisionOutputSchema = mutationResultSchema;
 
 export const resumeActionSchema = z.enum([
   "approve_new_manifest_revision",
@@ -547,22 +441,8 @@ export type ExecuteInput = z.infer<typeof executeInputSchema>;
 export type ExecuteOutput = z.infer<typeof executeOutputSchema>;
 export type StatusInput = z.infer<typeof statusInputSchema>;
 export type StatusOutput = z.infer<typeof statusOutputSchema>;
-export type WaitInput = z.infer<typeof waitInputSchema>;
-export type WaitOutput = z.infer<typeof waitOutputSchema>;
-export type ClaimActionInput = z.infer<typeof claimActionInputSchema>;
-export type ClaimActionOutput = z.infer<typeof claimActionOutputSchema>;
-export type RenewActionClaimInput = z.infer<typeof renewActionClaimInputSchema>;
-export type RenewActionClaimOutput = z.infer<typeof renewActionClaimOutputSchema>;
-export type SubmitReviewInput = z.infer<typeof submitReviewInputSchema>;
-export type ReviewResultSubmitInput = z.infer<typeof reviewResultSubmitInputSchema>;
-export type SubmitReviewOutput = z.infer<typeof submitReviewOutputSchema>;
-export type ReviewResultSubmitOutput = z.infer<typeof reviewResultSubmitOutputSchema>;
-export type ReportHostUnavailableInput = z.infer<typeof reportHostUnavailableInputSchema>;
-export type ReportHostUnavailableOutput = z.infer<typeof reportHostUnavailableOutputSchema>;
 export type ReviewSubmission = z.infer<typeof reviewSubmissionSchema>;
 export type TaskCompletionReview = z.infer<typeof taskCompletionReviewSchema>;
-export type SubmitLeaderDecisionInput = z.infer<typeof submitLeaderDecisionInputSchema>;
-export type SubmitLeaderDecisionOutput = z.infer<typeof submitLeaderDecisionOutputSchema>;
 export type ResumeInput = z.infer<typeof resumeInputSchema>;
 export type ResumeOutput = z.infer<typeof resumeOutputSchema>;
 export type CancelInput = z.infer<typeof cancelInputSchema>;

@@ -9,27 +9,21 @@ import { redactPiValue } from "@smartflow/provider-pi";
 
 import {
   cancelInputSchema,
-  claimActionInputSchema,
   executeInputSchema,
   hostActionSchema,
   resultOutputSchema,
   resultInputSchema,
-  reportHostUnavailableInputSchema,
-  renewActionClaimInputSchema,
   resumeInputSchema,
   reviewTurnInputSchema,
   statusInputSchema,
-  submitLeaderDecisionInputSchema,
   type ArtifactRef,
   type CancelInput,
   type ExecuteInput,
   type HostAction,
-  type ReviewResultSubmitInput,
   type ResumeInput,
   type ResultOutput,
   type RunSummary
 } from "@smartflow/protocol";
-import { deriveRepairApproval } from "@smartflow/review";
 import {
   StateStore,
   canonicalHash,
@@ -44,11 +38,13 @@ import {
 } from "@smartflow/task-manifest";
 import { cleanupGitRunTemporaryState } from "@smartflow/workspace";
 
+import { createApprovedRevision } from "./approved-revision.js";
+import { observeApprovedSource } from "./approved-source.js";
 import type { IpcRequest, IpcRequestHandler } from "./local-ipc-server.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
 import { HostTurnCoordinator } from "./host-turn-coordinator.js";
-import { ReviewCoordinator } from "./review-coordinator.js";
 import { verifyRunArtifacts } from "./recovery-manager.js";
+import { ReviewCoordinator } from "./review-coordinator.js";
 
 export interface ProjectPipelineContext {
   store: StateStore;
@@ -143,43 +139,6 @@ async function readCanonicalRegularFile(canonicalRoot: string, canonicalPath: st
   } finally {
     await handle?.close();
   }
-}
-
-interface ApprovedSourceObservation {
-  approvedHash: string | undefined;
-  observedHash: string;
-  matches: boolean;
-}
-
-async function observeApprovedSource(state: ProjectState, jobId: string): Promise<ApprovedSourceObservation> {
-  const run = state.runs[jobId];
-  const path = typeof run?.approvedTasks?.path === "string" ? run.approvedTasks.path : undefined;
-  const approvedHash = typeof run?.approvedTasks?.sourceHash === "string"
-    ? run.approvedTasks.sourceHash
-    : undefined;
-  if (path === undefined || approvedHash === undefined) {
-    return { approvedHash, observedHash: "UNAVAILABLE", matches: false };
-  }
-  try {
-    const bytes = await open(path, constants.O_RDONLY | constants.O_NONBLOCK).then(async (handle) => {
-      try {
-        const metadata = await handle.stat();
-        if (!metadata.isFile()) throw new Error("TASK_SOURCE_NOT_REGULAR");
-        return await handle.readFile();
-      } finally {
-        await handle.close();
-      }
-    });
-    const observedHash = sha256Bytes(bytes);
-    return { approvedHash, observedHash, matches: observedHash === approvedHash };
-  } catch {
-    return { approvedHash, observedHash: "UNAVAILABLE", matches: false };
-  }
-}
-
-function isApprovedSourceDriftResponse(value: unknown): value is { approvedSourceDrift: true } {
-  return typeof value === "object" && value !== null &&
-    (value as { approvedSourceDrift?: unknown }).approvedSourceDrift === true;
 }
 
 function approvedSourceDriftResumePhase(run: RunRecord): RunRecord["phase"] | undefined {
@@ -290,12 +249,6 @@ function closedResumeRoute(
       return new Set(["PAUSED_PROCESS_RECONCILIATION", "CANCEL_RETRY_REQUIRED"]).has(code ?? "")
         ? { phase: "CANCELING", schedule: "cancel" }
         : undefined;
-    case "resume_review_decision":
-      return (
-        code === "AUTOMATIC_REPAIR_LIMIT" || code === "LEADER_PAUSED"
-      ) && run.review !== undefined
-        ? { phase: "LEADER_DECISION", schedule: "none" }
-        : undefined;
     case "retry_provider_probe":
       return code === "PROVIDER_UNAVAILABLE"
         ? { phase: "PREPARING", schedule: "pipeline" }
@@ -364,6 +317,11 @@ function resumeSchedule(
     case "resume":
       return "recover";
     case "resume_review_decision":
+      return phase === "FIXING"
+        ? "pipeline"
+        : phase === "READY_TO_PUBLISH"
+          ? "publish"
+          : "none";
     case "retry_host_review":
     case "retry":
     case "leader_append_repair_tasks":
@@ -410,19 +368,12 @@ export class ProjectRuntime {
     this.hostTurns = new HostTurnCoordinator({
       store: (projectId): StateStore => this.store(projectId),
       status: (input): Promise<unknown> => this.status(input),
-      wait: (input): Promise<unknown> => this.wait(input),
-      claim: (input, internalOptions): Promise<unknown> =>
-        this.claimAction(input, internalOptions),
-      renew: (input, internalOptions): Promise<unknown> =>
-        this.renewActionClaim(input, internalOptions),
-      submitReview: (input, internalOptions): Promise<unknown> =>
-        this.submitReview(input, internalOptions),
-      reportHostUnavailable: (input, internalOptions): Promise<unknown> =>
-        this.reportHostUnavailable(input, internalOptions),
-      submitLeaderDecision: (input, internalOptions): Promise<unknown> =>
-        this.submitLeaderDecision(input, internalOptions),
       resume: (input, internalOptions): Promise<unknown> => this.resume(input, internalOptions),
-      result: (input): Promise<unknown> => this.result(input)
+      result: (input): Promise<unknown> => this.result(input),
+      schedule: ({ projectId, jobId, state, kind }): void => {
+        const store = this.store(projectId);
+        this.schedule(this.pipelineContext(store, projectId, jobId, state), kind);
+      }
     });
   }
 
@@ -474,7 +425,7 @@ export class ProjectRuntime {
     for (const entry of entries) {
       if (!entry.isDirectory() || !/^project-[a-f0-9]{40}$/u.test(entry.name)) continue;
       const store = this.store(entry.name);
-      const initial = await store.readState();
+      const initial = await store.migrateState();
       for (const run of Object.values(initial.runs)) {
         if (new Set(["COMPLETED", "CANCELED", "FAILED"]).has(run.phase)) {
           await cleanupGitRunTemporaryState(store.dataDirectory, run);
@@ -544,7 +495,7 @@ export class ProjectRuntime {
     const projectId = projectIdForRoot(canonicalRoot);
     const store = this.store(projectId);
     await store.initialize({
-      schemaVersion: 4,
+      schemaVersion: 5,
       projectId,
       canonicalProjectRoot: canonicalRoot,
       stateVersion: 0,
@@ -676,227 +627,10 @@ export class ProjectRuntime {
     };
   }
 
-  public async wait(input: { projectId: string; jobId: string; afterStateVersion: number; timeoutMs: number }): Promise<unknown> {
-    const deadline = Date.now() + input.timeoutMs;
-    let summary = await this.status(input);
-    while (summary.stateVersion <= input.afterStateVersion && Date.now() < deadline) {
-      await new Promise<void>((settle) => {
-        const timer = setTimeout(settle, Math.min(50, Math.max(1, deadline - Date.now())));
-        timer.unref();
-      });
-      summary = await this.status(input);
-    }
-    return {
-      changed: summary.stateVersion > input.afterStateVersion,
-      stateVersion: summary.stateVersion,
-      summary
-    };
-  }
-
-  private async claimAction(
-    input: ReturnType<typeof claimActionInputSchema.parse>,
-    internalOptions: { expectedHostTurnToken?: string } = {}
-  ): Promise<unknown> {
-    const store = this.store(input.projectId);
-    const mutationPayload = Object.keys(internalOptions).length === 0
-      ? input
-      : { ...input, internalOptions };
-    const mutation = await this.mutate<unknown>(
-      store,
-      input.requestId,
-      mutationPayload,
-      input.expectedStateVersion,
-      input.expectedRevision,
-      async (state) => {
-        const run = await this.assertRunArtifacts(store, state, input.jobId);
-        this.assertHostTurnAuthority(
-          run,
-          internalOptions.expectedHostTurnToken,
-          input.hostTurnId
-        );
-        const coordinator = new ReviewCoordinator(store);
-        const observation = await observeApprovedSource(state, input.jobId);
-        if (!observation.matches) {
-          return coordinator.pauseForApprovedSourceDrift(state, input.jobId, observation);
-        }
-        const review = coordinator.claim(state, input);
-        return { nextState: review.nextState, response: review.response };
-      });
-    if (isApprovedSourceDriftResponse(mutation.response)) {
-      throw new ProjectRuntimeError("APPROVED_SOURCE_DRIFT", "Approved tasks source changed before Review claim");
-    }
-    return mutation.response;
-  }
-
-  private async renewActionClaim(
-    input: ReturnType<typeof renewActionClaimInputSchema.parse>,
-    internalOptions: { expectedHostTurnToken?: string } = {}
-  ): Promise<unknown> {
-    const store = this.store(input.projectId);
-    const mutationPayload = Object.keys(internalOptions).length === 0
-      ? input
-      : { ...input, internalOptions };
-    const mutation = await this.mutate<unknown>(
-      store,
-      input.requestId,
-      mutationPayload,
-      input.expectedStateVersion,
-      input.expectedRevision,
-      async (state) => {
-        const run = await this.assertRunArtifacts(store, state, input.jobId);
-        this.assertHostTurnAuthority(
-          run,
-          internalOptions.expectedHostTurnToken,
-          input.hostTurnId
-        );
-        const coordinator = new ReviewCoordinator(store);
-        const observation = await observeApprovedSource(state, input.jobId);
-        if (!observation.matches) {
-          return coordinator.pauseForApprovedSourceDrift(state, input.jobId, observation);
-        }
-        const renewal = coordinator.renewClaim(state, input);
-        return { nextState: renewal.nextState, response: renewal.response };
-      }
-    );
-    if (isApprovedSourceDriftResponse(mutation.response)) {
-      throw new ProjectRuntimeError(
-        "APPROVED_SOURCE_DRIFT",
-        "Approved tasks source changed before Review claim renewal"
-      );
-    }
-    return mutation.response;
-  }
-
-  private async submitReview(
-    input: ReviewResultSubmitInput,
-    internalOptions: { expectedHostTurnToken?: string } = {}
-  ): Promise<unknown> {
-    const store = this.store(input.projectId);
-    const mutationPayload = Object.keys(internalOptions).length === 0
-      ? input
-      : { ...input, internalOptions };
-    const mutation = await this.mutate<unknown>(
-      store,
-      input.requestId,
-      mutationPayload,
-      input.expectedStateVersion,
-      input.expectedRevision,
-      async (state) => {
-        const run = await this.assertRunArtifacts(store, state, input.jobId);
-        this.assertHostTurnAuthority(run, internalOptions.expectedHostTurnToken);
-        const coordinator = new ReviewCoordinator(store);
-        const observation = await observeApprovedSource(state, input.jobId);
-        if (!observation.matches) {
-          return coordinator.pauseForApprovedSourceDrift(state, input.jobId, observation);
-        }
-        const review = await coordinator.submitReview(state, input);
-        return { nextState: review.nextState, response: review.response };
-      }
-    );
-    if (isApprovedSourceDriftResponse(mutation.response)) {
-      throw new ProjectRuntimeError("APPROVED_SOURCE_DRIFT", "Approved tasks source changed before Review submission");
-    }
-    return mutation.response;
-  }
-
-  private async reportHostUnavailable(
-    input: ReturnType<typeof reportHostUnavailableInputSchema.parse>,
-    internalOptions: { expectedHostTurnToken?: string } = {}
-  ): Promise<unknown> {
-    const store = this.store(input.projectId);
-    const mutationPayload = Object.keys(internalOptions).length === 0
-      ? input
-      : { ...input, internalOptions };
-    return (await this.mutate(
-      store,
-      input.requestId,
-      mutationPayload,
-      input.expectedStateVersion,
-      input.expectedRevision,
-      (state) => {
-        const run = state.runs[input.jobId];
-        if (run === undefined) {
-          throw new ProjectRuntimeError("RUN_NOT_FOUND", `Unknown run: ${input.jobId}`);
-        }
-        this.assertHostTurnAuthority(run, internalOptions.expectedHostTurnToken);
-        return new ReviewCoordinator(store).reportHostUnavailable(state, input);
-      }
-    )).response;
-  }
-
-  private async submitLeaderDecision(
-    input: ReturnType<typeof submitLeaderDecisionInputSchema.parse>,
-    internalOptions: {
-      automaticRepair?: boolean;
-      clearHostTurn?: boolean;
-      pauseCause?: "AUTOMATIC_REPAIR_LIMIT" | "INVALID_REVIEW";
-      expectedHostTurnToken?: string;
-    } = {}
-  ): Promise<unknown> {
-    const store = this.store(input.projectId);
-    const mutationPayload = Object.keys(internalOptions).length === 0
-      ? input
-      : { ...input, internalOptions };
-    const mutation = await this.mutate<unknown>(
-      store,
-      input.requestId,
-      mutationPayload,
-      input.expectedStateVersion,
-      input.expectedRevision,
-      async (state) => {
-        const run = await this.assertRunArtifacts(store, state, input.jobId);
-        this.assertHostTurnAuthority(run, internalOptions.expectedHostTurnToken);
-        const coordinator = new ReviewCoordinator(store);
-        const observation = await observeApprovedSource(state, input.jobId);
-        if (!observation.matches) {
-          return coordinator.pauseForApprovedSourceDrift(state, input.jobId, observation);
-        }
-        const review = await coordinator.submitLeaderDecision(state, input);
-        const decidedRun = review.nextState.runs[input.jobId];
-        if (decidedRun === undefined) throw new ProjectRuntimeError("RUN_NOT_FOUND", input.jobId);
-        const adjustedRun: RunRecord = {
-          ...decidedRun,
-          ...(internalOptions.automaticRepair === true && input.decision === "repair"
-            ? { autoRepairRounds: (decidedRun.autoRepairRounds ?? 0) + 1 }
-            : {}),
-          ...(internalOptions.pauseCause === "AUTOMATIC_REPAIR_LIMIT"
-            ? {
-                pause: {
-                  code: "AUTOMATIC_REPAIR_LIMIT",
-                  resumeActions: ["resume_review_decision", "cancel"]
-                }
-              }
-            : internalOptions.pauseCause === "INVALID_REVIEW"
-              ? { pause: { code: "INVALID_REVIEW", resumeActions: ["cancel"] } }
-              : {}),
-          ...(internalOptions.clearHostTurn === true ? { hostTurn: undefined } : {})
-        };
-        return {
-          nextState: {
-            ...review.nextState,
-            runs: { ...review.nextState.runs, [input.jobId]: adjustedRun }
-          },
-          response: review.response
-        };
-      }
-    );
-    if (isApprovedSourceDriftResponse(mutation.response)) {
-      throw new ProjectRuntimeError("APPROVED_SOURCE_DRIFT", "Approved tasks source changed before Leader decision");
-    }
-    if (!mutation.replayed && (input.decision === "accept" || input.decision === "repair")) {
-      this.schedule(
-        this.pipelineContext(store, input.projectId, input.jobId, mutation.state),
-        input.decision === "accept" ? "publish" : "pipeline"
-      );
-    }
-    return mutation.response;
-  }
-
   private async resume(
     input: ReturnType<typeof resumeInputSchema.parse>,
     internalOptions: {
       clearHostTurn?: boolean;
-      resetAutoRepairRounds?: boolean;
       expectedHostTurnToken?: string;
     } = {}
   ): Promise<unknown> {
@@ -906,8 +640,6 @@ export class ProjectRuntime {
         `${input.resumeAction} is exposed through status/result and cannot mutate Run state`
       );
     }
-    const resetAutoRepairRounds = internalOptions.resetAutoRepairRounds === true ||
-      input.resumeAction === "resume_review_decision";
     const store = this.store(input.projectId);
     const mutationPayload = Object.keys(internalOptions).length === 0
       ? input
@@ -986,98 +718,38 @@ export class ProjectRuntime {
         }
         if (input.resumeAction === "approve_new_manifest_revision") {
           if (revisionSource === undefined || input.approval === undefined) {
-            throw new ProjectRuntimeError("REVISION_APPROVAL_INCOMPLETE", "New Revision requires source and approval");
-          }
-          const { canonicalPath: path, sourceBytes: bytes } = revisionSource;
-          const expectedSourceHash = input.approval.kind === "LEADER_REPAIR"
-            ? publicRepairDraft(run)?.sourceHash
-            : input.approvedSourceHash?.replace(/^sha256:/u, "");
-          if (expectedSourceHash === undefined || sha256Bytes(bytes) !== expectedSourceHash) {
-            throw new ProjectRuntimeError("APPROVED_SOURCE_DRIFT", "tasks source differs from approval");
-          }
-          if (input.approval.kind === "LEADER_REPAIR" && path !== run.canonicalTaskPath) {
             throw new ProjectRuntimeError(
-              "REPAIR_TASKS_PATH_CHANGED",
-              "Leader repair must update the same approved tasks.md"
+              "REVISION_APPROVAL_INCOMPLETE",
+              "New Revision requires source and approval"
             );
           }
           const previous = taskManifestSchema.parse(JSON.parse(
             new TextDecoder().decode(await store.readArtifact(run.taskManifest))
           ));
-          const providerRuntimeConfig = this.resolveProviderRuntimeConfig(
-            previous.providerRuntimeConfigHash
-          );
-          const provisional = compileTaskManifest(bytes, {
-            projectId: state.projectId,
-            jobId: run.jobId,
-            revision: run.revision + 1,
-            canonicalTaskPath: previous.canonicalTaskPath,
-            providerRuntimeConfig,
-            allowNoChange: previous.allowNoChange,
-            approval: {
-              kind: input.approval.kind,
-              approvedAt: now(),
-              parentRevision: input.approval.parentRevision,
-              authorizedCriterionIds: input.approval.authorizedCriterionIds
-            }
-          });
-          if (
-            provisional.manifest.providerRuntimeConfigHash !==
-            previous.providerRuntimeConfigHash
-          ) {
+          const expectedSourceHash = input.approval.kind === "LEADER_REPAIR"
+            ? publicRepairDraft(run)?.sourceHash
+            : input.approvedSourceHash;
+          if (expectedSourceHash === undefined) {
             throw new ProjectRuntimeError(
-              "PROVIDER_CONFIG_UNAVAILABLE",
-              `Registered Provider configuration does not match ${previous.providerRuntimeConfigHash}`
+              "REVISION_APPROVAL_INCOMPLETE",
+              "New Revision requires an approved source hash"
             );
           }
-          const derived = deriveRepairApproval(previous, provisional.manifest);
-          if (
-            input.approval.kind !== derived.kind ||
-            (derived.kind === "LEADER_REPAIR" &&
-              (input.approval.parentRevision !== derived.parentRevision ||
-               canonicalHash(input.approval.authorizedCriterionIds) !== canonicalHash(derived.authorizedCriterionIds)))
-          ) {
-            throw new ProjectRuntimeError("REPAIR_APPROVAL_MISMATCH", derived.reasons.join(",") || "approval binding mismatch");
-          }
-          const taskManifest = await store.writeArtifact(
-            `runs/${run.jobId}/revision-${String(run.revision + 1)}/task-manifest.json`,
-            provisional.artifactBytes
-          );
-          const taskSource = await store.writeArtifact(
-            `runs/${run.jobId}/revision-${String(run.revision + 1)}/task-source.md`,
-            bytes
-          );
-          const clean: RunRecord = {
-            jobId: run.jobId,
-            canonicalTaskPath: run.canonicalTaskPath,
-            fence: run.fence,
-            phase: "PREPARING",
-            revision: run.revision + 1,
-            taskManifest,
-            taskSource,
-            baseline: run.baseline,
-            gitWorkspace: run.gitWorkspace,
-            approvedTasks: {
-              path: resolve(store.dataDirectory, taskSource.relativePath),
-              sourceHash: provisional.manifest.sourceHash
-            },
-            workerAttempts: run.workerAttempts,
-            noProgressCount: run.noProgressCount,
-            autoRepairRounds: resetAutoRepairRounds
-              ? 0
-              : (run.autoRepairRounds ?? 0),
-            reviewHistory: run.reviewHistory,
-            ...(run.recovery?.repairRound === undefined
-              ? {}
-              : {
-                  recovery: {
-                    repairRound: run.recovery.repairRound,
-                    parentRevision: run.revision
-                  }
-                }),
-            createdAt: run.createdAt,
-            updatedAt: now()
-          };
+          const clean = await createApprovedRevision({
+            store,
+            state,
+            run,
+            sourceBytes: revisionSource.sourceBytes,
+            sourcePath: revisionSource.canonicalPath,
+            expectedSourceHash,
+            approval: input.approval,
+            providerRuntimeConfig: this.resolveProviderRuntimeConfig(
+              previous.providerRuntimeConfigHash
+            ),
+            fail: (code, message): never => {
+              throw new ProjectRuntimeError(code, message);
+            }
+          });
           return {
             nextState: { ...state, runs: { ...state.runs, [run.jobId]: clean } },
             response: {
@@ -1086,6 +758,33 @@ export class ProjectRuntime {
               revision: clean.revision,
               stateVersion: nextStateVersion,
               phase: clean.phase
+            }
+          };
+        }
+        if (input.resumeAction === "resume_review_decision") {
+          if (
+            !new Set(["AUTOMATIC_REPAIR_LIMIT", "LEADER_PAUSED"]).has(run.pause.code) ||
+            run.review === undefined
+          ) {
+            throw new ProjectRuntimeError(
+              "RESUME_CODE_ACTION_MISMATCH",
+              `${run.pause.code} cannot execute ${input.resumeAction}`
+            );
+          }
+          const finalized = await new ReviewCoordinator(store).finalizeStoredReview(
+            state,
+            run.jobId,
+            nextStateVersion,
+            { repairRounds: 0, resetAutoRepairRounds: true }
+          );
+          return {
+            nextState: finalized.nextState,
+            response: {
+              projectId: state.projectId,
+              jobId: run.jobId,
+              revision: run.revision,
+              stateVersion: nextStateVersion,
+              phase: finalized.response.phase
             }
           };
         }
@@ -1138,9 +837,6 @@ export class ProjectRuntime {
                     }
                   : {}),
                 ...(internalOptions.clearHostTurn === true ? { hostTurn: undefined } : {}),
-                ...(resetAutoRepairRounds
-                  ? { autoRepairRounds: 0 }
-                  : {}),
                 updatedAt: now()
               }
             }

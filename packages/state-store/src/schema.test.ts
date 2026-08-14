@@ -22,7 +22,7 @@ describe("ProjectState schema and recovery source", () => {
     ).toBe(false);
   });
 
-  it("persists strict Host review turns and automatic repair counts in schema v4", () => {
+  it("persists strict Host review turns and automatic repair counts in schema v5", () => {
     const run = createRunRecord({
       phase: "REVIEWING",
       autoRepairRounds: 7,
@@ -31,8 +31,6 @@ describe("ProjectState schema and recovery source", () => {
         turnToken: "turn-1",
         hostTurnId: "host-turn-1",
         revision: 1,
-        actionId: "review-action-1",
-        claimId: "claim-1",
         reviewAttemptId: "review-attempt-1",
         startedAt: "2026-08-11T10:00:00+00:00",
         deadlineAt: "2026-08-11T10:30:00+00:00"
@@ -52,6 +50,61 @@ describe("ProjectState schema and recovery source", () => {
         }
       }
     }).success).toBe(false);
+  });
+
+  it("migrates v4 Review claim state to one v5 Host turn checkpoint", () => {
+    const run = createRunRecord({
+      phase: "REVIEWING",
+      pendingAction: {
+        type: "REVIEW",
+        actionId: "review-action-1",
+        revision: 1,
+        taskSourceHash: "a".repeat(64),
+        candidateHash: "b".repeat(64),
+        reviewAttemptId: "review-attempt-1",
+        changedPaths: ["src/example.ts"],
+        reviewerSession: { mode: "CREATE" },
+        piSessionId: "pi-session-1",
+        expiresAt: "2026-08-11T10:15:00+00:00",
+        claimId: "claim-1",
+        hostTurnId: "host-turn-1",
+        claimExpiresAt: "2026-08-11T10:05:00+00:00",
+        claimStatus: "CLAIMED"
+      }
+    });
+    const v4 = {
+      ...createProjectState({ runs: { [run.jobId]: run } }),
+      schemaVersion: 4,
+      runs: {
+        [run.jobId]: {
+          ...run,
+          hostTurn: {
+            stage: "AWAITING_REVIEW",
+            turnToken: "turn-1",
+            hostTurnId: "host-turn-1",
+            revision: 1,
+            actionId: "review-action-1",
+            claimId: "claim-1",
+            reviewAttemptId: "review-attempt-1",
+            startedAt: "2026-08-11T10:00:00+00:00",
+            deadlineAt: "2026-08-11T10:30:00+00:00"
+          }
+        }
+      }
+    };
+    const migrated = projectStateSchema.parse(v4);
+    expect(migrated.schemaVersion).toBe(5);
+    expect(migrated.runs[run.jobId]?.hostTurn).toEqual({
+      stage: "AWAITING_REVIEW",
+      turnToken: "turn-1",
+      hostTurnId: "host-turn-1",
+      revision: 1,
+      reviewAttemptId: "review-attempt-1",
+      startedAt: "2026-08-11T10:00:00+00:00",
+      deadlineAt: "2026-08-11T10:30:00+00:00"
+    });
+    expect(migrated.runs[run.jobId]?.pendingAction).not.toHaveProperty("claimId");
+    expect(migrated.runs[run.jobId]?.pendingAction).not.toHaveProperty("claimExpiresAt");
   });
 
   it("persists Pi Attempt session/containment identity and TIMED_OUT", () => {

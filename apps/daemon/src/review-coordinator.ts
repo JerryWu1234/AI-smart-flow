@@ -1,27 +1,25 @@
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+
 import {
+  durableReviewDecisionSchema,
   hostActionSchema,
-  type ClaimActionInput,
-  type ClaimActionOutput,
-  type ReportHostUnavailableInput,
-  type ReportHostUnavailableOutput,
-  type RenewActionClaimInput,
-  type RenewActionClaimOutput,
-  type ReviewResultSubmitInput,
-  type ReviewResultSubmitOutput,
-  type SubmitLeaderDecisionInput,
-  type SubmitLeaderDecisionOutput,
+  type HostAction,
+  type ReviewSubmission,
+  type ReviewTurnInput,
   type TaskCompletionReview
 } from "@smartflow/protocol";
 import {
   assertLeaderDecision,
   evaluateReviewGate,
+  planReviewDecision,
   type ReviewGateDecision,
   type ReviewResultInput
 } from "@smartflow/review";
-import { StateStore, type ProjectState, type RunRecord } from "@smartflow/state-store";
+import { StateStore, type HostTurn, type ProjectState, type RunRecord } from "@smartflow/state-store";
 import { taskManifestSchema } from "@smartflow/task-manifest";
+
+type ReviewInputResult = NonNullable<ReviewTurnInput["review"]>["result"];
 
 interface DurableReviewDecision {
   schemaVersion: 1;
@@ -41,19 +39,58 @@ export interface ReviewMutation<T> {
   response: T;
 }
 
+export interface BeginReviewInput {
+  projectId: string;
+  jobId: string;
+  expectedRevision: number;
+  hostTurnId: string;
+  turnToken: string;
+  deadlineAt: string;
+}
+
+export interface BeginReviewOutput {
+  action: HostAction;
+  worktreePath: string;
+  stateVersion: number;
+}
+
+export interface FinalizeReviewInput {
+  projectId: string;
+  jobId: string;
+  expectedRevision: number;
+  hostTurnId: string;
+  turnToken: string;
+  reviewerSessionId: string;
+  result: ReviewInputResult;
+}
+
+export interface FinalizeReviewOutput {
+  phase: RunRecord["phase"];
+  stateVersion: number;
+  reviewHash: string;
+  result: ReviewSubmission;
+  schedule: "none" | "pipeline" | "publish";
+}
+
 function canonical(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`;
+  return `{${Object.keys(record).sort().map((key) =>
+    `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`;
 }
 
 function hash(value: unknown): string {
   return createHash("sha256").update(canonical(value), "utf8").digest("hex");
 }
 
+function verifyDurableDecision(decision: DurableReviewDecision): boolean {
+  const { reviewHash, ...body } = decision;
+  return hash(body) === reviewHash;
+}
+
 function isTaskCompletionReview(
-  input: ReviewResultSubmitInput["result"]
+  input: ReviewInputResult
 ): input is TaskCompletionReview {
   return "tasks" in input;
 }
@@ -61,7 +98,7 @@ function isTaskCompletionReview(
 function normalizeReviewResult(
   expectedTaskIds: readonly string[],
   changedPaths: readonly string[],
-  input: ReviewResultSubmitInput["result"]
+  input: ReviewInputResult
 ): ReviewResultInput {
   const pathCoverage = Object.fromEntries(changedPaths.map((path) => [path, "FULL" as const]));
   if (!isTaskCompletionReview(input)) return { ...input, pathCoverage };
@@ -97,7 +134,10 @@ function stringField(record: Record<string, unknown> | undefined, key: string): 
   return typeof value === "string" ? value : undefined;
 }
 
-function currentRun(state: ProjectState, input: { projectId: string; jobId: string; expectedRevision: number }): RunRecord {
+function currentRun(
+  state: ProjectState,
+  input: { projectId: string; jobId: string; expectedRevision: number }
+): RunRecord {
   const run = state.runs[input.jobId];
   if (
     state.projectId !== input.projectId ||
@@ -129,7 +169,7 @@ function boundReviewerSession(run: RunRecord): string | undefined {
   return unique[0];
 }
 
-function pendingReviewAction(run: RunRecord): ReturnType<typeof hostActionSchema.parse> | undefined {
+export function pendingReviewAction(run: RunRecord): HostAction | undefined {
   const pending = run.pendingAction;
   if (pending?.type !== "REVIEW") return undefined;
   const parsed = hostActionSchema.safeParse({
@@ -147,121 +187,349 @@ function pendingReviewAction(run: RunRecord): ReturnType<typeof hostActionSchema
   return parsed.success ? parsed.data : undefined;
 }
 
-function verifyDurableDecision(decision: DurableReviewDecision): boolean {
-  const { reviewHash, ...body } = decision;
-  return hash(body) === reviewHash;
+function assertReviewerContext(run: RunRecord, action: HostAction): void {
+  const reviewerSessionId = boundReviewerSession(run);
+  const reviewerSessionMatches = reviewerSessionId === undefined
+    ? action.reviewerSession.mode === "CREATE"
+    : action.reviewerSession.mode === "RESUME" &&
+      action.reviewerSession.reviewerSessionId === reviewerSessionId;
+  if (action.piSessionId !== workerSession(run) || !reviewerSessionMatches) {
+    throw new Error("REVIEW_ACTION_CONTEXT_STALE");
+  }
+  if ((run.reviewHistory ?? []).some(
+    (entry) => stringField(entry, "reviewAttemptId") === action.reviewAttemptId
+  )) {
+    throw new Error("REVIEW_ATTEMPT_REUSED");
+  }
 }
 
 export class ReviewCoordinator {
   public constructor(private readonly store: StateStore) {}
 
-  public claim(
+  public beginReview(
     state: ProjectState,
-    input: ClaimActionInput,
+    input: BeginReviewInput,
+    nextStateVersion: number,
     now = new Date()
-  ): ReviewMutation<ClaimActionOutput> {
+  ): ReviewMutation<BeginReviewOutput> {
     const run = currentRun(state, input);
+    if (run.phase !== "REVIEW_PENDING") throw new Error("REVIEW_ACTION_NOT_CLAIMABLE");
     const action = pendingReviewAction(run);
-    const existingClaimExpiresAt = stringField(run.pendingAction, "claimExpiresAt");
-    const claimAvailable = run.phase === "REVIEW_PENDING" ||
-      (run.phase === "REVIEWING" &&
-        existingClaimExpiresAt !== undefined &&
-        Date.parse(existingClaimExpiresAt) <= now.getTime());
-    if (!claimAvailable || action?.type !== "REVIEW") {
-      throw new Error("REVIEW_ACTION_NOT_CLAIMABLE");
-    }
-    if (run.candidate === undefined || run.workspace === undefined) {
+    if (action === undefined || run.candidate === undefined || run.workspace === undefined) {
       throw new Error("REVIEW_ACTION_CONTEXT_MISSING");
     }
-    const reviewerSessionId = boundReviewerSession(run);
-    const reviewerSessionMatches = reviewerSessionId === undefined
-      ? action.reviewerSession.mode === "CREATE"
-      : action.reviewerSession.mode === "RESUME" &&
-        action.reviewerSession.reviewerSessionId === reviewerSessionId;
-    if (
-      action.piSessionId !== workerSession(run) ||
-      !reviewerSessionMatches
-    ) throw new Error("REVIEW_ACTION_CONTEXT_STALE");
-    if ((run.reviewHistory ?? []).some(
-      (entry) => stringField(entry, "reviewAttemptId") === action.reviewAttemptId
-    )) throw new Error("REVIEW_ATTEMPT_REUSED");
-    if (action.actionId !== input.actionId) {
-      throw new Error("REVIEW_ACTION_NOT_CLAIMABLE");
-    }
-    const claimableAction = {
-      ...action,
-      expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString()
+    assertReviewerContext(run, action);
+    const durableAction: HostAction = { ...action, expiresAt: input.deadlineAt };
+    const hostTurn: HostTurn = {
+      stage: "AWAITING_REVIEW",
+      turnToken: input.turnToken,
+      hostTurnId: input.hostTurnId,
+      revision: run.revision,
+      reviewAttemptId: action.reviewAttemptId,
+      startedAt: now.toISOString(),
+      deadlineAt: input.deadlineAt
     };
-    const claimId = `claim-${randomUUID()}`;
-    const expiresAt = new Date(now.getTime() + 5 * 60_000).toISOString();
-    const updatedAt = now.toISOString();
     const nextRun: RunRecord = {
       ...run,
       phase: "REVIEWING",
-      pendingAction: {
-        ...claimableAction,
-        claimId,
-        hostTurnId: input.hostTurnId,
-        claimExpiresAt: expiresAt,
-        claimStatus: "CLAIMED"
-      },
-      updatedAt
-    };
-    return {
-      nextState: replaceRun(state, nextRun),
-      response: {
-        claimId,
-        action: {
-          ...claimableAction,
-          worktreePath: resolve(this.store.dataDirectory, run.workspace.relativePath)
-        },
-        stateVersion: state.stateVersion + 1,
-        expiresAt
-      }
-    };
-  }
-
-  public renewClaim(
-    state: ProjectState,
-    input: RenewActionClaimInput,
-    now = new Date()
-  ): ReviewMutation<RenewActionClaimOutput> {
-    const run = currentRun(state, input);
-    const action = pendingReviewAction(run);
-    const pending = run.pendingAction;
-    const claimExpiresAt = stringField(pending, "claimExpiresAt");
-    if (
-      run.phase !== "REVIEWING" ||
-      action?.actionId !== input.actionId ||
-      stringField(pending, "claimId") !== input.claimId ||
-      stringField(pending, "hostTurnId") !== input.hostTurnId ||
-      stringField(pending, "claimStatus") !== "CLAIMED" ||
-      claimExpiresAt === undefined
-    ) {
-      throw new Error("REVIEW_CLAIM_STALE_OR_MISMATCHED");
-    }
-    if (Date.parse(claimExpiresAt) <= now.getTime()) {
-      throw new Error("REVIEW_CLAIM_EXPIRED");
-    }
-    const expiresAt = new Date(now.getTime() + 5 * 60_000).toISOString();
-    const nextRun: RunRecord = {
-      ...run,
-      pendingAction: {
-        ...pending,
-        expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString(),
-        claimExpiresAt: expiresAt
-      },
+      pendingAction: durableAction,
+      hostTurn,
       updatedAt: now.toISOString()
     };
     return {
       nextState: replaceRun(state, nextRun),
       response: {
-        projectId: state.projectId,
-        jobId: run.jobId,
-        revision: run.revision,
-        stateVersion: state.stateVersion + 1,
-        phase: "REVIEWING",
-        expiresAt
+        action: durableAction,
+        worktreePath: resolve(this.store.dataDirectory, run.workspace.relativePath),
+        stateVersion: nextStateVersion
+      }
+    };
+  }
+
+  public async finalizeReview(
+    state: ProjectState,
+    input: FinalizeReviewInput,
+    nextStateVersion: number,
+    now = new Date()
+  ): Promise<ReviewMutation<FinalizeReviewOutput>> {
+    const run = currentRun(state, input);
+    const turn = run.hostTurn;
+    const action = pendingReviewAction(run);
+    if (
+      run.phase !== "REVIEWING" ||
+      turn?.stage !== "AWAITING_REVIEW" ||
+      turn.turnToken !== input.turnToken ||
+      turn.hostTurnId !== input.hostTurnId ||
+      action === undefined ||
+      action.reviewAttemptId !== turn.reviewAttemptId
+    ) {
+      throw new Error("REVIEW_TURN_STALE_OR_MISMATCHED");
+    }
+    if (Date.parse(turn.deadlineAt) <= now.getTime()) {
+      throw new Error("REVIEW_DEADLINE_EXPIRED");
+    }
+    if (
+      action.taskSourceHash !== stringField(run.pendingAction, "taskSourceHash") ||
+      action.candidateHash !== stringField(run.pendingAction, "candidateHash")
+    ) {
+      throw new Error("REVIEW_CONTEXT_BINDING_INVALID");
+    }
+    const boundSessionId = boundReviewerSession(run);
+    if (
+      (action.reviewerSession.mode === "CREATE" && boundSessionId !== undefined) ||
+      (action.reviewerSession.mode === "RESUME" &&
+        (boundSessionId === undefined ||
+          action.reviewerSession.reviewerSessionId !== boundSessionId ||
+          input.reviewerSessionId !== boundSessionId))
+    ) {
+      throw new Error("REVIEWER_SESSION_BINDING_MISMATCH");
+    }
+
+    const manifest = taskManifestSchema.parse(JSON.parse(
+      new TextDecoder().decode(await this.store.readArtifact(run.taskManifest))
+    ));
+    const reviewResult = normalizeReviewResult(
+      manifest.enabledTaskIds,
+      action.changedPaths,
+      input.result
+    );
+    const gate = evaluateReviewGate(
+      {
+        reviewAttemptId: action.reviewAttemptId,
+        reviewerSessionId: input.reviewerSessionId,
+        piSessionId: workerSession(run),
+        ...(boundSessionId === undefined ? {} : { boundReviewerSessionId: boundSessionId }),
+        changedPaths: action.changedPaths
+      },
+      reviewResult
+    );
+    const reviewBody = {
+      schemaVersion: 1 as const,
+      revision: run.revision,
+      claimId: turn.turnToken,
+      reviewAttemptId: action.reviewAttemptId,
+      taskSourceHash: action.taskSourceHash,
+      candidateHash: action.candidateHash,
+      reviewerSessionId: input.reviewerSessionId,
+      piSessionId: workerSession(run),
+      gate
+    };
+    const reviewDecision: DurableReviewDecision = {
+      ...reviewBody,
+      reviewHash: hash(reviewBody)
+    };
+    const reviewArtifact = await this.store.writeArtifact(
+      `runs/${run.jobId}/revision-${String(run.revision)}/reviews/${action.reviewAttemptId}.json`,
+      Buffer.from(canonical(reviewDecision), "utf8")
+    );
+
+    const plan = planReviewDecision({
+      result: gate.result,
+      repairRounds: run.autoRepairRounds ?? 0
+    });
+    const repairItems = plan.decision === "repair" ? plan.repairItems : [];
+    assertLeaderDecision(gate, plan.decision, repairItems);
+    const leaderTaskIds = new Set(
+      repairItems.flatMap((item) => item.source === "leader" ? [item.taskId] : [])
+    );
+    if (leaderTaskIds.size > 0) {
+      const currentTaskIds = new Set(manifest.tasks.map((task) => task.id));
+      if ([...leaderTaskIds].some((taskId) => !currentTaskIds.has(taskId))) {
+        throw new Error("LEADER_REPAIR_TASK_UNKNOWN");
+      }
+    }
+    const leaderBody = {
+      schemaVersion: 1 as const,
+      revision: run.revision,
+      reviewHash: reviewDecision.reviewHash,
+      decision: plan.decision,
+      repairItems,
+      reason: plan.reason,
+      decidedAt: now.toISOString()
+    };
+    const decisionHash = hash(leaderBody);
+    const leaderDecision = await this.store.writeArtifact(
+      `runs/${run.jobId}/revision-${String(run.revision)}/leader-decisions/${decisionHash}.json`,
+      Buffer.from(canonical({ ...leaderBody, decisionHash }), "utf8")
+    );
+
+    const phase: RunRecord["phase"] = plan.kind === "ACCEPT"
+      ? "READY_TO_PUBLISH"
+      : plan.kind === "REPAIR"
+        ? "FIXING"
+        : "PAUSED";
+    const pauseCode = plan.kind === "PAUSE_REPAIR_LIMIT"
+      ? "AUTOMATIC_REPAIR_LIMIT"
+      : plan.kind === "PAUSE_INVALID_REVIEW"
+        ? "INVALID_REVIEW"
+        : undefined;
+    const nextHostTurn: HostTurn | undefined = pauseCode === undefined
+      ? undefined
+      : {
+          stage: "AWAITING_USER_INPUT",
+          turnToken: turn.turnToken,
+          hostTurnId: turn.hostTurnId,
+          revision: run.revision,
+          pauseCode,
+          startedAt: now.toISOString()
+        };
+    const nextRun: RunRecord = {
+      ...run,
+      phase,
+      pendingAction: undefined,
+      hostTurn: nextHostTurn,
+      review: reviewArtifact,
+      leaderDecision,
+      reviewHistory: [
+        ...(run.reviewHistory ?? []),
+        {
+          reviewAttemptId: action.reviewAttemptId,
+          reviewerSessionId: input.reviewerSessionId,
+          taskSourceHash: action.taskSourceHash,
+          candidateHash: action.candidateHash,
+          reviewHash: reviewDecision.reviewHash
+        }
+      ],
+      ...(plan.kind === "REPAIR"
+        ? { autoRepairRounds: (run.autoRepairRounds ?? 0) + 1 }
+        : {}),
+      ...(pauseCode === undefined
+        ? { pause: undefined }
+        : {
+            pause: {
+              code: pauseCode,
+              resumeActions: pauseCode === "AUTOMATIC_REPAIR_LIMIT"
+                ? ["resume_review_decision", "cancel"]
+                : ["cancel"]
+            }
+          }),
+      updatedAt: now.toISOString()
+    };
+    return {
+      nextState: replaceRun(state, nextRun),
+      response: {
+        phase,
+        stateVersion: nextStateVersion,
+        reviewHash: reviewDecision.reviewHash,
+        result: gate.result,
+        schedule: plan.kind === "ACCEPT"
+          ? "publish"
+          : plan.kind === "REPAIR"
+            ? "pipeline"
+            : "none"
+      }
+    };
+  }
+
+  public async finalizeStoredReview(
+    state: ProjectState,
+    jobId: string,
+    nextStateVersion: number,
+    options: { repairRounds?: number; resetAutoRepairRounds?: boolean } = {},
+    now = new Date()
+  ): Promise<ReviewMutation<FinalizeReviewOutput>> {
+    const run = state.runs[jobId];
+    const resumableRepairLimit = options.resetAutoRepairRounds === true &&
+      run?.phase === "PAUSED" &&
+      (run.pause?.code === "AUTOMATIC_REPAIR_LIMIT" || run.pause?.code === "LEADER_PAUSED");
+    if (
+      run === undefined ||
+      (run.phase !== "LEADER_DECISION" && !resumableRepairLimit) ||
+      run.review === undefined
+    ) {
+      throw new Error("LEADER_DECISION_NOT_READY");
+    }
+    const decision = durableReviewDecisionSchema.parse(JSON.parse(
+      new TextDecoder().decode(await this.store.readArtifact(run.review))
+    )) as DurableReviewDecision;
+    if (!verifyDurableDecision(decision)) throw new Error("LEADER_REVIEW_BINDING_INVALID");
+    const plan = planReviewDecision({
+      result: decision.gate.result,
+      repairRounds: options.repairRounds ?? run.autoRepairRounds ?? 0
+    });
+    const repairItems = plan.decision === "repair" ? plan.repairItems : [];
+    assertLeaderDecision(decision.gate, plan.decision, repairItems);
+    const manifest = taskManifestSchema.parse(JSON.parse(
+      new TextDecoder().decode(await this.store.readArtifact(run.taskManifest))
+    ));
+    const leaderTaskIds = new Set(
+      repairItems.flatMap((item) => item.source === "leader" ? [item.taskId] : [])
+    );
+    const currentTaskIds = new Set(manifest.tasks.map((task) => task.id));
+    if ([...leaderTaskIds].some((taskId) => !currentTaskIds.has(taskId))) {
+      throw new Error("LEADER_REPAIR_TASK_UNKNOWN");
+    }
+    const leaderBody = {
+      schemaVersion: 1 as const,
+      revision: run.revision,
+      reviewHash: decision.reviewHash,
+      decision: plan.decision,
+      repairItems,
+      reason: plan.reason,
+      decidedAt: now.toISOString()
+    };
+    const decisionHash = hash(leaderBody);
+    const leaderDecision = await this.store.writeArtifact(
+      `runs/${run.jobId}/revision-${String(run.revision)}/leader-decisions/${decisionHash}.json`,
+      Buffer.from(canonical({ ...leaderBody, decisionHash }), "utf8")
+    );
+    const phase: RunRecord["phase"] = plan.kind === "ACCEPT"
+      ? "READY_TO_PUBLISH"
+      : plan.kind === "REPAIR"
+        ? "FIXING"
+        : "PAUSED";
+    const pauseCode = plan.kind === "PAUSE_REPAIR_LIMIT"
+      ? "AUTOMATIC_REPAIR_LIMIT"
+      : plan.kind === "PAUSE_INVALID_REVIEW"
+        ? "INVALID_REVIEW"
+        : undefined;
+    const nextHostTurn: HostTurn | undefined = pauseCode === undefined || run.hostTurn === undefined
+      ? undefined
+      : {
+          stage: "AWAITING_USER_INPUT",
+          turnToken: run.hostTurn.turnToken,
+          hostTurnId: run.hostTurn.hostTurnId,
+          revision: run.revision,
+          pauseCode,
+          startedAt: now.toISOString()
+        };
+    const baseRepairRounds = options.resetAutoRepairRounds === true
+      ? 0
+      : (run.autoRepairRounds ?? 0);
+    const nextRun: RunRecord = {
+      ...run,
+      phase,
+      hostTurn: nextHostTurn,
+      leaderDecision,
+      ...(plan.kind === "REPAIR"
+        ? { autoRepairRounds: baseRepairRounds + 1 }
+        : options.resetAutoRepairRounds === true
+          ? { autoRepairRounds: baseRepairRounds }
+          : {}),
+      ...(pauseCode === undefined
+        ? { pause: undefined }
+        : {
+            pause: {
+              code: pauseCode,
+              resumeActions: pauseCode === "AUTOMATIC_REPAIR_LIMIT"
+                ? ["resume_review_decision", "cancel"]
+                : ["cancel"]
+            }
+          }),
+      updatedAt: now.toISOString()
+    };
+    return {
+      nextState: replaceRun(state, nextRun),
+      response: {
+        phase,
+        stateVersion: nextStateVersion,
+        reviewHash: decision.reviewHash,
+        result: decision.gate.result,
+        schedule: plan.kind === "ACCEPT"
+          ? "publish"
+          : plan.kind === "REPAIR"
+            ? "pipeline"
+            : "none"
       }
     };
   }
@@ -275,23 +543,25 @@ export class ReviewCoordinator {
     const run = state.runs[jobId];
     if (
       run === undefined ||
-      !new Set<RunRecord["phase"]>(["REVIEW_PENDING", "REVIEWING", "LEADER_DECISION"]).has(run.phase)
-    ) throw new Error("REVIEW_SOURCE_DRIFT_BOUNDARY_INVALID");
+      !new Set<RunRecord["phase"]>(["REVIEW_PENDING", "REVIEWING", "LEADER_DECISION"])
+        .has(run.phase)
+    ) {
+      throw new Error("REVIEW_SOURCE_DRIFT_BOUNDARY_INVALID");
+    }
     const action = pendingReviewAction(run);
     if ((run.phase === "REVIEW_PENDING" || run.phase === "REVIEWING") && action === undefined) {
       throw new Error("REVIEW_SOURCE_DRIFT_ACTION_MISSING");
     }
     const resumePhase = run.phase === "REVIEWING" ? "REVIEW_PENDING" : run.phase;
-    const refreshedAction = action?.type === "REVIEW"
-      ? {
-          ...action,
-          actionId: `review-action-${randomUUID()}`,
-          expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString()
-        }
-      : undefined;
+    const refreshedAction = action === undefined ? undefined : {
+      ...action,
+      actionId: `review-action-${randomUUID()}`,
+      expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString()
+    };
     const nextRun: RunRecord = {
       ...run,
       phase: "PAUSED",
+      hostTurn: undefined,
       pause: {
         code: "APPROVED_SOURCE_DRIFT",
         resumeActions: ["approve_new_manifest_revision", "restore_approved_tasks", "cancel"]
@@ -319,224 +589,44 @@ export class ReviewCoordinator {
     };
   }
 
-  public async submitReview(
-    state: ProjectState,
-    input: ReviewResultSubmitInput,
-    now = new Date()
-  ): Promise<ReviewMutation<ReviewResultSubmitOutput | ReportHostUnavailableOutput>> {
-    const run = currentRun(state, input);
-    const pending = run.pendingAction;
-    const action = pendingReviewAction(run);
-    const claimExpiresAt = stringField(pending, "claimExpiresAt");
-    const taskSourceHash = stringField(pending, "taskSourceHash");
-    const candidateHash = stringField(pending, "candidateHash");
-    const claimId = stringField(pending, "claimId");
-    if (
-      run.phase !== "REVIEWING" ||
-      action?.type !== "REVIEW" ||
-      claimId !== input.claimId ||
-      taskSourceHash !== input.taskSourceHash ||
-      candidateHash !== input.candidateHash ||
-      action.reviewAttemptId !== input.reviewAttemptId ||
-      claimExpiresAt === undefined
-    ) {
-      throw new Error("REVIEW_CLAIM_STALE_OR_MISMATCHED");
-    }
-    if (Date.parse(claimExpiresAt) <= now.getTime()) {
-      return this.reportHostUnavailable(state, {
-        requestId: input.requestId,
-        projectId: input.projectId,
-        jobId: input.jobId,
-        expectedRevision: input.expectedRevision,
-        expectedStateVersion: input.expectedStateVersion,
-        claimId: input.claimId,
-        hostUnavailableReason: "HOST_REVIEW_CLAIM_EXPIRED_DURING_EXECUTION"
-      }, now);
-    }
-    if (
-      input.taskSourceHash !== action.taskSourceHash ||
-      input.candidateHash !== action.candidateHash
-    ) {
-      throw new Error("REVIEW_CONTEXT_BINDING_INVALID");
-    }
-    const changedPaths = action.changedPaths;
-    if (canonical(action.changedPaths) !== canonical(changedPaths)) {
-      throw new Error("REVIEW_CHANGED_PATHS_MISMATCH");
-    }
-    const boundSessionId = boundReviewerSession(run);
-    if (
-      (action.reviewerSession.mode === "CREATE" && boundSessionId !== undefined) ||
-      (action.reviewerSession.mode === "RESUME" &&
-        (boundSessionId === undefined ||
-          action.reviewerSession.reviewerSessionId !== boundSessionId ||
-          input.reviewerSessionId !== boundSessionId))
-    ) throw new Error("REVIEWER_SESSION_BINDING_MISMATCH");
-    const manifest = taskManifestSchema.parse(JSON.parse(
-      new TextDecoder().decode(await this.store.readArtifact(run.taskManifest))
-    ));
-    const reviewResult = normalizeReviewResult(
-      manifest.enabledTaskIds,
-      changedPaths,
-      input.result
-    );
-    const gate = evaluateReviewGate(
-      {
-        reviewAttemptId: input.reviewAttemptId,
-        reviewerSessionId: input.reviewerSessionId,
-        piSessionId: workerSession(run),
-        ...(boundSessionId === undefined ? {} : { boundReviewerSessionId: boundSessionId }),
-        changedPaths
-      },
-      reviewResult
-    );
-    const body = {
-      schemaVersion: 1 as const,
-      revision: run.revision,
-      claimId: input.claimId,
-      reviewAttemptId: input.reviewAttemptId,
-      taskSourceHash: input.taskSourceHash,
-      candidateHash: input.candidateHash,
-      reviewerSessionId: input.reviewerSessionId,
-      piSessionId: workerSession(run),
-      gate
-    };
-    const decision: DurableReviewDecision = { ...body, reviewHash: hash(body) };
-    const artifact = await this.store.writeArtifact(
-      `runs/${run.jobId}/revision-${String(run.revision)}/reviews/${input.reviewAttemptId}.json`,
-      Buffer.from(canonical(decision), "utf8")
-    );
-    const nextRun: RunRecord = {
-      ...run,
-      pendingAction: undefined,
-      phase: "LEADER_DECISION",
-      review: artifact,
-      reviewHistory: [
-        ...(run.reviewHistory ?? []),
-        {
-          reviewAttemptId: input.reviewAttemptId,
-          reviewerSessionId: input.reviewerSessionId,
-          taskSourceHash: input.taskSourceHash,
-          candidateHash: input.candidateHash,
-          reviewHash: decision.reviewHash
-        }
-      ],
-      updatedAt: now.toISOString()
-    };
-    return {
-      nextState: replaceRun(state, nextRun),
-      response: {
-        projectId: state.projectId,
-        jobId: run.jobId,
-        revision: run.revision,
-        stateVersion: state.stateVersion + 1,
-        phase: "LEADER_DECISION",
-        reviewHash: decision.reviewHash,
-        reviewAttemptId: input.reviewAttemptId,
-        reviewerSessionId: input.reviewerSessionId,
-        result: gate.result
-      }
-    };
-  }
-
-  public async submitLeaderDecision(
-    state: ProjectState,
-    input: SubmitLeaderDecisionInput,
-    now = new Date()
-  ): Promise<ReviewMutation<SubmitLeaderDecisionOutput>> {
-    const run = currentRun(state, input);
-    if (run.phase !== "LEADER_DECISION" || run.review === undefined) {
-      throw new Error("LEADER_DECISION_NOT_READY");
-    }
-    const decision = JSON.parse(
-      new TextDecoder().decode(await this.store.readArtifact(run.review))
-    ) as DurableReviewDecision;
-    if (!verifyDurableDecision(decision) || decision.reviewHash !== input.reviewHash) {
-      throw new Error("LEADER_REVIEW_BINDING_INVALID");
-    }
-    assertLeaderDecision(
-      decision.gate,
-      input.decision,
-      input.repairItems
-    );
-    const leaderTaskIds = new Set(
-      input.repairItems.flatMap((item) => item.source === "leader" ? [item.taskId] : [])
-    );
-    if (leaderTaskIds.size > 0) {
-      const manifest = taskManifestSchema.parse(JSON.parse(
-        new TextDecoder().decode(await this.store.readArtifact(run.taskManifest))
-      ));
-      const currentTaskIds = new Set(manifest.tasks.map((task) => task.id));
-      if ([...leaderTaskIds].some((taskId) => !currentTaskIds.has(taskId))) {
-        throw new Error("LEADER_REPAIR_TASK_UNKNOWN");
-      }
-    }
-    const phase: RunRecord["phase"] = input.decision === "accept"
-      ? "READY_TO_PUBLISH"
-      : input.decision === "repair"
-        ? "FIXING"
-        : "PAUSED";
-    const leaderBody = {
-      schemaVersion: 1,
-      revision: run.revision,
-      reviewHash: input.reviewHash,
-      decision: input.decision,
-      repairItems: input.repairItems,
-      reason: input.reason,
-      decidedAt: now.toISOString()
-    };
-    const decisionHash = hash(leaderBody);
-    const leaderDecision = await this.store.writeArtifact(
-      `runs/${run.jobId}/revision-${String(run.revision)}/leader-decisions/${decisionHash}.json`,
-      Buffer.from(canonical({ ...leaderBody, decisionHash }), "utf8")
-    );
-    const nextRun: RunRecord = {
-      ...run,
-      phase,
-      leaderDecision,
-      ...(phase === "PAUSED"
-        ? { pause: { code: "LEADER_PAUSED", resumeActions: ["resume_review_decision", "cancel"] } }
-        : { pause: undefined }),
-      updatedAt: now.toISOString()
-    };
-    return {
-      nextState: replaceRun(state, nextRun),
-      response: {
-        projectId: state.projectId,
-        jobId: run.jobId,
-        revision: run.revision,
-        stateVersion: state.stateVersion + 1,
-        phase
-      }
-    };
-  }
-
   public pauseForHostUnavailable(
     state: ProjectState,
     jobId: string,
+    expectedTurnToken: string,
     now = new Date(),
     reason = "Current Host Reviewer is unavailable"
   ): ProjectState {
     const run = state.runs[jobId];
+    const turn = run?.hostTurn;
     if (
       run === undefined ||
-      (run.phase !== "REVIEW_PENDING" && run.phase !== "REVIEWING") ||
+      run.phase !== "REVIEWING" ||
+      turn?.stage !== "AWAITING_REVIEW" ||
+      turn.turnToken !== expectedTurnToken ||
       run.pendingAction === undefined
     ) {
       throw new Error("HOST_REVIEW_ACTION_NOT_ACTIVE");
     }
-    const pendingAction = { ...run.pendingAction };
-    delete pendingAction.claimId;
-    delete pendingAction.hostTurnId;
-    delete pendingAction.claimExpiresAt;
-    delete pendingAction.claimStatus;
+    const action = pendingReviewAction(run);
+    const pendingAction = action === undefined
+      ? run.pendingAction
+      : {
+          ...action,
+          actionId: `review-action-${randomUUID()}`,
+          expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString()
+        };
     return replaceRun(state, {
       ...run,
       phase: "PAUSED",
-      pendingAction: {
-        ...pendingAction,
-        actionId: `review-action-${randomUUID()}`,
-        expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString()
+      hostTurn: {
+        stage: "AWAITING_USER_INPUT",
+        turnToken: turn.turnToken,
+        hostTurnId: turn.hostTurnId,
+        revision: run.revision,
+        pauseCode: "HOST_REVIEW_UNAVAILABLE",
+        startedAt: now.toISOString()
       },
+      pendingAction,
       pause: {
         code: "HOST_REVIEW_UNAVAILABLE",
         resumeActions: ["retry_host_review", "cancel"]
@@ -551,36 +641,5 @@ export class ReviewCoordinator {
       },
       updatedAt: now.toISOString()
     });
-  }
-
-  public reportHostUnavailable(
-    state: ProjectState,
-    input: ReportHostUnavailableInput,
-    now = new Date()
-  ): ReviewMutation<ReportHostUnavailableOutput> {
-    const run = currentRun(state, input);
-    if (
-      run.phase !== "REVIEWING" ||
-      stringField(run.pendingAction, "claimId") !== input.claimId ||
-      run.pendingAction === undefined
-    ) {
-      throw new Error("HOST_REVIEW_CLAIM_STALE");
-    }
-    const nextState = this.pauseForHostUnavailable(
-      state,
-      run.jobId,
-      now,
-      input.hostUnavailableReason
-    );
-    return {
-      nextState,
-      response: {
-        projectId: state.projectId,
-        jobId: run.jobId,
-        revision: run.revision,
-        stateVersion: state.stateVersion + 1,
-        phase: "PAUSED"
-      }
-    };
   }
 }

@@ -17,12 +17,15 @@ import {
 } from "@smartflow/task-manifest";
 import type { Candidate } from "@smartflow/workspace";
 
+import { createApprovedRevision } from "./approved-revision.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
 
-export interface RepairPreparationResult {
-  phase: "PAUSED";
-  code: "REPAIR_NO_PROGRESS" | "REPAIR_TASKS_READY" | "REPAIR_USER_APPROVAL_REQUIRED";
-}
+export type RepairPreparationResult =
+  | { phase: "PREPARING"; revision: number }
+  | {
+      phase: "PAUSED";
+      code: "REPAIR_NO_PROGRESS" | "REPAIR_USER_APPROVAL_REQUIRED";
+    };
 
 function nextTaskNumber(manifest: TaskManifest): number {
   return manifest.tasks.reduce((maximum, task) => {
@@ -229,6 +232,70 @@ export class RepairCoordinator {
       }
     });
     const derived = deriveRepairApproval(parentManifest, provisional.manifest);
+    if (derived.kind === "LEADER_REPAIR") {
+      const attempt = run.workerAttempts.at(-1);
+      const approval = {
+        kind: "LEADER_REPAIR" as const,
+        parentRevision: derived.parentRevision,
+        authorizedCriterionIds: derived.authorizedCriterionIds
+      };
+      const mutation = await this.mutations.mutate(
+        {
+          requestId: `repair:${run.jobId}:r${String(run.revision)}:apply:${provisional.manifest.sourceHash}`,
+          payload: {
+            kind: "apply-approved-repair",
+            sourceHash: provisional.manifest.sourceHash,
+            approval,
+            round: currentRound,
+            noProgressCount: assessed.noProgressCount
+          },
+          expectedJobId: run.jobId,
+          expectedFence: run.fence,
+          expectedRevision: run.revision,
+          ...(attempt === undefined ? {} : { expectedGeneration: attempt.generation }),
+          ...(attempt === undefined ? {} : { expectedAttemptId: attempt.attemptId }),
+          expectedPhases: ["FIXING"]
+        },
+        async (current) => {
+          const active = current.runs[run.jobId];
+          if (active === undefined || active.phase !== "FIXING") {
+            throw new Error("REPAIR_RUN_CHANGED");
+          }
+          const repairRun: RunRecord = {
+            ...active,
+            noProgressCount: assessed.noProgressCount,
+            recovery: {
+              ...active.recovery,
+              repairRound: currentRound,
+              parentRevision: active.revision,
+              untrustedSeedCandidate: active.candidate
+            }
+          };
+          const nextRun = await createApprovedRevision({
+            store: this.store,
+            state: current,
+            run: repairRun,
+            sourceBytes: Buffer.from(repairSource, "utf8"),
+            sourcePath: active.canonicalTaskPath,
+            expectedSourceHash: provisional.manifest.sourceHash,
+            approval,
+            providerRuntimeConfig: this.providerRuntimeConfig,
+            fail: (code, message): never => {
+              throw new Error(`${code}:${message}`);
+            }
+          });
+          return {
+            nextState: {
+              ...current,
+              runs: { ...current.runs, [run.jobId]: nextRun }
+            },
+            response: { phase: "PREPARING" as const, revision: nextRun.revision }
+          };
+        }
+      );
+      return mutation.response;
+    }
+
     const sourceArtifact = await this.store.writeArtifact(
       `runs/${jobId}/revision-${String(run.revision + 1)}/repair-drafts/${provisional.manifest.sourceHash}.md`,
       Buffer.from(repairSource, "utf8")
@@ -236,14 +303,11 @@ export class RepairCoordinator {
     const projectRelativePath = relative(state.canonicalProjectRoot, run.canonicalTaskPath)
       .split(sep)
       .join("/");
-    const code = derived.kind === "LEADER_REPAIR"
-      ? "REPAIR_TASKS_READY"
-      : "REPAIR_USER_APPROVAL_REQUIRED";
     await this.pause(
       run,
       currentRound,
       assessed.noProgressCount,
-      code,
+      "REPAIR_USER_APPROVAL_REQUIRED",
       {
         repairDraft: {
           sourceArtifact,
@@ -263,14 +327,14 @@ export class RepairCoordinator {
         untrustedSeedCandidate: run.candidate
       }
     );
-    return { phase: "PAUSED", code };
+    return { phase: "PAUSED", code: "REPAIR_USER_APPROVAL_REQUIRED" };
   }
 
   private async pause(
     run: RunRecord,
     round: RepairRound,
     noProgressCount: number,
-    code: "REPAIR_NO_PROGRESS" | "REPAIR_TASKS_READY" | "REPAIR_USER_APPROVAL_REQUIRED",
+    code: "REPAIR_NO_PROGRESS" | "REPAIR_USER_APPROVAL_REQUIRED",
     details: Record<string, unknown> = {}
   ): Promise<void> {
     const attempt = run.workerAttempts.at(-1);
@@ -302,11 +366,9 @@ export class RepairCoordinator {
                 noProgressCount,
                 pause: {
                   code,
-                  resumeActions: code === "REPAIR_TASKS_READY"
-                    ? ["leader_append_repair_tasks", "approve_new_manifest_revision", "cancel"]
-                    : code === "REPAIR_USER_APPROVAL_REQUIRED"
-                      ? ["inspect_repair_diff", "approve_new_manifest_revision", "cancel"]
-                      : ["inspect_no_progress", "cancel"]
+                  resumeActions: code === "REPAIR_USER_APPROVAL_REQUIRED"
+                    ? ["inspect_repair_diff", "approve_new_manifest_revision", "cancel"]
+                    : ["inspect_no_progress", "cancel"]
                 },
                 recovery: { ...active.recovery, repairRound: round, ...details },
                 updatedAt

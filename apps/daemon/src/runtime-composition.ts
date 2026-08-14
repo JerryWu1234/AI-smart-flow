@@ -66,6 +66,21 @@ export class ProductionRuntimeComposition {
     return new RepairCoordinator(store, providerRuntimeConfig);
   }
 
+  private async prepareRepairAndContinue(
+    context: ProjectPipelineContext,
+    providerRuntimeConfig: Readonly<Record<string, unknown>>
+  ): Promise<void> {
+    const outcome = await this.repairCoordinator(
+      context.store,
+      providerRuntimeConfig
+    ).prepare(context.jobId);
+    if (outcome.phase !== "PREPARING") return;
+    const state = await context.store.readState();
+    const run = state.runs[context.jobId];
+    if (run?.phase !== "PREPARING" || run.revision !== outcome.revision) return;
+    await this.runPipeline(this.contextForRun(context, run));
+  }
+
   public runPipeline = async (context: ProjectPipelineContext): Promise<void> => {
     if (!(await this.contextCurrent(context))) return;
     if (!(await this.approvedSourceCurrent(context))) return;
@@ -77,10 +92,10 @@ export class ProductionRuntimeComposition {
     ));
     const providerRuntime = this.resolveProviderRuntime(manifest.providerRuntimeConfigHash);
     if (run.phase === "FIXING") {
-      await this.repairCoordinator(
-        context.store,
+      await this.prepareRepairAndContinue(
+        context,
         providerRuntime.providerRuntimeConfig
-      ).prepare(context.jobId);
+      );
       return;
     }
     if (run.phase !== "PREPARING") return;
@@ -101,10 +116,10 @@ export class ProductionRuntimeComposition {
       attemptDeadlineMs: attemptDeadlineMs(providerRuntime.providerRuntimeConfig)
     });
     if (worker.phase === "FIXING") {
-      await this.repairCoordinator(
-        context.store,
+      await this.prepareRepairAndContinue(
+        context,
         providerRuntime.providerRuntimeConfig
-      ).prepare(context.jobId);
+      );
     }
   };
 

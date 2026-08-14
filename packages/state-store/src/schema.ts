@@ -94,14 +94,7 @@ const hostTurnIdentitySchema = z.object({
 
 export const hostTurnSchema = z.discriminatedUnion("stage", [
   hostTurnIdentitySchema.extend({
-    stage: z.literal("CLAIMING"),
-    actionId: z.string().min(1),
-    deadlineAt: z.iso.datetime({ offset: true })
-  }).strict(),
-  hostTurnIdentitySchema.extend({
     stage: z.literal("AWAITING_REVIEW"),
-    actionId: z.string().min(1),
-    claimId: z.string().min(1),
     reviewAttemptId: z.string().min(1),
     deadlineAt: z.iso.datetime({ offset: true })
   }).strict(),
@@ -218,9 +211,111 @@ export const runRecordSchema = z
     }
   });
 
-export const projectStateSchema = z
-  .object({
-    schemaVersion: z.literal(4),
+function plainRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function migrateV4Run(value: unknown): unknown {
+  const run = plainRecord(value);
+  if (run === undefined) return value;
+  const pendingSource = plainRecord(run.pendingAction);
+  const pendingAction = pendingSource === undefined ? undefined : { ...pendingSource };
+  if (pendingAction !== undefined) {
+    delete pendingAction.claimId;
+    delete pendingAction.hostTurnId;
+    delete pendingAction.claimExpiresAt;
+    delete pendingAction.claimStatus;
+    delete pendingAction.status;
+  }
+
+  const legacyTurn = plainRecord(run.hostTurn);
+  let hostTurn: Record<string, unknown> | undefined;
+  if (legacyTurn?.stage === "AWAITING_USER_INPUT") {
+    hostTurn = {
+      stage: "AWAITING_USER_INPUT",
+      turnToken: legacyTurn.turnToken,
+      hostTurnId: legacyTurn.hostTurnId,
+      revision: legacyTurn.revision,
+      pauseCode: legacyTurn.pauseCode,
+      startedAt: legacyTurn.startedAt
+    };
+  } else if (
+    legacyTurn?.stage === "AWAITING_REVIEW" ||
+    (legacyTurn?.stage === "CLAIMING" && run.phase === "REVIEWING")
+  ) {
+    const reviewAttemptId = nonEmptyString(legacyTurn.reviewAttemptId) ??
+      nonEmptyString(pendingSource?.reviewAttemptId);
+    if (reviewAttemptId !== undefined) {
+      hostTurn = {
+        stage: "AWAITING_REVIEW",
+        turnToken: legacyTurn.turnToken,
+        hostTurnId: legacyTurn.hostTurnId,
+        revision: legacyTurn.revision,
+        reviewAttemptId,
+        startedAt: legacyTurn.startedAt,
+        deadlineAt: legacyTurn.deadlineAt
+      };
+    }
+  }
+
+  const rest = { ...run };
+  delete rest.hostTurn;
+  delete rest.pendingAction;
+  if (run.phase === "REVIEWING" && hostTurn === undefined) {
+    return {
+      ...rest,
+      phase: "PAUSED",
+      ...(pendingAction === undefined ? {} : { pendingAction }),
+      pause: {
+        code: "HOST_REVIEW_UNAVAILABLE",
+        resumeActions: pendingAction?.type === "REVIEW"
+          ? ["retry_host_review", "cancel"]
+          : ["cancel"]
+      },
+      lastError: {
+        code: "HOST_REVIEW_UNAVAILABLE",
+        stage: "review",
+        message: "Legacy Review ownership could not be migrated safely",
+        retryable: pendingAction?.type === "REVIEW",
+        nextActions: pendingAction?.type === "REVIEW"
+          ? ["retry_host_review", "cancel"]
+          : ["cancel"],
+        artifacts: []
+      }
+    };
+  }
+  return {
+    ...rest,
+    ...(pendingAction === undefined ? {} : { pendingAction }),
+    ...(hostTurn === undefined ? {} : { hostTurn })
+  };
+}
+
+function migrateProjectStateInput(value: unknown): unknown {
+  const state = plainRecord(value);
+  if (state?.schemaVersion !== 4) return value;
+  const runs = plainRecord(state.runs);
+  return {
+    ...state,
+    schemaVersion: 5,
+    runs: runs === undefined
+      ? state.runs
+      : Object.fromEntries(
+          Object.entries(runs).map(([jobId, run]) => [jobId, migrateV4Run(run)])
+        )
+  };
+}
+
+export const projectStateSchema = z.preprocess(
+  migrateProjectStateInput,
+  z.object({
+    schemaVersion: z.literal(5),
     projectId: z.string().min(1),
     canonicalProjectRoot: z.string().min(1),
     stateVersion: z.number().int().nonnegative(),
@@ -279,7 +374,7 @@ export const projectStateSchema = z
         });
       }
     }
-  });
+  }));
 
 export type WorkspaceRef = z.infer<typeof workspaceRefSchema>;
 export type GitRevisionWorkspace = z.infer<typeof gitRevisionWorkspaceSchema>;

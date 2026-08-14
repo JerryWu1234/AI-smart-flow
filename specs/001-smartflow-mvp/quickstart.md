@@ -53,14 +53,14 @@ This walkthrough validates the Pi migration, removal of Broker/OpenCode, daemon-
 3. On `NOT_READY`, confirm no `worktreePath` exists, wait `retryAfterMs`, and poll again.
 4. On first `REVIEW_REQUIRED`, confirm `reviewerSession.mode === "CREATE"`; create an independent Reviewer, read the synchronized Task/current files, and submit Review with the same `turnToken`.
 5. On later repair Review, confirm `mode === "RESUME"` with the original Reviewer session and a new Pi session.
-6. Inspect logs/spies to prove the Daemon alone performed wait, Action claim/renew, Review submission, and Leader decision mechanics; none has a public MCP handler.
+6. Inspect state writes to prove the Daemon used one atomic Review-begin mutation and one Review-plus-decision finalization; no claim/renew or independent Leader-decision bridge exists.
 7. Confirm the registered public MCP surface is exactly `smartflow_execute`, `smartflow_review_turn`, `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`.
-8. Confirm the public symbols, schemas, handlers, registrations, and aliases for `smartflow_wait`, `smartflow_claim_action`, `smartflow_renew_action_claim`, `smartflow_submit_review`, and `smartflow_submit_leader_decision` do not exist, and that their Review mechanics are Daemon-internal only.
+8. Confirm the old `smartflow_wait`, claim/renew, submit-review, and submit-leader symbols, schemas, handlers, registrations, and aliases do not exist.
 9. Confirm `HostActionLoop` and `apps/host-skill/src/action-loop.ts` are absent; the Host workflow has no alternate Review orchestration branch.
 
 ## 7. Validate independent Run management APIs
 
-1. Exercise `smartflow_status` independently and confirm it reports Run progress without exposing a claimed worktree path.
+1. Exercise `smartflow_status` independently and confirm it reports Run progress without exposing the Review worktree path.
 2. Exercise public `smartflow_resume` only as an independent paused-Run recovery API when no active `hostTurn` owns the answer; it must not accept a ReviewTurn answer or bypass owner/token checks.
 3. Exercise public `smartflow_cancel` as a standalone Run operation outside an active ReviewTurn answer and confirm cancellation does not submit Review or make a Leader decision.
 4. Exercise `smartflow_result` independently for the Run's canonical result; confirm the Host Review workflow does not use it as a pause fallback.
@@ -68,14 +68,14 @@ This walkthrough validates the Pi migration, removal of Broker/OpenCode, daemon-
 
 ## 8. Validate Host-turn checkpoint, restart, and path safety
 
-1. Pause immediately after durable `CLAIMING`; restart Daemon and confirm it reconciles one existing Action without duplicate claim.
-2. Restart during `AWAITING_REVIEW`; confirm the same `turnToken`, Action, reviewAttempt, Reviewer mode, and 30-minute deadline return.
-3. Advance 60 seconds and confirm claim lease renewal; verify renewal is scheduled no later than 30 seconds before expiry.
-4. Force three renewal failures with 1-second retry and confirm a durable Host-review-unavailable pause.
-5. Force the 30-minute deadline and confirm pause without stale path disclosure.
+1. Begin from `REVIEW_PENDING`; confirm exactly one state commit produces `REVIEWING + AWAITING_REVIEW`, with no `CLAIMING`, claim ID, lease, or renew timer.
+2. Simulate a lost begin response by repeating the same turn; confirm the same `turnToken`, Review attempt, Reviewer mode, path, and deadline return without another state mutation.
+3. Restart during `AWAITING_REVIEW`; confirm the same `turnToken`, Review attempt, Reviewer mode, and 30-minute deadline return.
+4. Advance 60 seconds and confirm state does not change merely to maintain a short lease.
+5. Force the 30-minute deadline and confirm a durable Host-review-unavailable pause without stale path disclosure.
 6. Submit old Review/failure/answer continuations and confirm each causes no side effect and returns no-path `NOT_READY`.
 7. Attempt continuation with another `hostTurnId`; expect ownership rejection.
-8. Trigger concurrent composite calls and CAS mismatches; confirm per-Run serialization, at most four total attempts (initial plus up to three fresh-state retries), and no duplicate Review/repair/Publish.
+8. Trigger a Project CAS mismatch; confirm no partial claim/decision state exists and the caller receives a fresh no-path continuation.
 9. During restart confirm `ProjectRuntime` recovers Host turn first, rereads state, and does not schedule general Worker/Run recovery while `hostTurn` remains.
 
 ## 9. Validate automatic Review decisions
@@ -84,7 +84,7 @@ This walkthrough validates the Pi migration, removal of Broker/OpenCode, daemon-
 2. Submit incomplete Review with blocking findings; confirm only their fingerprints become RepairItems, `autoRepairRounds` increments, and an approved-scope Revision starts automatically.
 3. Submit an incomplete Review with no actionable blocking finding; expect `USER_INPUT_REQUIRED/INVALID_REVIEW` with `cancel` as its only mutable answer. As the owning Host, submit that answer through `smartflow_review_turn` with the active `turnToken`; do not use public `smartflow_cancel` as the ReviewTurn answer.
 4. Reach 15 automatic repair rounds; expect `USER_INPUT_REQUIRED/AUTOMATIC_REPAIR_LIMIT`, retained Candidate/Review, and no additional repair.
-5. As the owning Host, submit `resume_review_decision` through `smartflow_review_turn` with the `USER_INPUT_REQUIRED` turn's unchanged `turnToken`; confirm HostTurnCoordinator internally invokes Daemon resume mechanics, clears the checkpoint, resets the counter, and allows the next group of up to 15 rounds. Confirm public `smartflow_resume` cannot provide this answer or bypass active `hostTurn` ownership.
+5. As the owning Host, submit `resume_review_decision` through `smartflow_review_turn` with the `USER_INPUT_REQUIRED` turn's unchanged `turnToken`; confirm HostTurnCoordinator atomically re-evaluates the stored Review with a reset allowance and proceeds directly to the next repair Revision. Confirm no transient `LEADER_DECISION` or `REPAIR_TASKS_READY` pause is produced, and public `smartflow_resume` cannot bypass active `hostTurn` ownership.
 6. Confirm any pause/conflict is `USER_INPUT_REQUIRED`, while only `COMPLETED/CANCELED/FAILED` yields `DONE`.
 
 ## 10. Validate cumulative Candidate and safe Publish
@@ -104,7 +104,7 @@ This walkthrough validates the Pi migration, removal of Broker/OpenCode, daemon-
 4. Reconcile a terminal Run; confirm temporary Workspace/runtime/index/object store are deleted while audit Artifacts remain.
 5. Run the local protocol, contract, integration, security, E2E, build, typecheck, lint, and diff checks listed by the repository.
 6. Treat the covered production-composition two-tool success as scenario evidence only.
-7. Confirm T204 coverage rejects cross-Host continuations and Daemon-internal Review mutations, reconciles a lost successful claim from its durable lease, and recovers Host turns before general Run recovery.
+7. Confirm T204 coverage rejects cross-Host continuations, persists atomic Review begin/finalize transitions, reconstructs a lost response from durable `AWAITING_REVIEW`, and recovers the single deadline before general Run recovery.
 8. Confirm T205 coverage forwards cumulative `changedPaths`, separates inspection actions from mutable answers, distinguishes revision `COLLECT` forms from complete `CONFIRM` answers, and returns embedded paused results without calling the independent `smartflow_result` management API.
 9. Keep T190/T208 open until pinned Pi 0.83.0's real exports, Extension registration, and RPC model resolution are exercised by a checked-in reproducible test.
 10. Keep T192/T209 open until an explicitly authorized real-model `smartflow_execute → smartflow_review_turn*` run produces checked-in, auditable evidence. A gitignored `.smartflow-e2e` transcript is insufficient.

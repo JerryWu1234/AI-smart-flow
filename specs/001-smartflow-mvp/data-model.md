@@ -192,14 +192,7 @@ interface HostTurnIdentity {
 
 type HostTurn =
   | (HostTurnIdentity & {
-      stage: "CLAIMING";
-      actionId: string;
-      deadlineAt: string;
-    })
-  | (HostTurnIdentity & {
       stage: "AWAITING_REVIEW";
-      actionId: string;
-      claimId: string;
       reviewAttemptId: string;
       deadlineAt: string;
     })
@@ -209,9 +202,9 @@ type HostTurn =
     });
 ```
 
-`CLAIMING` is durable before the Daemon-internal Action claim. `AWAITING_REVIEW` proves the claim context is reconciled and is the only stage from which the public Review protocol discloses `worktreePath`. `AWAITING_USER_INPUT` persists a nonterminal typed pause. ReviewerBinding survives repair Revisions; HostTurn does not replace it.
+`AWAITING_REVIEW` proves that Review context, Host ownership, and the 30-minute deadline committed atomically with the `REVIEWING` phase; it is the only stage from which the public Review protocol discloses `worktreePath`. `AWAITING_USER_INPUT` persists a nonterminal typed pause. ReviewerBinding survives repair Revisions; HostTurn does not replace it.
 
-`smartflow_execute → smartflow_review_turn*` is the sole public Review orchestration path. The public MCP surface contains exactly six tools: `smartflow_execute`, `smartflow_review_turn`, `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`. Status, resume, cancel, and result are separate Run-management APIs, not Review continuations or a second Review orchestration path. Public `smartflow_resume` is for independent paused-Run recovery and cannot answer or bypass an active `hostTurn`. The `HostActionLoop` symbol and public symbols, schemas, handlers, registrations, and aliases for wait, Action claim/renew, Review submission, and Leader decision do not exist; their operations and repair/Publish progression are Daemon-internal only.
+`smartflow_execute → smartflow_review_turn*` is the sole public Review orchestration path. The public MCP surface contains exactly six tools: `smartflow_execute`, `smartflow_review_turn`, `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`. Status, resume, cancel, and result are separate Run-management APIs, not Review continuations or a second Review orchestration path. Public `smartflow_resume` is for independent paused-Run recovery and cannot answer or bypass an active `hostTurn`. The old wait/claim/renew/submission/Leader primitive symbols, schemas, handlers, registrations, and aliases do not exist; Review begin and finalization are atomic Daemon domain operations.
 
 ## Sole public ReviewTurn orchestration protocol
 
@@ -289,14 +282,14 @@ type ReviewDecisionPlan =
   | { kind: "PAUSE_REPAIR_LIMIT"; decision: "pause"; repairItems: RepairItem[] };
 ```
 
-`autoRepairRounds` counts daemon-started repairs in the current group and is incremented with automatic repair. To grant another group, the owning Host submits `resume_review_decision` as a `smartflow_review_turn` answer with the active `turnToken`; HostTurnCoordinator invokes Daemon resume mechanics internally, clears the checkpoint, and resets the counter to zero. Public `smartflow_resume` is not used for that active HostTurn answer. Accept requires `APPROVE + 100% + no blocking finding`; repair uses only current blocking finding fingerprints and requires counter `< 15`; incomplete Review without actionable findings pauses invalid.
+`autoRepairRounds` counts daemon-started repairs in the current group and is incremented with automatic repair. To grant another group, the owning Host submits `resume_review_decision` as a `smartflow_review_turn` answer with the active `turnToken`; HostTurnCoordinator atomically re-evaluates the stored Review with a reset allowance and proceeds directly to repair or another real pause. Public `smartflow_resume` is not used for that active HostTurn answer. Accept requires `APPROVE + 100% + no blocking finding`; repair uses only current blocking finding fingerprints and requires counter `< 15`; incomplete Review without actionable findings pauses invalid.
 
-## Concurrency and idempotency model
+## CAS and idempotency model
 
-- One in-memory queue serializes composite turns for each `projectId + jobId`.
-- Project `stateVersion` CAS remains the durable writer boundary; a composite operation makes at most four total attempts, including the initial attempt and up to three retries with a fresh reread.
+- Project `stateVersion` CAS remains the durable writer boundary; competing writes return a fresh no-path continuation rather than retrying a partial primitive sequence.
 - Child request IDs are deterministic hashes of stable turn identity and operation scope.
-- Review deadline is 30 minutes. Claim renewal runs every 60 seconds or 30 seconds before lease expiry; transient failure retries after 1 second and three failures pause.
+- Review begin and finalization are each one domain mutation; finalization directly selects `READY_TO_PUBLISH`, `FIXING`, or a real `PAUSED` state.
+- Review deadline is one durable 30-minute timestamp; no short claim lease or renewal loop exists.
 - On restart, durable `hostTurn` is recovered before ordinary Run recovery; ProjectRuntime rereads state and schedules no competing recovery while the checkpoint remains.
 
 ## Publish capability and result
@@ -322,9 +315,9 @@ interface PublishConflictResult {
 
 Any touched-path conflict returns before the batch starts. PARTIAL or UNKNOWN persists as `PUBLISH_RECOVERY_BLOCKED` and never becomes `COMPLETED`.
 
-## RunRecord schema-v4 additions
+## RunRecord schema-v5 additions
 
-The Project state schema remains version 4. `RunRecord` retains Task, Revision chain, snapshots, Candidate, Review, publish, receipts, and cleanup, and includes:
+The Project state schema is version 5. Startup migration accepts schema-v4 records, removes claim/lease fields, converts safe active Review checkpoints to `AWAITING_REVIEW`, and pauses ambiguous `REVIEWING` records. `RunRecord` retains Task, Revision chain, snapshots, Candidate, Review, publish, receipts, and cleanup, and includes:
 
 ```ts
 interface RunRecordReviewTurnFields {
@@ -339,6 +332,6 @@ It stores `workerAttempts: PiWorkerAttempt[]` and no longer stores Broker sessio
 
 - Active Run: retain every Revision workspace/snapshot, Attempt/session Artifact, Review history, Host turn, and repair count; forbid Git `gc`/`prune`.
 - Attempt terminal: persist terminal state and session Artifact, reconcile process tree, then clean Run-local Pi runtime files.
-- Review turn: persist claim intent before the Daemon-internal Action claim; persist claimed context before path disclosure; clear checkpoint only through a current CAS-bound transition.
+- Review turn: atomically persist `REVIEWING` plus `AWAITING_REVIEW` before path disclosure; clear or replace the checkpoint only through a current CAS-bound transition.
 - Reconciled terminal Run: retain task/snapshot/Candidate/Review/automatic-decision/Publish audit Artifacts and patch/bundle; delete temporary workspaces, indexes, runtime directories, and object store.
 - Recovery: `state.json` references exact task binding, Revision, Attempt, Host turn, and Publish operation; it never infers state from mutable files, timers, queues, session files, or `events.jsonl`.
