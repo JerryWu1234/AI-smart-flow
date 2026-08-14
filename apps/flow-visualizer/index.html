@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta
+      name="description"
+      content="基于 SmartFlow 真实代码证据的完整端到端流程图，展示执行、Review、自动修复、发布、暂停与恢复路径"
+    />
+    <meta name="theme-color" content="#07110f" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%2316c79a'/%3E%3Cpath d='M16 20h18l8 12-8 12H16l8-12z' fill='none' stroke='%2306110f' stroke-width='5' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+    <title>SmartFlow · 完整流程图</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <div class="page-grid" aria-hidden="true"></div>
+    <header class="topbar">
+      <a class="brand" href="#top" aria-label="返回页面顶部">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span><strong>SMARTFLOW</strong><small>PRODUCTION FLOW MAP</small></span>
+      </a>
+      <nav aria-label="页面导航">
+        <a href="#flow-map">完整流程</a>
+        <a href="#inspector">步骤详情</a>
+        <a href="#evidence">实现证据</a>
+      </nav>
+      <div class="simulation-badge">
+        <span aria-hidden="true"></span>
+        ILLUSTRATIVE · NOT LIVE
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="intro shell" aria-labelledby="pageTitle">
+        <div class="intro-copy">
+          <p class="eyebrow"><span>SMARTFLOW.V5</span> ONE CONNECTED STATE MACHINE</p>
+          <h1 id="pageTitle">一张图看清每一步，<br /><em>包括它怎样循环。</em></h1>
+          <p class="intro-lead">
+            这不是几条互相割裂的演示卡片。主流程、Review 决策、自动 repair 回边、暂停出口、
+            Daemon 重启恢复与取消都连接在同一张有向图上。
+          </p>
+          <div class="intro-actions">
+            <button class="primary-button" id="startRepairButton" type="button">
+              <span aria-hidden="true">↺</span> 播放一次完整 repair 循环
+            </button>
+            <a class="secondary-link" href="#flow-map">直接查看全图 <span aria-hidden="true">↓</span></a>
+          </div>
+        </div>
+        <aside class="loop-contract" aria-label="自动修复循环摘要">
+          <header><span>AUTO REPAIR CONTRACT</span><b>最多 15 轮</b></header>
+          <ol>
+            <li><b>01</b><span>Review 未通过且有 blocker</span></li>
+            <li><b>02</b><span>REVIEWING → FIXING，计数 n → n+1</span></li>
+            <li><b>03</b><span>创建受限 Revision N+1</span></li>
+            <li><b>04</b><span>明确回到 PREPARING</span></li>
+            <li><b>05</b><span>新 Worker · 同一 Reviewer RESUME</span></li>
+          </ol>
+          <footer><span>退出</span><strong>ACCEPT · PAUSE · CANCEL</strong></footer>
+        </aside>
+      </section>
+
+      <section class="flow-section shell" id="flow-map" aria-labelledby="flowTitle">
+        <header class="section-heading">
+          <div>
+            <p class="eyebrow"><span>01</span> COMPLETE END-TO-END GRAPH</p>
+            <h2 id="flowTitle">完整运行图</h2>
+          </div>
+          <p>
+            选择场景只会高亮一条可执行路径，不会隐藏其它分支。点击任意节点或箭头即可暂停并查看条件、状态变化、数据对象与源码依据。
+          </p>
+        </header>
+
+        <div class="flow-shell">
+          <header class="flow-toolbar">
+            <div class="scenario-control">
+              <label for="scenarioSelect">高亮路径</label>
+              <div class="select-wrap">
+                <span id="scenarioTone" aria-hidden="true"></span>
+                <select id="scenarioSelect" aria-describedby="scenarioDescription"></select>
+                <i aria-hidden="true">⌄</i>
+              </div>
+              <p id="scenarioDescription"></p>
+            </div>
+            <div class="scenario-outcome">
+              <span>PATH OUTCOME</span>
+              <strong id="scenarioOutcome">—</strong>
+            </div>
+            <div class="run-readouts" aria-label="当前模拟状态">
+              <article><span>PHASE</span><strong id="phaseReadout">—</strong></article>
+              <article><span>REVISION</span><strong id="revisionReadout">1</strong></article>
+              <article><span>REVIEW</span><strong id="reviewReadout">#1</strong></article>
+              <article><span>REPAIR</span><strong id="repairReadout">0 / 15</strong></article>
+            </div>
+          </header>
+
+          <div class="graph-legend" aria-label="流程线类型图例">
+            <span><i class="legend-line main"></i>正常主干</span>
+            <span><i class="legend-line repair"></i>自动修复回环</span>
+            <span><i class="legend-line pause"></i>安全暂停 / 取消</span>
+            <span><i class="legend-line recovery"></i>重启恢复</span>
+            <small>实线高亮 = 当前场景 · 其它边仍可点击</small>
+          </div>
+
+          <div class="graph-viewport" id="graphViewport" tabindex="0" aria-label="完整 SmartFlow 流程图，可横向滚动">
+            <div class="flow-graph" id="flowGraph">
+              <div class="graph-grid" aria-hidden="true"></div>
+              <div class="lane-band lane-one" aria-hidden="true"><span>RUN / WORKER</span></div>
+              <div class="lane-band lane-two" aria-hidden="true"><span>REVIEW / PUBLISH</span></div>
+              <div class="lane-band lane-three" aria-hidden="true"><span>REPAIR / RECOVERY</span></div>
+              <div class="lane-band lane-four" aria-hidden="true"><span>PAUSE / CANCEL</span></div>
+              <svg class="flow-svg" id="flowSvg" aria-label="阶段之间的可点击转移"></svg>
+              <div class="stage-layer" id="stageLayer"></div>
+              <div class="repair-loop-caption" aria-hidden="true">
+                <span>↺</span><strong>REVISION LOOP</strong><small>FIXING → PREPARING</small>
+              </div>
+            </div>
+          </div>
+          <p class="sr-only" id="graphAnnouncement" aria-live="polite" aria-atomic="true"></p>
+
+          <div class="branch-rail" id="branchRail" aria-label="所有非主干分支快捷入口"></div>
+
+          <section class="path-player" aria-labelledby="pathTitle">
+            <header>
+              <div>
+                <span>SELECTED EXECUTABLE PATH</span>
+                <h3 id="pathTitle">当前场景逐步路径</h3>
+              </div>
+              <div class="player-controls">
+                <button id="previousButton" type="button" aria-label="上一个转移">←</button>
+                <button class="play-button" id="playButton" type="button" aria-label="暂停">
+                  <span id="playIcon" aria-hidden="true">Ⅱ</span><b id="playLabel">暂停</b>
+                </button>
+                <button id="nextButton" type="button" aria-label="下一个转移">→</button>
+                <button id="replayButton" type="button" aria-label="重播当前转移">↻</button>
+              </div>
+            </header>
+            <div class="path-list" id="pathList" aria-label="场景转移序列"></div>
+            <div class="scrubber-row">
+              <span id="progressStart">STEP 01</span>
+              <input id="flowScrubber" type="range" min="0" max="1000" value="0" aria-label="整条场景路径进度" />
+              <strong id="flowProgress">0%</strong>
+              <label for="speedSelect">速度</label>
+              <select id="speedSelect">
+                <option value="0.75">0.75×</option>
+                <option value="1" selected>1.0×</option>
+                <option value="1.5">1.5×</option>
+                <option value="2">2.0×</option>
+              </select>
+              <label class="loop-toggle"><input id="loopToggle" type="checkbox" checked /><span></span>循环播放</label>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="inspector-section shell" id="inspector" aria-labelledby="inspectorTitle">
+        <header class="section-heading compact">
+          <div>
+            <p class="eyebrow"><span>02</span> SYNCHRONIZED INSPECTOR</p>
+            <h2 id="inspectorTitle">当前步骤详情</h2>
+          </div>
+          <p>以下内容与图中选中箭头、路径步骤、播放位置共用同一 selection。所有 payload 均标记为示例值。</p>
+        </header>
+
+        <div class="inspector-layout">
+          <article class="selection-card">
+            <header>
+              <div><span id="selectionEyebrow">TRANSITION</span><code id="selectionId">—</code></div>
+              <b id="selectionBadge">—</b>
+            </header>
+            <h3 id="selectionTitle">选择一个步骤</h3>
+            <p class="selection-summary" id="selectionSummary"></p>
+            <div class="plain-language">
+              <span>大白话 · 为什么需要这一步</span>
+              <p id="selectionPlain"></p>
+            </div>
+            <dl class="selection-meta">
+              <div><dt>触发条件</dt><dd id="selectionCondition"></dd></div>
+              <div><dt>参与者</dt><dd id="participantList"></dd></div>
+              <div><dt>示例 Payload</dt><dd><code id="payloadExample"></code></dd></div>
+            </dl>
+          </article>
+
+          <article class="state-card">
+            <header><span>DURABLE PROJECTION</span><b id="stateTransitionLabel">BEFORE → AFTER</b></header>
+            <div class="state-compare">
+              <section><h3>之前</h3><dl id="stateBefore"></dl></section>
+              <span aria-hidden="true">→</span>
+              <section><h3>之后</h3><dl id="stateAfter"></dl></section>
+            </div>
+            <div class="change-block">
+              <h3>本步写入 / 产出</h3>
+              <ul id="changeList"></ul>
+            </div>
+          </article>
+
+          <article class="evidence-card">
+            <header><span>IMPLEMENTATION EVIDENCE</span><b>PATH + SYMBOL</b></header>
+            <p>来源使用稳定的文件与 symbol，而不是容易漂移的手写行号。</p>
+            <div class="source-list" id="sourceList"></div>
+          </article>
+        </div>
+
+        <section class="data-section" aria-labelledby="dataTitle">
+          <header><div><span>DATA LIFECYCLE</span><h3 id="dataTitle">本步涉及的数据对象</h3></div><p>生产者 → 转换 → 消费者 → 持久化生命周期</p></header>
+          <div class="data-detail-list" id="dataDetailList"></div>
+        </section>
+        <p class="sr-only" id="selectionAnnouncement" aria-live="polite" aria-atomic="true"></p>
+      </section>
+
+      <section class="evidence-section shell" id="evidence" aria-labelledby="evidenceTitle">
+        <header class="section-heading compact">
+          <div>
+            <p class="eyebrow"><span>03</span> PROTOCOL &amp; INVARIANTS</p>
+            <h2 id="evidenceTitle">图外仍需记住的边界</h2>
+          </div>
+          <p>公开工具只是入口；Worker、Review、repair、publish 与 recovery 的机械推进由 Daemon 持有。</p>
+        </header>
+        <div class="tool-grid" id="toolGrid"></div>
+        <div class="evidence-grid">
+          <section class="ownership-panel">
+            <header><span>OWNERSHIP</span><h3>谁持有什么</h3></header>
+            <div id="ownershipGrid"></div>
+          </section>
+          <section class="invariant-panel">
+            <header><span>NON-NEGOTIABLE</span><h3>实现不变量</h3></header>
+            <ol id="invariantList"></ol>
+          </section>
+        </div>
+        <aside class="model-note">
+          <strong>模型边界</strong>
+          <p>
+            此页是基于当前仓库实现的说明性模拟，不是线上遥测。示例 jobId、hash、时间和 payload 仅用于解释。
+            <code>FAILED</code> 存在于 schema 的终态集合中，但当前普通 production lifecycle 未定位主动写入者，因此未伪造一条失败箭头。
+          </p>
+        </aside>
+      </section>
+    </main>
+
+    <footer class="page-footer shell">
+      <div><strong>SMARTFLOW</strong><span>Evidence-driven flow visualizer · schema v5</span></div>
+      <p><kbd>Space</kbd> 播放 / 暂停 · <kbd>←</kbd><kbd>→</kbd> 切换步骤</p>
+    </footer>
+
+    <script type="module" src="./src/app.js"></script>
+  </body>
+</html>

@@ -106,6 +106,8 @@ importers:
         specifier: 2.9.0
         version: 2.9.0
 
+  apps/flow-visualizer: {}
+
   apps/host-skill:
     dependencies:
       '@smartflow/protocol':
