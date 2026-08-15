@@ -20,7 +20,7 @@ Relative, absolute, and symlink aliases that identify the same file resolve to t
 - Different canonical task paths may execute and Review concurrently in the same Project.
 - Each Run has independent jobId, fence, generation, Task Artifact, Pi Attempts/sessions, containment identity, Git object store, Revision workspace, Action, Review history, `hostTurn`, automatic repair counter, and cancellation state.
 - Concurrent `smartflow_review_turn` operations for one Run meet at the Project-wide CAS boundary; only one mutation commits and a stale contender returns a fresh no-path continuation.
-- Project `state.json` remains one atomic recovery fact shared by all Runs. Every mutation validates `expectedStateVersion` and changes only the target Run plus shared indexes.
+- Project `state.sqlite` remains one atomic recovery fact shared by all Runs. Every mutation validates `expectedStateVersion` and changes only the target Run plus shared indexes.
 - Deterministic child request IDs derive from `turnToken`; a lost response is reconstructed from durable state without duplicating Review begin, finalization, repair, resume, or Publish effects.
 - There is no code-path reservation or automatic merge. Two Runs may produce overlapping Candidates; Publish resolves overlap.
 - Pi for one Run cannot read another Run workspace or session/runtime area.
@@ -49,7 +49,7 @@ Relative, absolute, and symlink aliases that identify the same file resolve to t
 3. `ProjectRuntime` then rereads fresh state. While `hostTurn` remains, it MUST NOT schedule ordinary pipeline/publish/cancel recovery for that Run.
 4. `AWAITING_REVIEW` recovery preserves the same owner, token, Review attempt, Reviewer session binding, and deadline. An expired deadline is durably converted to a typed user-input pause; recovery never recreates an Action or starts a lease-renewal loop.
 5. `AWAITING_USER_INPUT` requires no background action and remains available only to the owning Host.
-6. `state.json`, not in-memory queues/timers, Host requests, or Pi/Reviewer session files, is the recovery truth.
+6. `state.sqlite`, not in-memory queues/timers, Host requests, or Pi/Reviewer session files, is the recovery truth.
 
 ## Publish serialization
 

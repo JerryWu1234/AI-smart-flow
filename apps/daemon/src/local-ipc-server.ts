@@ -79,6 +79,8 @@ export class LocalIpcServer {
   private readonly registerWorkerConfiguration: WorkerConfigurationRegistrar | undefined;
   private server: Server | undefined;
   private instanceLock: ProjectLock | undefined;
+  private endpointOwned = false;
+  private startInFlight: Promise<void> | undefined;
 
   public constructor(
     dataDirectory: string,
@@ -93,13 +95,28 @@ export class LocalIpcServer {
     this.registerWorkerConfiguration = registerWorkerConfiguration;
   }
 
-  public async start(): Promise<void> {
+  public async acquireInstanceLock(): Promise<void> {
+    if (this.instanceLock !== undefined) return;
     await mkdir(this.dataDirectory, { recursive: true, mode: 0o700 });
     this.instanceLock = await ProjectLock.acquire(
       resolve(this.dataDirectory, "daemon.lock"),
       this.instanceId,
       0
     );
+  }
+
+  public start(): Promise<void> {
+    if (this.server !== undefined && this.endpointOwned) return Promise.resolve();
+    if (this.startInFlight !== undefined) return this.startInFlight;
+    const start = this.startOnce().finally(() => {
+      if (this.startInFlight === start) this.startInFlight = undefined;
+    });
+    this.startInFlight = start;
+    return start;
+  }
+
+  private async startOnce(): Promise<void> {
+    await this.acquireInstanceLock();
     if (process.platform !== "win32") await ignoreMissing(this.endpoint);
     const server = createServer((socket) => this.accept(socket));
     this.server = server;
@@ -111,10 +128,18 @@ export class LocalIpcServer {
           settle();
         });
       });
+      this.endpointOwned = true;
       if (process.platform !== "win32") await chmod(this.endpoint, 0o600);
     } catch (error) {
       this.server = undefined;
-      await this.instanceLock.release();
+      if (server.listening) {
+        await new Promise<void>((settle) => server.close(() => settle()));
+      }
+      if (this.endpointOwned && process.platform !== "win32") {
+        await ignoreMissing(this.endpoint).catch(() => undefined);
+      }
+      this.endpointOwned = false;
+      await this.instanceLock?.release().catch(() => undefined);
       this.instanceLock = undefined;
       throw error;
     }
@@ -122,15 +147,37 @@ export class LocalIpcServer {
 
   public async close(): Promise<void> {
     const server = this.server;
+    const endpointOwned = this.endpointOwned;
     this.server = undefined;
+    this.endpointOwned = false;
+    let failure: unknown;
     if (server !== undefined) {
-      await new Promise<void>((settle, reject) => {
-        server.close((error) => (error === undefined ? settle() : reject(error)));
-      });
+      try {
+        await new Promise<void>((settle, reject) => {
+          server.close((error) => (error === undefined ? settle() : reject(error)));
+        });
+      } catch (error) {
+        failure = error;
+      }
     }
-    if (process.platform !== "win32") await ignoreMissing(this.endpoint);
-    await this.instanceLock?.release();
+    if (endpointOwned && process.platform !== "win32") {
+      try {
+        await ignoreMissing(this.endpoint);
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    try {
+      await this.instanceLock?.release();
+    } catch (error) {
+      failure ??= error;
+    }
     this.instanceLock = undefined;
+    if (failure !== undefined) {
+      throw failure instanceof Error
+        ? failure
+        : new Error("IPC server cleanup failed", { cause: failure });
+    }
   }
 
   private accept(socket: Socket): void {

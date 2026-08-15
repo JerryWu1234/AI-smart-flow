@@ -28,8 +28,6 @@
     "@smartflow/observability": "workspace:*",
     "@smartflow/provider-pi": "workspace:*",
     "@smartflow/publish": "workspace:*",
-    "@smartflow/state-store": "workspace:*",
-    "@smartflow/task-manifest": "workspace:*",
     "@smartflow/workspace": "workspace:*"
   }
 }

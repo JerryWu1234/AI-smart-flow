@@ -15,7 +15,6 @@ import { writeDeliveryBundleDirectory } from "@smartflow/publish";
 
 import { runDoctor } from "./doctor.js";
 import { verifyBundleDirectoryForCli } from "./bundle-verify.js";
-import { runInstalledPiGate } from "./provider-gate.js";
 
 function flagValue(argv: string[], name: string): string | undefined {
   const index = argv.indexOf(name);
@@ -80,16 +79,6 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     }
     return 0;
   }
-  if (command === "provider-gate") {
-    const projectRoot = flagValue(argv, "--project");
-    if (projectRoot === undefined) throw new Error("provider-gate requires --project");
-    const dataDirectory =
-      flagValue(argv, "--data-dir") ??
-      resolve(resolveInstallationDataDirectory(), "installed-gate", `run-${String(process.pid)}`);
-    const result = await runInstalledPiGate(projectRoot, dataDirectory);
-    print(result);
-    return result.phase === "REVIEW_PENDING" && result.sourceUnchanged && result.attemptCount === 1 ? 0 : 1;
-  }
   if (command === "bundle" && argv[1] === "verify") {
     const directory = flagValue(argv, "--bundle") ?? argv[2];
     if (directory === undefined || directory.startsWith("--")) {
@@ -127,7 +116,6 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       "  Required Pi env: SMARTFLOW_PI_API, SMARTFLOW_PI_BASE_URL, SMARTFLOW_PI_MODEL, SMARTFLOW_PI_API_KEY",
       "  Optional Pi env: SMARTFLOW_PI_CONTEXT_WINDOW, SMARTFLOW_PI_MAX_TOKENS, SMARTFLOW_PI_THINKING, SMARTFLOW_PI_ATTEMPT_DEADLINE_MS",
       "  health [--data-dir PATH]",
-      "  provider-gate --project PATH [--data-dir PATH]",
       "  bundle verify BUNDLE_DIR [--trusted-key PUBLIC_KEY_PEM] [--trusted-fingerprint SHA256]",
       "  bundle export --artifact DELIVERY_BUNDLE_JSON --output BUNDLE_DIR",
       "  version"

@@ -52,7 +52,7 @@ MCP server 进程环境仍是唯一模型配置入口。每个实例只绑定一
 | Model defaults | context `1000000`、max output `384000`、reasoning enabled、thinking `high` |
 | Worker tools | Pi official `read`、`bash`、`edit`、`write`、`grep`、`find`、`ls` |
 | Sandbox | Existing Darwin `ExecutionSandboxAdapter` extended for streaming child process containment |
-| State | Project 外 Data Dir 的原子 schema-v5 `state.json`；Run 含 durable `hostTurn`/`autoRepairRounds`；v4 启动迁移 |
+| State | Project 外 Data Dir 的 SQLite `state.sqlite` 保存唯一 schema-v5 恢复事实；Run 含 durable `hostTurn`/`autoRepairRounds`；旧 v4/v5 `state.json` 仅在首次启动时单向导入 |
 | Schema | Zod；运行时类型与协议来自同一 Schema |
 | Snapshot | Run-scoped Git object store + Revision-scoped ordinary workspace/index |
 | Host protocol | Sole public Review orchestration: `smartflow_execute → smartflow_review_turn*`; four ReviewTurn states; exactly 6 public MCP tools |
@@ -242,7 +242,7 @@ Pi session、settings/cache 和临时内容放在 `<revision-workspace>/.smartfl
 - Attempt 结束后，Daemon 将需要保留的 session 元数据写成 Data Dir Artifact；
 - Result Snapshot/Candidate 明确排除该目录；
 - 进程对账完成后删除该目录；
-- 目录损坏或丢失只影响 Pi session 恢复，不改变 `state.json`、Task、Snapshot 或 Candidate 事实。
+- 目录损坏或丢失只影响 Pi session 恢复，不改变 `state.sqlite`、Task、Snapshot 或 Candidate 事实。
 
 ## Session, Recovery and Cancellation
 
@@ -339,9 +339,12 @@ Pi runtime directory 必须在 Result Snapshot 之前清理/排除，因此不�
 
 ```text
 <user-data>/smartflow/projects/<projectId>/
-├── lock
-├── state.json
-├── events.jsonl
+├── state.sqlite                 # sole recovery and runtime audit authority
+├── state.sqlite-wal             # SQLite runtime companion; not a second authority
+├── state.sqlite-shm             # SQLite runtime companion; not a second authority
+├── state.json                   # legacy retirement tombstone only, when imported
+├── events.jsonl                 # one-time legacy import source; normally absent
+├── legacy-imports/              # protected immutable legacy archives
 └── runs/<jobId>/
     ├── task-source.md
     ├── task-manifest.json
@@ -361,7 +364,7 @@ Pi runtime directory 必须在 Result Snapshot 之前清理/排除，因此不�
     └── delivery/
 ```
 
-`state.json` 继续是唯一恢复事实。Artifact durable-first，随后通过 Project lock、revision/CAS 和原子 replace 提交状态。`events.jsonl` 只用于审计。
+`state.sqlite` 是唯一恢复事实，并在 `audit_events` 表中承载唯一运行时审计流。Artifact 仍 durable-first；状态随后通过 SQLite mutation lease、事务、fence 与 `stateVersion` CAS 提交，不再使用项目级文件锁或文件 replace。旧 `state.json`/`events.jsonl` 只进行一次性导入并归档到受保护的 `legacy-imports/`；SQLite authority 建立后重建或修改的 `events.jsonl` 被忽略，不参与恢复或审计。
 
 ## State Machine Impact
 
@@ -482,7 +485,7 @@ P0→P1→P2 是 Worker 迁移阻塞链；P3 依赖 P0–P2；P4 在 Pi 主线�
 ### Crash and cancellation
 
 - kill child、kill daemon、host reconnect、deadline timeout、cancel 进程树对账。
-- session runtime 丢失后仍可从 `state.json`、Revision 和 workspace 创建新 attempt。
+- session runtime 丢失后仍可从 `state.sqlite`、Revision 和 workspace 创建新 attempt。
 - 不重复 Candidate、Review Action 或 Publish。
 
 ### End-to-end

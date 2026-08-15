@@ -6,7 +6,11 @@ import { promisify } from "node:util";
 
 import { afterEach, expect, it } from "vitest";
 
-import { buildGitCandidate, verifyCandidate } from "./candidate-builder.js";
+import {
+  buildGitCandidate,
+  buildGitTreePatch,
+  verifyCandidate
+} from "./candidate-builder.js";
 import { probeGitRepository } from "./git-capability.js";
 import { materializeGitSnapshot } from "./git-materializer.js";
 import { initializeGitObjectStore } from "./git-object-store.js";
@@ -19,7 +23,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-it("keeps the formal Candidate cumulative while retaining the repair-round incremental patch", async () => {
+it("keeps the formal Candidate cumulative and generates tree patches on demand", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "smartflow-candidate-source-"));
   const data = await mkdtemp(resolve(tmpdir(), "smartflow-candidate-data-"));
   roots.push(root, data);
@@ -84,13 +88,21 @@ it("keeps the formal Candidate cumulative while retaining the repair-round incre
     includedPathPolicyHash: capabilities.inclusionPolicyHash
   });
   const built = await buildGitCandidate({
-    runGitDirectory: store.gitDirectory,
     runBaseline: baseline,
     revisionInput: result1,
     revisionResult: result2
   });
 
   expect(verifyCandidate(built.candidate)).toBe(true);
+  expect(built.candidate).toMatchObject({
+    schemaVersion: 3,
+    revision: 2,
+    runBaselineSnapshotHash: baseline.snapshotHash,
+    inputSnapshotHash: result1.snapshotHash,
+    resultSnapshotHash: result2.snapshotHash
+  });
+  expect(built.candidate).not.toHaveProperty("runBaselineTreeId");
+  expect(built.candidate).not.toHaveProperty("evidenceArtifactHash");
   expect(built.candidate.operations).toHaveLength(1);
   expect(built.candidate.operations[0]).toMatchObject({
     kind: "MODIFY",
@@ -98,8 +110,20 @@ it("keeps the formal Candidate cumulative while retaining the repair-round incre
     oldEntry: { sha256: baseline.entries[0]?.sha256 },
     newEntry: { sha256: result2.entries[0]?.sha256 }
   });
-  expect(built.incrementalPatch.toString("utf8")).toContain("-B middle");
-  expect(built.incrementalPatch.toString("utf8")).toContain("+C final");
-  expect(built.cumulativePatch.toString("utf8")).toContain("-A before");
-  expect(built.cumulativePatch.toString("utf8")).toContain("+C final");
+  const [incrementalPatch, cumulativePatch] = await Promise.all([
+    buildGitTreePatch({
+      runGitDirectory: store.gitDirectory,
+      baseTreeId: result1.treeId,
+      resultTreeId: result2.treeId
+    }),
+    buildGitTreePatch({
+      runGitDirectory: store.gitDirectory,
+      baseTreeId: baseline.treeId,
+      resultTreeId: result2.treeId
+    })
+  ]);
+  expect(incrementalPatch.toString("utf8")).toContain("-B middle");
+  expect(incrementalPatch.toString("utf8")).toContain("+C final");
+  expect(cumulativePatch.toString("utf8")).toContain("-A before");
+  expect(cumulativePatch.toString("utf8")).toContain("+C final");
 });

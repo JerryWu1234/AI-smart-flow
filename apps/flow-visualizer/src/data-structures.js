@@ -126,24 +126,26 @@ export const DATA_DETAILS = Object.freeze({
   }),
 
   "data.candidate.bundle": detail("data.candidate.bundle", {
-    objectName: "Candidate",
+    objectName: "GitCandidateV3",
     category: "artifact",
     producer: "WorkerRunner.captureCandidate",
     consumer: "Reviewer / ReviewCoordinator / PublishCoordinator",
-    summary: "从 Run 初始基线到当前 Revision 结果的累计、不可变交付候选。",
-    purpose: "确保复审与发布看到完整最终结果，而不是只看到本轮增量补丁。",
-    transformation: "run baseline + current result snapshot → cumulative operations + evidence",
-    lifecycle: "每个 Revision 冻结新 Candidate；旧 Candidate 留在 review history 证据链。",
+    summary: "从 Run 初始基线到当前 Revision 结果的精简、累计、不可变交付候选。",
+    purpose: "确保复审与发布看到完整最终结果，同时不重复保存 snapshot 已有的 tree/blob/mode 证据。",
+    transformation: "baseline/input/result snapshot hashes + cumulative operations → candidateHash",
+    lifecycle: "每个 Revision 冻结新 Candidate；patch 在 Publish 时按需生成，不作为 Worker Artifact 保存。",
     fields: [
-      field("hash", "sha256", true, "sha256:92af…", "Candidate 规范化内容身份。"),
+      field("schemaVersion", "literal 3", true, "3", "当前最小 Candidate 格式；读取仍兼容旧 v2。"),
       field("revision", "positive integer", true, "2", "Candidate 所属 Revision。"),
-      field("changedPaths[]", "string[]", true, "['src/app.ts']", "Reviewer 和 Publish 的受控路径集合。"),
-      field("operations[]", "path operation[]", true, "MODIFY src/app.ts", "从 old blob/mode 到 new blob/mode 的精确操作。"),
-      field("resultSnapshot", "ArtifactRef", true, "revision-2/result.json", "当前 Revision 的完整结果快照。")
+      field("runBaselineSnapshotHash", "sha256", true, "sha256:81c0…", "绑定 Run 初始基线。"),
+      field("inputSnapshotHash", "sha256", true, "sha256:18b2…", "绑定本 Revision 的输入。"),
+      field("resultSnapshotHash", "sha256", true, "sha256:53ad…", "绑定 Worker 冻结结果。"),
+      field("operations[]", "path operation[]", true, "MODIFY src/app.ts", "从 baseline 到 result 的累计内容哈希与 mode 操作。"),
+      field("candidateHash", "sha256", true, "sha256:92af…", "以上规范化字段的内容身份。")
     ],
     sources: [
       "apps/daemon/src/worker-runner.ts#WorkerRunner.captureCandidate",
-      "packages/workspace/src/git-snapshot.ts"
+      "packages/workspace/src/candidate-builder.ts#buildGitCandidate"
     ]
   }),
 
@@ -286,15 +288,17 @@ export const DATA_DETAILS = Object.freeze({
     category: "artifact-and-state",
     producer: "PublishCoordinator",
     consumer: "PublishService / workspace apply adapter",
-    summary: "把已接受 Candidate 转换为带 expected-old 条件的全部文件操作。",
-    purpose: "任何路径冲突都必须在第一笔写入前被发现，并支持响应丢失后的对账。",
-    transformation: "accepted Candidate + Review + Decision → signed operations + stable operationId",
-    lifecycle: "PREPARED → SUBMITTED → COMMITTED/CONFLICT/UNKNOWN；终态证据持续保存。",
+    summary: "把已接受 Candidate 转换为唯一自包含的签名交付包和带 expected-old 条件的操作。",
+    purpose: "任何路径冲突都在第一笔写入前发现；Bundle 同时为默认 apply 与崩溃恢复提供冻结内容。",
+    transformation: "accepted Candidate + bound Git trees + Review → on-demand patch + operations + blobs → signed Bundle",
+    lifecycle: "Bundle 在 Publish 前持久化并在终态保留；默认 adapter 不再创建平行 publish-blobs Artifact。",
     fields: [
       field("operationId", "identifier", true, "publish-f14c", "重试与恢复对账使用的稳定身份。"),
       field("operationsHash", "sha256", true, "sha256:770e…", "绑定完整有序操作集合。"),
       field("operations[].expectedOldHash", "sha256 | null", true, "sha256:old…", "全路径 preflight 的 CAS 前置内容。"),
       field("operations[].expectedOldMode", "file mode | null", true, "100644", "同时保护权限位。"),
+      field("bundle.patchHash", "sha256", true, "sha256:4c1d…", "绑定从 baseline/result trees 临时生成的累计 patch。"),
+      field("bundle.blobs[]", "content-addressed bytes", true, "src/app.ts → sha256:new…", "默认 adapter 与恢复直接读取的最终文件内容。"),
       field("status", "publish status", true, "PREPARED", "当前 durable 发布阶段。")
     ],
     sources: [

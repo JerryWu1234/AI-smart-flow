@@ -230,10 +230,24 @@ describe("Pi WorkerRunner", () => {
     expect(run.workerAttempts[0]?.status).toBe("COMPLETED");
     expect(run.workerAttempts[0]?.piSessionId).toMatch(/^pi-session-/u);
     const candidate = JSON.parse(new TextDecoder().decode(await store.readArtifact(run.candidate))) as {
+      schemaVersion: number;
       operations: Array<{ path: string }>;
     };
+    expect(candidate.schemaVersion).toBe(3);
     expect(candidate.operations.map((operation) => operation.path)).toContain("sum.js");
     expect(candidate.operations.some((operation) => operation.path.startsWith(".smartflow-runtime/"))).toBe(false);
+    const revision = run.gitWorkspace?.revisions["1"];
+    expect(revision).toMatchObject({
+      revision: 1,
+      candidate: run.candidate
+    });
+    expect(revision?.resultSnapshot).toBeDefined();
+    expect(revision).not.toHaveProperty("incrementalPatch");
+    expect(revision).not.toHaveProperty("cumulativePatch");
+    expect(revision).not.toHaveProperty("evidence");
+    expect(runArtifactInventory(run).bindings.some((binding) =>
+      binding.semantic === "GIT_PATCH" || binding.semantic === "GIT_EVIDENCE"
+    )).toBe(false);
     for (const binding of runArtifactInventory(run).bindings) {
       if (binding.semantic === "TASK_SOURCE") continue;
       const artifactText = new TextDecoder().decode(await store.readArtifact(binding.ref));

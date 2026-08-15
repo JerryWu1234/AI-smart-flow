@@ -126,6 +126,64 @@ async function allWorkspacePaths(root: string): Promise<string[]> {
   return paths;
 }
 
+export function verifyGitWorkspaceSnapshot(snapshot: GitWorkspaceSnapshot): boolean {
+  try {
+    if (
+      (snapshot as { schemaVersion?: unknown }).schemaVersion !== 1 ||
+      snapshot.activeWorktreeRoot !== "." ||
+      !new Set<GitSnapshotKind>(["RUN_BASELINE", "REVISION_INPUT", "REVISION_RESULT"])
+        .has(snapshot.snapshotKind) ||
+      !Number.isInteger(snapshot.revision) ||
+      snapshot.revision <= 0 ||
+      !/^[a-f0-9]{64}$/u.test(snapshot.repositoryId) ||
+      !/^[a-f0-9]{40,64}$/u.test(snapshot.treeId) ||
+      !/^[a-f0-9]{64}$/u.test(snapshot.snapshotHash) ||
+      !/^[a-f0-9]{64}$/u.test(snapshot.includedPathPolicyHash) ||
+      !Array.isArray(snapshot.entries) ||
+      Number.isNaN(Date.parse(snapshot.createdAt))
+    ) return false;
+    const paths = snapshot.entries.map((entry) => entry.path);
+    if (
+      new Set(paths).size !== paths.length ||
+      paths.some((path) => !safeRelativePath(path)) ||
+      [...paths].sort((left, right) => left < right ? -1 : left > right ? 1 : 0)
+        .some((path, index) => path !== paths[index])
+    ) return false;
+    for (const entry of snapshot.entries) {
+      if (
+        !/^[a-f0-9]{40,64}$/u.test(entry.blobId) ||
+        !/^[a-f0-9]{64}$/u.test(entry.sha256) ||
+        !Number.isInteger(entry.size) ||
+        entry.size < 0
+      ) return false;
+      const entryKind = (entry as { kind?: unknown }).kind;
+      if (entryKind === "FILE") {
+        if (!new Set<GitFileMode>(["100644", "100755"]).has(entry.mode) || entry.target !== undefined) {
+          return false;
+        }
+      } else if (
+        entryKind !== "SYMLINK" ||
+        entry.mode !== "120000" ||
+        typeof entry.target !== "string" ||
+        entry.size !== Buffer.byteLength(entry.target) ||
+        entry.sha256 !== hash(Buffer.from(entry.target, "utf8"))
+      ) return false;
+    }
+    const hashBody = {
+      repositoryId: snapshot.repositoryId,
+      activeWorktreeRoot: snapshot.activeWorktreeRoot,
+      snapshotKind: snapshot.snapshotKind,
+      revision: snapshot.revision,
+      treeId: snapshot.treeId,
+      includedPathPolicyHash: snapshot.includedPathPolicyHash,
+      entries: snapshot.entries
+    };
+    return snapshot.snapshotHash === hash(canonical(hashBody));
+  } catch {
+    return false;
+  }
+}
+
 export async function captureGitSnapshot(
   input: CaptureGitSnapshotInput
 ): Promise<GitWorkspaceSnapshot> {

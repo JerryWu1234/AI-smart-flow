@@ -1,6 +1,6 @@
-# SmartFlow 4.1 Data Model
+# SmartFlow Data Model
 
-These are design-level entities. Runtime implementation maps them to Zod schemas, `ArtifactRef`, and the Project's schema-v4 `state.json`.
+These are design-level entities. Runtime implementation maps them to Zod schemas, `ArtifactRef`, and the Project's schema-v5 `state.sqlite`.
 
 ## ProjectRunIndex
 
@@ -97,11 +97,10 @@ interface GitRevisionWorkspaceRef {
   inputSnapshot: ArtifactRef;
   resultSnapshot?: ArtifactRef;
   candidate?: ArtifactRef;
-  incrementalPatch?: ArtifactRef;
 }
 ```
 
-Revision 1 points to Run Baseline. Later Revisions point to the previous Result Snapshot. Pi receives only the current root; object store, index, original-project path, and other Run directories remain outside its project-data authority and public protocol.
+Revision 1 points to Run Baseline. Later Revisions point to the previous Result Snapshot. Pi receives only the current root; object store, index, original-project path, and other Run directories remain outside its project-data authority and public protocol. The runtime schema still accepts optional `incrementalPatch`, `cumulativePatch`, and `evidence` references from legacy v2 records, but new Revisions never write them.
 
 ## PiWorkerAttempt and PiSessionArtifact
 
@@ -142,28 +141,21 @@ interface PiSessionArtifact {
 
 An Attempt is the durable identity of one Pi child execution. Host reconnect does not create a new Attempt while the child is alive. Crash recovery and every new Revision create a new Attempt/session. Session Artifact is evidence, not state-machine truth.
 
-## Candidate evidence
+## Candidate v3
 
 ```ts
-interface GitCandidateEvidence {
+interface GitCandidateV3 {
+  schemaVersion: 3;
   revision: number;
   runBaselineSnapshotHash: string;
   inputSnapshotHash: string;
   resultSnapshotHash: string;
-  runBaselineTreeId: string;
-  inputTreeId: string;
-  resultTreeId: string;
-  canonicalOperations: CandidateOperation[];
-  incrementalPatchArtifact?: ArtifactRef;
-  cumulativePatchArtifact: ArtifactRef;
-  blobs: Record<string, { oldBlobId: string | null; newBlobId: string | null }>;
-  modes: Record<string, { oldMode: string | null; newMode: string | null }>;
-  evidenceArtifactHash: string;
+  operations: CandidateOperation[];
   candidateHash: string;
 }
 ```
 
-Formal Candidate compares Run Baseline to current Result. `.smartflow-runtime/` and session temporaries are excluded before Result capture.
+The formal Candidate compares the Run Baseline to the current Result Snapshot. Snapshot Artifacts already carry Git tree, blob, and mode evidence, so Candidate v3 binds their hashes rather than copying those values into another Artifact. `.smartflow-runtime/` and session temporaries are excluded before Result capture. Patch bytes are generated from the bound Git trees only when Publish prepares the DeliveryBundle; Worker does not persist incremental or cumulative patches. Verification remains backward-compatible with unversioned and v2 Candidate Artifacts.
 
 ## Review entities and durable Host turn
 
@@ -315,6 +307,8 @@ interface PublishConflictResult {
 
 Any touched-path conflict returns before the batch starts. PARTIAL or UNKNOWN persists as `PUBLISH_RECOVERY_BLOCKED` and never becomes `COMPLETED`.
 
+Publish creates one signed, self-contained `DeliveryBundle` containing the canonical operations, on-demand cumulative Git patch, and final file blobs. The default filesystem adapter reads those embedded blobs directly and does not persist a parallel `publish-blobs/` tree. Custom adapters retain materialized blob Artifacts for compatibility with the existing `ArtifactRef` reader contract. A `PUBLISHING` recovery reconstructs its exact operations and default blob reader from the durable Bundle, not from the temporary worktree.
+
 ## RunRecord schema-v5 additions
 
 The Project state schema is version 5. Startup migration accepts schema-v4 records, removes claim/lease fields, converts safe active Review checkpoints to `AWAITING_REVIEW`, and pauses ambiguous `REVIEWING` records. `RunRecord` retains Task, Revision chain, snapshots, Candidate, Review, publish, receipts, and cleanup, and includes:
@@ -333,5 +327,7 @@ It stores `workerAttempts: PiWorkerAttempt[]` and no longer stores Broker sessio
 - Active Run: retain every Revision workspace/snapshot, Attempt/session Artifact, Review history, Host turn, and repair count; forbid Git `gc`/`prune`.
 - Attempt terminal: persist terminal state and session Artifact, reconcile process tree, then clean Run-local Pi runtime files.
 - Review turn: atomically persist `REVIEWING` plus `AWAITING_REVIEW` before path disclosure; clear or replace the checkpoint only through a current CAS-bound transition.
-- Reconciled terminal Run: retain task/snapshot/Candidate/Review/automatic-decision/Publish audit Artifacts and patch/bundle; delete temporary workspaces, indexes, runtime directories, and object store.
-- Recovery: `state.json` references exact task binding, Revision, Attempt, Host turn, and Publish operation; it never infers state from mutable files, timers, queues, session files, or `events.jsonl`.
+- Reconciled terminal Run: retain task/snapshot/Candidate/Review/automatic-decision/Publish audit Artifacts and the signed, self-contained DeliveryBundle; delete temporary workspaces, indexes, runtime directories, object store, and any derivable standalone patch/evidence/blob copies.
+- Recovery: `state.sqlite` references exact task binding, Revision, Attempt, Host turn, and Publish operation; it never infers state from mutable files, timers, queues, session files, or legacy `events.jsonl`.
+- Audit: `audit_events` in the same SQLite database is the only runtime audit sink and is not a second recovery authority.
+- Legacy import: pre-SQLite `state.json` and `events.jsonl` are imported once and moved into the protected `legacy-imports/` directory; a later/recreated `events.jsonl` is ignored rather than merged into canonical audit history.

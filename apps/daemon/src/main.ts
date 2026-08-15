@@ -72,7 +72,6 @@ export async function startSmartFlowDaemon(
     ): Readonly<Record<string, unknown>> | undefined =>
       providers.resolve(providerRuntimeConfigHash)?.providerRuntimeConfig
   });
-  await projectRuntime.recover();
   const server = new LocalIpcServer(
     dataDirectory,
     options.handler ?? projectRuntime.handle,
@@ -86,6 +85,9 @@ export async function startSmartFlowDaemon(
     }
   );
   try {
+    // Own the installation before importing SQLite state or scheduling recovery effects.
+    await server.acquireInstanceLock();
+    await projectRuntime.recover();
     await server.start();
     const durationMs = performance.now() - timer;
     metrics.recordStage("daemon.start", durationMs, true);
@@ -100,6 +102,8 @@ export async function startSmartFlowDaemon(
       }
     });
   } catch (error) {
+    projectRuntime.dispose();
+    await server.close().catch(() => undefined);
     const durationMs = performance.now() - timer;
     metrics.recordStage("daemon.start", durationMs, false);
     logger.log({ level: "error", event: "daemon.start_failed", stage: "daemon.start", durationMs, error });

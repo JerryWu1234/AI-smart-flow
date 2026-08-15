@@ -6,7 +6,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   LocalIpcClient,
   LocalIpcServer,
-  SMARTFLOW_IPC_PROTOCOL
+  SMARTFLOW_IPC_PROTOCOL,
+  resolveWorkerLaunchConfiguration,
+  startSmartFlowDaemon
 } from "@smartflow/daemon";
 import { JobRunner } from "../helpers/job-runner.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
@@ -57,6 +59,7 @@ describe("short MCP calls and independent daemon jobs", () => {
     activeHarnesses.push(harness);
     const dataDirectory = resolve(harness.dataDir, "singleton-daemon");
     const first = new LocalIpcServer(dataDirectory, () => Promise.resolve({}));
+    await Promise.all([first.start(), first.start()]);
     await first.start();
     activeServers.push(first);
     const second = new LocalIpcServer(dataDirectory, () => Promise.resolve({}));
@@ -85,6 +88,39 @@ describe("short MCP calls and independent daemon jobs", () => {
     });
     socket.destroy();
     await expect(runnerWaitLimit()).rejects.toThrow(/between 0 and 30000ms/u);
+  });
+
+  it("keeps the first daemon endpoint after production startup rejects a second instance", async () => {
+    const harness = await createRuntimeHarness();
+    activeHarnesses.push(harness);
+    const dataDirectory = resolve(harness.dataDir, "prod");
+    const workerLaunchConfiguration = resolveWorkerLaunchConfiguration([], {
+      SMARTFLOW_PI_API: "openai-responses",
+      SMARTFLOW_PI_BASE_URL: "https://models.example.test/v1",
+      SMARTFLOW_PI_MODEL: "test-model",
+      SMARTFLOW_PI_API_KEY: "test-credential"
+    });
+    const first = await startSmartFlowDaemon({
+      dataDirectory,
+      workerLaunchConfiguration,
+      handler: () => Promise.resolve({ instance: "first" })
+    });
+    try {
+      await expect(startSmartFlowDaemon({
+        dataDirectory,
+        workerLaunchConfiguration,
+        handler: () => Promise.resolve({ instance: "second" })
+      })).rejects.toMatchObject({ code: "PROJECT_LOCKED" });
+
+      const client = await LocalIpcClient.connect(first.server.endpoint);
+      try {
+        await expect(client.call("smartflow_health", {})).resolves.toEqual({ instance: "first" });
+      } finally {
+        client.close();
+      }
+    } finally {
+      await first.close();
+    }
   });
 
   it("rejects daemon connections with stale or missing configuration fingerprints", async () => {

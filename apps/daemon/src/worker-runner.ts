@@ -859,7 +859,6 @@ export class WorkerRunner {
       resultSnapshotBytes
     );
     const built = await buildGitCandidate({
-      runGitDirectory: prepared.runGitDirectory,
       runBaseline: prepared.baseline,
       revisionInput: prepared.inputSnapshot,
       revisionResult: resultSnapshot
@@ -876,24 +875,11 @@ export class WorkerRunner {
     if (!this.matchesAttempt(beforeArtifacts, request, attemptId, generation, expectedFence)) {
       return { attemptId, generation, phase: (await this.currentRun(request.jobId)).phase, stale: true };
     }
-    const [incrementalPatchRef, cumulativePatchRef, evidenceRef, candidateRef] = await Promise.all([
-      this.store.writeArtifact(
-        `runs/${request.jobId}/revision-${String(request.revision)}/patches/incremental-${createHash("sha256").update(built.incrementalPatch).digest("hex")}.patch`,
-        built.incrementalPatch
-      ),
-      this.store.writeArtifact(
-        `runs/${request.jobId}/revision-${String(request.revision)}/patches/cumulative-${createHash("sha256").update(built.cumulativePatch).digest("hex")}.patch`,
-        built.cumulativePatch
-      ),
-      this.store.writeArtifact(
-        `runs/${request.jobId}/revision-${String(request.revision)}/git-evidence/${candidate.evidenceArtifactHash}.json`,
-        built.evidenceBytes
-      ),
-      this.store.writeArtifact(
-        `runs/${request.jobId}/revision-${String(request.revision)}/candidates/${attemptId}-${candidate.hash}.json`,
-        Buffer.from(JSON.stringify(candidate), "utf8")
-      )
-    ]);
+    const candidateRef = await this.store.writeArtifact(
+      `runs/${request.jobId}/revision-${String(request.revision)}/candidates/${attemptId}-${candidate.candidateHash}.json`,
+      Buffer.from(JSON.stringify(candidate), "utf8")
+    );
+
     const manifest = taskManifestSchema.parse(JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(prepared.run.taskManifest))
     ));
@@ -909,7 +895,7 @@ export class WorkerRunner {
     await this.mutations.mutate(
       {
         requestId: `pi-candidate:${attemptId}`,
-        payload: { attemptId, generation, candidateHash: candidate.hash },
+        payload: { attemptId, generation, candidateHash: candidate.candidateHash },
         expectedJobId: request.jobId,
         expectedFence,
         expectedRevision: request.revision,
@@ -938,7 +924,7 @@ export class WorkerRunner {
               {
                 revision: run.revision,
                 taskSourceHash: reviewTaskSourceHash,
-                candidateHash: candidate.hash,
+                candidateHash: candidate.candidateHash,
                 changedPaths: candidate.operations.map((operation) => operation.path),
                 piSessionId: attempt.piSessionId,
                 ...(reviewerSessions[0] === undefined
@@ -961,12 +947,12 @@ export class WorkerRunner {
                   revisions: {
                     ...active.gitWorkspace.revisions,
                     [String(request.revision)]: {
-                      ...revisionWorkspace,
+                      revision: revisionWorkspace.revision,
+                      indexPath: revisionWorkspace.indexPath,
+                      workspacePath: revisionWorkspace.workspacePath,
+                      inputSnapshot: revisionWorkspace.inputSnapshot,
                       resultSnapshot: resultSnapshotRef,
-                      candidate: candidateRef,
-                      incrementalPatch: incrementalPatchRef,
-                      cumulativePatch: cumulativePatchRef,
-                      evidence: evidenceRef
+                      candidate: candidateRef
                     }
                   }
                 },
@@ -1006,9 +992,7 @@ export class WorkerRunner {
   ): Promise<string[]> {
     const protectedPaths = new Set<string>([
       state.canonicalProjectRoot,
-      this.store.statePath,
-      this.store.eventsPath,
-      this.store.lockPath
+      ...this.store.protectedPaths
     ]);
     const runsRoot = resolve(this.store.dataDirectory, "runs");
     for (const entry of await readdir(runsRoot, { withFileTypes: true }).catch(() => [])) {

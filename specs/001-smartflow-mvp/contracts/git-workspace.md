@@ -11,9 +11,10 @@ These rules must be frozen before Git Adapter implementation begins:
 1. **Content filters do not block the Run**
    - The capability probe does not inspect or block Git LFS, `.gitattributes`, or custom `clean`, `smudge` or `process` filters.
    - Snapshot and materialization use the current worktree bytes through the normal file flow.
-2. **Candidate identity covers all Git evidence**
-   - The Candidate hash must bind the baseline snapshot hash, result snapshot hash, canonical operations and the SHA-256 of the Git evidence Artifact.
-   - Git tree/blob object IDs are evidence references and must not replace SmartFlow's SHA-256 integrity bindings.
+2. **Candidate identity binds snapshots without copying their evidence**
+   - Candidate v3 binds the Run Baseline, Revision Input, and Result Snapshot hashes plus canonical cumulative operations.
+   - Snapshot Artifacts remain the sole source of Git tree/blob/mode evidence; Candidate does not repeat tree IDs, blob maps, mode maps, or an evidence Artifact hash.
+   - Git object IDs remain internal evidence references and must not replace SmartFlow's SHA-256 integrity bindings.
 3. **Automatic publish requires a conflict-checked batch adapter**
    - A preflight conflict must return before publishing starts and must cause zero writes.
    - Automatic publish is allowed when the Apply Adapter supports expected-old-hash checks, stable operation IDs, result queries, and either strict `atomicBatchCas` or local `preflightBatchWrite`.
@@ -25,7 +26,7 @@ These rules must be frozen before Git Adapter implementation begins:
 5. **Revision trees form an immutable chain**
    - The Run Baseline is captured once and never replaced.
    - Revision 1 uses the Run Baseline as input; every later Revision uses the previous Revision's Result Tree.
-   - Review and Publish use the cumulative diff from the Run Baseline to the current Result Tree. The adjacent-tree diff is retained only as evidence of the current repair round.
+   - Review and Publish use cumulative Candidate operations from the Run Baseline to the current Result Tree. Git patches are generated from the bound trees only when needed and are not retained as per-Revision Artifacts.
    - All Revisions share one append-only Run object store, but use separate indexes, Workspaces, Snapshot Artifacts and Candidate Artifacts.
    - Git `gc` and `prune` are forbidden while any Revision snapshot is referenced.
 6. **Task-path concurrency and Git state are Run-scoped**
@@ -43,13 +44,14 @@ interface GitWorkspaceAdapter {
   captureBaseline(input: CaptureInput): Promise<GitWorkspaceSnapshot>;
   materialize(input: MaterializeInput): Promise<GitRevisionWorkspaceRef>;
   captureResult(input: CaptureResultInput): Promise<GitWorkspaceSnapshot>;
-  buildCandidate(input: BuildCandidateInput): Promise<GitCandidateEvidence>;
+  buildCandidate(input: BuildCandidateInput): Promise<GitCandidateV3>;
+  buildTreePatch(input: BuildTreePatchInput): Promise<Uint8Array>;
   preflight(input: PublishPreflightInput): Promise<GitPublishConflict[]>;
   cleanup(input: CleanupInput): Promise<void>;
 }
 ```
 
-The exact TypeScript names can change during implementation, but each operation must be represented by durable Artifacts and a state transition in `state.json`.
+The exact TypeScript names can change during implementation. Snapshot and Candidate operations produce durable Artifacts and state transitions; tree patches are deterministic derived bytes embedded in a DeliveryBundle only when Publish requires them.
 
 ## Safety invariants
 
@@ -58,7 +60,7 @@ The exact TypeScript names can change during implementation, but each operation 
 - The adapter never changes the user's normal index, refs, branch, worktree files or Git configuration.
 - The adapter never invokes `commit`, `push`, `reset`, `clean`, `checkout`, `merge`, `rollback` or an equivalent destructive operation against the active workspace.
 - Every snapshot is deterministic for the same effective file view and inclusion policy.
-- Candidate operations are sorted canonically and carry expected old blob/mode values.
+- Candidate operations are sorted canonically and carry expected old content hashes and modes.
 - A new Revision never overwrites an earlier Revision's Snapshot or Candidate Artifacts.
 - A preflight-detected conflict returns before publish starts and causes zero writes.
 - Preflight inspects only cumulative Candidate paths. A conflict result includes conflict paths, `0/N`, `activeWorkspaceChanged=false` and a Patch/DeliveryBundle.

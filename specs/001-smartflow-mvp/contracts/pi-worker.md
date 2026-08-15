@@ -72,7 +72,7 @@
 | Independent new feature | Leader creates new Task/Run/session |
 | Cancel | terminate entire containment tree and persist CANCELED |
 
-Pi session files are supporting evidence. `state.json`, frozen Task, Revision and Git snapshots remain authoritative.
+Pi session files are supporting evidence. `state.sqlite`, frozen Task, Revision and Git snapshots remain authoritative.
 
 ## Candidate handoff
 

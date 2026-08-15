@@ -8,6 +8,7 @@ import {
   type RunPhase
 } from "@smartflow/protocol";
 import {
+  operationsHash,
   parseSerializedDeliveryBundle,
   verifyDeliverySignature,
   verifyLocalDeliveryBundle,
@@ -22,7 +23,16 @@ import {
   type WorkerAttempt
 } from "@smartflow/state-store";
 import { taskManifestSchema } from "@smartflow/task-manifest";
-import { verifyCandidate, type Candidate } from "@smartflow/workspace";
+import {
+  cleanupGitRunTemporaryState,
+  getCandidateHash,
+  verifyCandidate,
+  verifyCandidateSnapshotBindings,
+  verifyGitWorkspaceSnapshot,
+  type Candidate,
+  type CandidateOperation,
+  type GitWorkspaceSnapshot
+} from "@smartflow/workspace";
 
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
 
@@ -98,6 +108,24 @@ function digest(value: string): string {
   return value.replace(/^sha256:/u, "");
 }
 
+function semanticHashMatches(value: object, hashKey: string): boolean {
+  const record = value as Record<string, unknown>;
+  const expected = record[hashKey];
+  const body = Object.fromEntries(Object.entries(record).filter(([key]) => key !== hashKey));
+  return typeof expected === "string" && canonicalHash(body) === expected;
+}
+
+function requiresPublishApproval(run: RunRecord): boolean {
+  if (new Set<RunPhase>(["READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase)) {
+    return true;
+  }
+  if (run.phase !== "PAUSED") return false;
+  const code = run.pause?.code;
+  return code?.startsWith("PUBLISH_") === true ||
+    code === "PROJECT_PUBLISH_BUSY" ||
+    (code === "RUNTIME_STAGE_FAILED" && run.lastError?.stage === "publish");
+}
+
 function publishResultMatchesOperations(
   result: PublishResult,
   operations: readonly ApplyOperation[]
@@ -110,6 +138,34 @@ function publishResultMatchesOperations(
     if (pathResult.status !== "COMMITTED") return result.status !== "COMMITTED";
     return pathResult.observedHash === operation.newHash &&
       pathResult.observedMode === operation.newMode;
+  });
+}
+
+function publishOperationsMatchCandidate(
+  candidateOperations: readonly CandidateOperation[],
+  publishOperations: readonly ApplyOperation[]
+): boolean {
+  if (candidateOperations.length !== publishOperations.length) return false;
+  const byPath = new Map(publishOperations.map((operation) => [operation.path, operation]));
+  return candidateOperations.every((candidateOperation) => {
+    const operation = byPath.get(candidateOperation.path);
+    const oldEntry = "oldEntry" in candidateOperation ? candidateOperation.oldEntry : undefined;
+    const newEntry = "newEntry" in candidateOperation ? candidateOperation.newEntry : undefined;
+    if (
+      operation === undefined ||
+      oldEntry?.kind === "SYMLINK" ||
+      newEntry?.kind === "SYMLINK" ||
+      operation.type !== candidateOperation.kind ||
+      operation.expectedOldKind !== (oldEntry === undefined ? "ABSENT" : "FILE") ||
+      operation.expectedOldHash !== (oldEntry?.sha256 ?? null) ||
+      operation.expectedOldMode !== (oldEntry?.mode ?? null) ||
+      operation.newHash !== (newEntry?.sha256 ?? null) ||
+      operation.newMode !== (newEntry?.mode ?? null)
+    ) return false;
+    if (newEntry === undefined) return operation.blobRef === null;
+    return operation.blobRef !== null &&
+      operation.blobRef.sha256.replace(/^sha256:/u, "") === newEntry.sha256 &&
+      operation.blobRef.size === newEntry.size;
   });
 }
 
@@ -157,16 +213,65 @@ export async function verifyRunArtifacts(
       manifest.sourceHash !== digest(run.taskSource.sha256)
     ) return "ARTIFACT_SEMANTIC_MISMATCH:taskManifest";
 
+    const baselineBytes = bytesByName.get("baseline");
+    let baselineSnapshot: GitWorkspaceSnapshot | undefined;
+    if (baselineBytes !== undefined) {
+      baselineSnapshot = json(baselineBytes) as GitWorkspaceSnapshot;
+      if (!verifyGitWorkspaceSnapshot(baselineSnapshot)) {
+        return "ARTIFACT_SEMANTIC_MISMATCH:baseline";
+      }
+    }
+
     const candidateBytes = bytesByName.get("candidate");
     let candidate: Candidate | undefined;
     if (candidateBytes !== undefined) {
       candidate = json(candidateBytes) as Candidate;
       if (!verifyCandidate(candidate)) return "ARTIFACT_SEMANTIC_MISMATCH:candidate";
+      if (run.gitWorkspace === undefined) {
+        if (
+          candidate.schemaVersion === 2 ||
+          candidate.schemaVersion === 3 ||
+          baselineSnapshot === undefined ||
+          candidate.baselineHash !== baselineSnapshot.snapshotHash
+        ) return "ARTIFACT_SEMANTIC_MISMATCH:candidateSnapshots";
+      } else {
+        const revisionWorkspace = run.gitWorkspace.revisions[String(run.revision)];
+        const runBaselineBytes = bytesByName.get("gitWorkspace.runBaselineSnapshot");
+        const inputBytes = bytesByName.get(
+          `gitWorkspace.revisions.${String(run.revision)}.inputSnapshot`
+        );
+        const resultBytes = bytesByName.get(
+          `gitWorkspace.revisions.${String(run.revision)}.resultSnapshot`
+        );
+        if (
+          revisionWorkspace === undefined ||
+          baselineSnapshot === undefined ||
+          runBaselineBytes === undefined ||
+          inputBytes === undefined ||
+          resultBytes === undefined
+        ) return "ARTIFACT_SEMANTIC_MISMATCH:candidateSnapshots";
+        const runBaseline = json(runBaselineBytes) as GitWorkspaceSnapshot;
+        const revisionInput = json(inputBytes) as GitWorkspaceSnapshot;
+        const revisionResult = json(resultBytes) as GitWorkspaceSnapshot;
+        if (
+          baselineSnapshot.snapshotHash !== runBaseline.snapshotHash ||
+          !verifyCandidateSnapshotBindings({
+            candidate,
+            runBaseline,
+            revisionInput,
+            revisionResult
+          })
+        ) return "ARTIFACT_SEMANTIC_MISMATCH:candidateSnapshots";
+      }
     }
 
     const reviewBytes = bytesByName.get("review");
+    let reviewHash: string | undefined;
+    let reviewAllowsAccept = false;
     if (reviewBytes !== undefined) {
       const review = durableReviewDecisionSchema.parse(json(reviewBytes));
+      reviewHash = review.reviewHash;
+      reviewAllowsAccept = review.gate.allowedLeaderDecisions.includes("accept");
       const matchingAttempt = [...run.workerAttempts].reverse().find(
         (attempt) => attempt.revision === run.revision && attempt.piSessionId === review.piSessionId
       );
@@ -174,28 +279,39 @@ export async function verifyRunArtifacts(
         (entry) => entry.reviewAttemptId === review.reviewAttemptId
       );
       if (
+        !semanticHashMatches(review, "reviewHash") ||
         review.revision !== run.revision ||
         candidate === undefined ||
-        review.candidateHash !== candidate.hash ||
+        review.candidateHash !== getCandidateHash(candidate) ||
         matchingHistory === undefined ||
         matchingHistory.taskSourceHash !== review.taskSourceHash ||
         matchingHistory.candidateHash !== review.candidateHash ||
+        matchingHistory.reviewHash !== review.reviewHash ||
         matchingAttempt === undefined ||
         review.reviewerSessionId === review.piSessionId
       ) return "ARTIFACT_SEMANTIC_MISMATCH:review";
     }
 
     const leaderBytes = bytesByName.get("leaderDecision");
+    let leaderAccepted = false;
     if (leaderBytes !== undefined) {
       const decision = durableLeaderDecisionSchema.parse(json(leaderBytes));
-      if (decision.revision !== run.revision) {
-        return "ARTIFACT_SEMANTIC_MISMATCH:leaderDecision";
-      }
+      leaderAccepted = decision.decision === "accept";
+      if (
+        !semanticHashMatches(decision, "decisionHash") ||
+        decision.revision !== run.revision ||
+        decision.reviewHash !== reviewHash
+      ) return "ARTIFACT_SEMANTIC_MISMATCH:leaderDecision";
+    }
+    if (requiresPublishApproval(run)) {
+      if (!reviewAllowsAccept) return "ARTIFACT_SEMANTIC_MISMATCH:review";
+      if (!leaderAccepted) return "ARTIFACT_SEMANTIC_MISMATCH:leaderDecision";
     }
 
     const deliveryBytes = bytesByName.get("deliveryBundle");
     if (deliveryBytes !== undefined) {
       const parsed = parseSerializedDeliveryBundle(deliveryBytes);
+      const operations = parsed.bundle.manifest.operations;
       if (
         !verifyLocalDeliveryBundle(parsed.bundle) ||
         !verifyDeliverySignature(
@@ -204,9 +320,17 @@ export async function verifyRunArtifacts(
         ) ||
         parsed.bundle.manifest.revision !== run.revision ||
         parsed.bundle.manifest.taskManifestHash !== digest(run.taskManifest.sha256) ||
-        (candidate !== undefined && parsed.bundle.manifest.candidateHash !== candidate.hash) ||
+        baselineSnapshot === undefined ||
+        parsed.bundle.manifest.baselineHash !== baselineSnapshot.snapshotHash ||
+        candidate === undefined ||
+        parsed.bundle.manifest.candidateHash !== getCandidateHash(candidate) ||
+        parsed.bundle.manifest.reviewHash !== reviewHash ||
+        !publishOperationsMatchCandidate(candidate.operations, operations) ||
+        (run.publish !== undefined &&
+          (run.publish.revision !== run.revision ||
+            run.publish.operationsHash !== operationsHash(operations))) ||
         (run.publish?.result !== undefined &&
-          !publishResultMatchesOperations(run.publish.result, parsed.bundle.manifest.operations))
+          !publishResultMatchesOperations(run.publish.result, operations))
       ) return "ARTIFACT_SEMANTIC_MISMATCH:deliveryBundle";
     }
   } catch {
@@ -348,17 +472,28 @@ export class RecoveryManager {
         run,
         `publish:${finalStatus.toLowerCase()}`,
         { observed },
-        (current) => ({
-          ...current,
-          phase: terminal ? "COMPLETED" : "PAUSED",
-          publish: { ...publish, status: finalStatus, result: parsed.data },
-          ...(terminal ? {} : {
-            pause: { code: "PUBLISH_CONFLICT", resumeActions: ["inspect_conflict", "cancel"] }
-          })
-        }),
-        terminal
+        (current) => {
+          if (
+            current.publish?.operationId !== publish.operationId ||
+            current.publish.operationsHash !== publish.operationsHash
+          ) throw new Error("PUBLISH_RECOVERY_IDENTITY_MISMATCH");
+          return {
+            ...current,
+            phase: terminal ? "COMPLETED" : "PAUSED",
+            publish: { ...current.publish, status: finalStatus, result: parsed.data },
+            ...(terminal ? {} : {
+              pause: { code: "PUBLISH_CONFLICT", resumeActions: ["inspect_conflict", "cancel"] }
+            })
+          };
+        },
+        terminal,
+        publish.operationId
       );
-      return this.result(committed, committed.runs[run.jobId] ?? run, "PUBLISH_RECONCILED");
+      const recoveredRun = committed.runs[run.jobId] ?? run;
+      if (terminal) {
+        await cleanupGitRunTemporaryState(this.store.dataDirectory, recoveredRun);
+      }
+      return this.result(committed, recoveredRun, "PUBLISH_RECONCILED");
     }
     return this.pause(state, run, `PUBLISH_RECOVERY_BLOCKED:${observed.status}`);
   }
@@ -402,7 +537,8 @@ export class RecoveryManager {
     transition: string,
     payload: unknown,
     mutate: (run: RunRecord) => RunRecord,
-    terminal = false
+    terminal = false,
+    releasePublishLeaseOperationId?: string
   ): Promise<ProjectState> {
     const attempt = currentAttempt(run);
     return (await this.mutations.mutate(
@@ -420,10 +556,17 @@ export class RecoveryManager {
         }),
         expectedPhases: [run.phase]
       },
-      (state) => ({
-        nextState: nextStateWithRun(state, run.jobId, mutate, terminal),
-        response: { transition }
-      })
+      (state) => {
+        const nextState = nextStateWithRun(state, run.jobId, mutate, terminal);
+        return {
+          nextState: releasePublishLeaseOperationId !== undefined &&
+            nextState.publishLease?.jobId === run.jobId &&
+            nextState.publishLease.operationId === releasePublishLeaseOperationId
+            ? { ...nextState, publishLease: null }
+            : nextState,
+          response: { transition }
+        };
+      }
     )).state;
   }
 

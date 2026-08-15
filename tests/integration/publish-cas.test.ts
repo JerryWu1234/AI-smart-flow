@@ -9,6 +9,7 @@ import { ProjectRuntime, PublishCoordinator } from "@smartflow/daemon";
 import {
   PublishService,
   operationsHash,
+  parseSerializedDeliveryBundle,
   stableOperationId,
   type ApplyOperation,
   type PublishAttemptRecord,
@@ -119,6 +120,11 @@ describe("durable CAS publish", () => {
         dataDirectory: resolve(dataDirectory, "projects", projectId),
         projectId
       });
+      const publishBlobsRoot = resolve(
+        store.dataDirectory,
+        "runs/job-1/revision-1/publish-blobs"
+      );
+      await rm(publishBlobsRoot, { recursive: true, force: true });
       const ready = await store.readState();
       const workspace = ready.runs["job-1"]?.workspace;
       if (workspace === undefined) throw new Error("precheck workspace missing");
@@ -172,6 +178,8 @@ describe("durable CAS publish", () => {
         }
       });
       expect(applyCalls).toBe(0);
+      const sourceHash = createHash("sha256").update(source).digest("hex");
+      await expect(readFile(resolve(publishBlobsRoot, sourceHash))).resolves.toEqual(source);
     } finally {
       await harness.cleanup();
     }
@@ -186,6 +194,11 @@ describe("durable CAS publish", () => {
         dataDirectory: resolve(dataDirectory, "projects", projectId),
         projectId
       });
+      const publishBlobsRoot = resolve(
+        store.dataDirectory,
+        "runs/job-1/revision-1/publish-blobs"
+      );
+      await rm(publishBlobsRoot, { recursive: true, force: true });
       const ready = await store.readState();
       const workspace = ready.runs["job-1"]?.workspace;
       if (workspace === undefined) throw new Error("default publish workspace missing");
@@ -210,8 +223,157 @@ describe("durable CAS publish", () => {
         deliveryBundle: bundleRef,
         publish: { status: "COMMITTED" }
       });
-      expect((await store.readArtifact(bundleRef)).byteLength).toBeGreaterThan(0);
+      const serializedBundle = await store.readArtifact(bundleRef);
+      const parsedBundle = parseSerializedDeliveryBundle(serializedBundle).bundle;
+      expect(serializedBundle.byteLength).toBeGreaterThan(0);
+      expect(parsedBundle.manifest.operations[0]?.blobRef?.relativePath)
+        .toMatch(/^delivery-bundle\/blobs\/[a-f0-9]{64}$/u);
+      expect(parsedBundle.blobs["sum.js"]).toEqual(source);
+      await expect(access(publishBlobsRoot)).rejects.toMatchObject({ code: "ENOENT" });
       expect(await readFile(sourcePath)).toEqual(source);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("reuses a durable legacy Bundle without rebuilding adapter-specific operation refs", async () => {
+    const harness = await createRuntimeHarness();
+    try {
+      const store = await createLifecycleStore(harness, "PUBLISHING");
+      const publishing = await store.readState();
+      const run = publishing.runs["job-1"];
+      if (run?.deliveryBundle === undefined || run.workspace === undefined) {
+        throw new Error("legacy Bundle fixture missing");
+      }
+      const bundleBytes = await store.readArtifact(run.deliveryBundle);
+      const readyRun = { ...run, phase: "READY_TO_PUBLISH" as const };
+      delete readyRun.publish;
+      const updatedAt = new Date().toISOString();
+      await store.writeState({
+        ...publishing,
+        stateVersion: publishing.stateVersion + 1,
+        runs: { ...publishing.runs, "job-1": { ...readyRun, updatedAt } },
+        updatedAt
+      });
+      await rm(resolve(store.dataDirectory, run.workspace.relativePath), {
+        recursive: true,
+        force: true
+      });
+      const sourcePath = resolve(harness.projectDir, "sum.js");
+      const source = await readFile(sourcePath);
+      await rm(sourcePath);
+
+      const result = await new PublishCoordinator(
+        store,
+        resolve(store.dataDirectory, "unused-signing-key.pem")
+      ).publish("job-1");
+
+      expect(result).toMatchObject({ service: { status: "COMMITTED" }, phase: "COMPLETED" });
+      const completed = (await store.readState()).runs["job-1"];
+      expect(completed?.deliveryBundle).toEqual(run.deliveryBundle);
+      if (completed?.deliveryBundle === undefined) throw new Error("reused Bundle missing");
+      expect(await store.readArtifact(completed.deliveryBundle)).toEqual(bundleBytes);
+      expect(await readFile(sourcePath)).toEqual(source);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("recovers the default filesystem adapter from Bundle operations without a worktree", async () => {
+    const harness = await createRuntimeHarness();
+    try {
+      const store = await createLifecycleStore(harness, "PUBLISHING");
+      const state = await store.readState();
+      const run = state.runs["job-1"];
+      if (
+        run?.publish === undefined ||
+        run.deliveryBundle === undefined ||
+        run.workspace === undefined
+      ) throw new Error("default recovery fixture missing");
+      const bundle = parseSerializedDeliveryBundle(
+        await store.readArtifact(run.deliveryBundle)
+      ).bundle;
+      const publish = {
+        ...run.publish,
+        adapterId: "filesystem-preflight-batch-v1"
+      };
+      const updatedAt = new Date().toISOString();
+      await store.writeState({
+        ...state,
+        stateVersion: state.stateVersion + 1,
+        runs: { ...state.runs, "job-1": { ...run, publish, updatedAt } },
+        updatedAt
+      });
+      await rm(resolve(store.dataDirectory, run.workspace.relativePath), {
+        recursive: true,
+        force: true
+      });
+      const resultRecord: PublishResult = {
+        operationId: publish.operationId,
+        operationsHash: publish.operationsHash,
+        status: "COMMITTED",
+        paths: bundle.manifest.operations.map((operation) => ({
+          path: operation.path,
+          status: "COMMITTED" as const,
+          observedHash: operation.newHash,
+          observedMode: operation.newMode
+        }))
+      };
+      const resultDirectory = resolve(store.dataDirectory, "publish-results");
+      await mkdir(resultDirectory, { recursive: true });
+      await writeFile(
+        resolve(resultDirectory, `${publish.operationId}.json`),
+        JSON.stringify(resultRecord),
+        "utf8"
+      );
+
+      const beforeRecovery = await store.readState();
+      await expect(new PublishCoordinator(
+        store,
+        resolve(store.dataDirectory, "unused-recovery-signing-key.pem")
+      ).recover("job-1", publish.operationId, publish.operationsHash)).resolves.toMatchObject({
+        status: "COMMITTED",
+        operationId: publish.operationId,
+        result: resultRecord
+      });
+      const afterRecovery = await store.readState();
+      expect(afterRecovery.stateVersion).toBe(beforeRecovery.stateVersion);
+      expect(afterRecovery.runs["job-1"]?.publish).toEqual(publish);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("blocks recovery when the persisted operationId is not the accepted stable identity", async () => {
+    const harness = await createRuntimeHarness();
+    try {
+      const store = await createLifecycleStore(harness, "PUBLISHING");
+      const state = await store.readState();
+      const run = state.runs["job-1"];
+      if (run?.publish === undefined) throw new Error("operation identity fixture missing");
+      const operationId = `publish-${"f".repeat(64)}`;
+      const updatedAt = new Date().toISOString();
+      await store.writeState({
+        ...state,
+        stateVersion: state.stateVersion + 1,
+        runs: {
+          ...state.runs,
+          "job-1": {
+            ...run,
+            publish: { ...run.publish, operationId },
+            updatedAt
+          }
+        },
+        updatedAt
+      });
+
+      await expect(new PublishCoordinator(
+        store,
+        resolve(store.dataDirectory, "unused-identity-signing-key.pem")
+      ).recover("job-1", operationId, run.publish.operationsHash)).resolves.toEqual({
+        status: "PUBLISH_RECOVERY_BLOCKED",
+        operationId
+      });
     } finally {
       await harness.cleanup();
     }

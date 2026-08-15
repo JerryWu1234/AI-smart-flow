@@ -1,5 +1,4 @@
 import { resolve } from "node:path";
-import { readFile } from "node:fs/promises";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -47,13 +46,15 @@ async function expectStateError(
 }
 
 describe("single writer, fence, CAS, and idempotent receipts", () => {
-  it("holds the Project writer lock through a committed external-effect handoff", async () => {
+  it("serializes a committed external-effect handoff", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const store = new StateStore(resolve(harness.dataDir, "effect-handoff-lock"));
     await store.initialize(activeState(createRunRecord({ phase: "PUBLISHING" })));
-    const handoffEntered = Promise.withResolvers<undefined>();
-    const releaseHandoff = Promise.withResolvers<undefined>();
+    const prepareEntered = Promise.withResolvers<undefined>();
+    const releasePrepare = Promise.withResolvers<undefined>();
+    const effectEntered = Promise.withResolvers<undefined>();
+    const releaseEffect = Promise.withResolvers<undefined>();
     let applyCalls = 0;
     const handoff = new ProjectMutationExecutor(store).mutate(
       {
@@ -64,19 +65,20 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
         expectedPhases: ["PUBLISHING"]
       },
       (state) => ({ nextState: state, response: { status: "SUBMITTED" } }),
-      () => Promise.resolve(
-        async (): Promise<{ status: "APPLIED" }> => {
+      async () => {
+        prepareEntered.resolve(undefined);
+        await releasePrepare.promise;
+        return async (): Promise<{ status: "APPLIED" }> => {
           applyCalls += 1;
-          handoffEntered.resolve(undefined);
-          await releaseHandoff.promise;
+          effectEntered.resolve(undefined);
+          await releaseEffect.promise;
           return { status: "APPLIED" as const };
-        }
-      )
+        };
+      }
     );
-    await handoffEntered.promise;
-    const submitted = await handoff;
-    expect(submitted).toMatchObject({ effectStarted: true });
+    await prepareEntered.promise;
 
+    let cancelBuilds = 0;
     const cancel = new ProjectMutationExecutor(store).mutate(
       {
         requestId: "cancel-during-publish-handoff",
@@ -86,6 +88,7 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
         expectedPhases: ["PUBLISHING"]
       },
       (state) => {
+        cancelBuilds += 1;
         const run = state.runs["job-1"];
         if (run === undefined) throw new Error("run missing");
         return {
@@ -97,11 +100,19 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
         };
       }
     );
+    await new Promise<void>((settle) => setTimeout(settle, 50));
+    expect(cancelBuilds).toBe(0);
+
+    releasePrepare.resolve(undefined);
+    await effectEntered.promise;
+    const submitted = await handoff;
+    expect(submitted).toMatchObject({ effectStarted: true });
     await expect(cancel).resolves.toMatchObject({ response: { phase: "CANCELING" } });
+    expect(cancelBuilds).toBe(1);
     expect((await store.readState()).runs["job-1"]?.phase).toBe("CANCELING");
     expect(applyCalls).toBe(1);
 
-    releaseHandoff.resolve(undefined);
+    releaseEffect.resolve(undefined);
     await expect(submitted.effect).resolves.toEqual({ status: "APPLIED" });
   });
 
@@ -131,17 +142,26 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
     expect((await store.readState()).stateVersion).toBe(state.stateVersion + 1);
   });
 
-  it("rejects a second writer and replays the original canonical response", async () => {
+  it("preempts an older writer fence and replays the original canonical response", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const store = new StateStore(resolve(harness.dataDir, "state-concurrency"));
     await store.initialize(
       activeState()
     );
-    const session = await ProjectMutationSession.open(store, "writer-1");
+    const opened = await Promise.all([
+      ProjectMutationSession.open(store, "writer-1"),
+      ProjectMutationSession.open(store, "writer-2")
+    ]);
+    const [superseded, session] = [...opened].sort((left, right) => left.fence - right.fence);
+    if (superseded === undefined || session === undefined) throw new Error("sessions missing");
+    expect(session.fence).toBe(superseded.fence + 1);
     await expectStateError(
-      ProjectMutationSession.open(store, "writer-2"),
-      "PROJECT_LOCKED"
+      superseded.mutate(
+        { requestId: "superseded-writer", payload: {} },
+        (state) => ({ nextState: state, response: { accepted: false } })
+      ),
+      "STALE_FENCE"
     );
     let mutations = 0;
     const request = {
@@ -175,6 +195,7 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
       "IDEMPOTENCY_KEY_REUSED"
     );
     await session.close();
+    await superseded.close();
   });
 
   it("rejects stale stateVersion, revision, and fence", async () => {
@@ -350,7 +371,7 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
       },
       updatedAt: new Date().toISOString()
     });
-    const protectedBytes = await readFile(store.statePath);
+    const protectedState = await store.readState();
 
     for (const callback of ["worker", "review", "publish", "recovery"] as const) {
       let builds = 0;
@@ -366,7 +387,7 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
         }
       ), "STALE_FENCE");
       expect(builds).toBe(0);
-      expect(await readFile(store.statePath)).toEqual(protectedBytes);
+      expect(await store.readState()).toEqual(protectedState);
     }
 
     await expect(executor.mutate(replayRequest, () => {
@@ -375,6 +396,6 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
       replayed: true,
       response: accepted.response
     });
-    expect(await readFile(store.statePath)).toEqual(protectedBytes);
+    expect(await store.readState()).toEqual(protectedState);
   });
 });

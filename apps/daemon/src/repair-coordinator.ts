@@ -15,7 +15,7 @@ import {
   taskManifestSchema,
   type TaskManifest
 } from "@smartflow/task-manifest";
-import type { Candidate } from "@smartflow/workspace";
+import { getCandidateHash, type Candidate } from "@smartflow/workspace";
 
 import { createApprovedRevision } from "./approved-revision.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
@@ -169,7 +169,7 @@ export class RepairCoordinator {
         blocking: true,
         summary: "Worker completed without a changed Candidate",
         evidence: [
-          `candidate=${candidate.hash} allowNoChange=${String(parentManifest.allowNoChange)}`
+          `candidate=${getCandidateHash(candidate)} allowNoChange=${String(parentManifest.allowNoChange)}`
         ]
       })];
     }

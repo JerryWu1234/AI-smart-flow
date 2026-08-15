@@ -18,6 +18,7 @@ import type {
   ReviewTurnOutput,
   RunPhase
 } from "@smartflow/protocol";
+import { StateStore } from "@smartflow/state-store";
 import { createTasksSource } from "../../packages/task-manifest/src/test-fixture.js";
 import { createLifecycleStore } from "../crash/recovery-test-fixture.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
@@ -326,15 +327,15 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         jobId: string;
       };
       await started;
-      const statePath = resolve(dataDirectory, "projects", first.projectId, "state.json");
-      const before = await readFile(statePath);
+      const store = new StateStore(resolve(dataDirectory, "projects", first.projectId));
+      const before = await store.readState();
       await expect(client.call("smartflow_execute", {
         ...firstRequest,
         tasksPath: "tasks-alias.md",
         requestId: "active-project-second",
         expectedStateVersion: undefined
       })).rejects.toMatchObject({ code: "TASK_ALREADY_ACTIVE" });
-      expect(await readFile(statePath)).toEqual(before);
+      expect(await store.readState()).toEqual(before);
       expect(await client.call("smartflow_execute", firstRequest)).toEqual(first);
       expect(pipelineCalls).toBe(1);
     } finally {
@@ -398,13 +399,8 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         projectId: second.projectId,
         jobId: second.jobId
       })).resolves.toMatchObject({ phase: "PREPARING" });
-      const state = JSON.parse(await readFile(
-        resolve(dataDirectory, "projects", first.projectId, "state.json"),
-        "utf8"
-      )) as {
-        activeRunsByTaskPath: Record<string, string>;
-        runs: Record<string, { taskSource: { relativePath: string } }>;
-      };
+      const stateStore = new StateStore(resolve(dataDirectory, "projects", first.projectId));
+      const state = await stateStore.readState();
       expect(Object.keys(state.activeRunsByTaskPath)).toHaveLength(2);
       const frozenRun = state.runs[first.jobId];
       if (frozenRun === undefined) throw new Error("frozen run missing");
@@ -535,16 +531,16 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         expectedStateVersion: state.stateVersion
       }
     });
-    const before = await readFile(store.statePath);
+    const before = await store.readState();
     await expect(resume(resolve(harness.projectDir, "sum.js"), "revision-absolute"))
       .rejects.toMatchObject({ code: "TASKS_PATH_UNSAFE" });
-    expect(await readFile(store.statePath)).toEqual(before);
+    expect(await store.readState()).toEqual(before);
     await expect(resume("revision-directory", "revision-directory"))
       .rejects.toMatchObject({ code: "TASKS_PATH_NOT_REGULAR" });
-    expect(await readFile(store.statePath)).toEqual(before);
+    expect(await store.readState()).toEqual(before);
   });
 
-  it("keeps CANCELING byte-identical when a late pipeline failure arrives", async () => {
+  it("keeps CANCELING unchanged when a late pipeline failure arrives", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const tasksSource = createTasksSource();
@@ -586,11 +582,11 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         reason: "race test"
       }
     });
-    const statePath = resolve(dataDirectory, "projects", execute.projectId, "state.json");
-    const before = await readFile(statePath);
+    const store = new StateStore(resolve(dataDirectory, "projects", execute.projectId));
+    const before = await store.readState();
     rejectPipeline(new Error("late pipeline failure"));
     await new Promise((settle) => setTimeout(settle, 25));
-    expect(await readFile(statePath)).toEqual(before);
+    expect(await store.readState()).toEqual(before);
     expect(await runtime.handle({
       id: "ipc-status-late-failure",
       method: "smartflow_status",
@@ -623,7 +619,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       runs: { ...state.runs, "job-1": corrupted },
       updatedAt: new Date().toISOString()
     });
-    const before = await readFile(store.statePath);
+    const before = await store.readState();
     const runtime = new ProjectRuntime({ dataDirectory });
 
     await expect(runtime.handle({
@@ -639,7 +635,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       code: "ARTIFACT_INTEGRITY_BLOCKED",
       message: "ARTIFACT_REF_MISSING:candidate"
     });
-    expect(await readFile(store.statePath)).toEqual(before);
+    expect(await store.readState()).toEqual(before);
   });
 
   it("accepts the current Host Review through the composite turn without running a Daemon reviewer", async () => {
@@ -878,7 +874,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       runs: { ...state.runs, "job-1": corrupted },
       updatedAt: new Date().toISOString()
     });
-    const before = await readFile(store.statePath);
+    const before = await store.readState();
     let publishCalls = 0;
     const runtime = new ProjectRuntime({
       dataDirectory,
@@ -903,7 +899,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       code: "ARTIFACT_INTEGRITY_BLOCKED",
       message: "ARTIFACT_REF_MISSING:candidate"
     });
-    expect(await readFile(store.statePath)).toEqual(before);
+    expect(await store.readState()).toEqual(before);
     expect(publishCalls).toBe(0);
   });
 
@@ -937,7 +933,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       runs: { ...state.runs, "job-1": corrupted },
       updatedAt: new Date().toISOString()
     });
-    const before = await readFile(store.statePath);
+    const before = await store.readState();
     const runtime = new ProjectRuntime({ dataDirectory });
 
     await expect(runtime.handle({
@@ -955,7 +951,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       code: "ARTIFACT_INTEGRITY_BLOCKED",
       message: "ARTIFACT_REF_MISSING:candidate"
     });
-    expect(await readFile(store.statePath)).toEqual(before);
+    expect(await store.readState()).toEqual(before);
   });
 
   it("blocks resume and cancel while a composite Host turn owns the run", async () => {
@@ -1002,7 +998,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     });
     const runtime = new ProjectRuntime({ dataDirectory });
     const paused = await store.readState();
-    const pausedBytes = await readFile(store.statePath);
 
     await expect(runtime.handle({
       id: "primitive-resume-owner-bypass",
@@ -1016,7 +1011,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         expectedStateVersion: paused.stateVersion
       }
     })).rejects.toMatchObject({ code: "HOST_TURN_ACTIVE" });
-    expect(await readFile(store.statePath)).toEqual(pausedBytes);
+    expect(await store.readState()).toEqual(paused);
 
     await expect(runtime.handle({
       id: "primitive-cancel-owner-bypass",
@@ -1030,7 +1025,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         expectedStateVersion: paused.stateVersion
       }
     })).rejects.toMatchObject({ code: "HOST_TURN_ACTIVE" });
-    expect(await readFile(store.statePath)).toEqual(pausedBytes);
+    expect(await store.readState()).toEqual(paused);
   });
 
   it("keeps informational and illegal pause actions byte-identical", async () => {
@@ -1066,7 +1061,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     });
     const runtime = new ProjectRuntime({ dataDirectory });
     const paused = await store.readState();
-    const beforeReadOnly = await readFile(store.statePath);
     await expect(runtime.handle({
       id: "inspect-processes-is-readonly",
       method: "smartflow_resume",
@@ -1079,7 +1073,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         expectedStateVersion: paused.stateVersion
       }
     })).rejects.toMatchObject({ code: "RESUME_ACTION_READ_ONLY" });
-    expect(await readFile(store.statePath)).toEqual(beforeReadOnly);
+    expect(await store.readState()).toEqual(paused);
 
     await expect(runtime.handle({
       id: "illegal-code-action-pair",
@@ -1093,7 +1087,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         expectedStateVersion: paused.stateVersion
       }
     })).rejects.toMatchObject({ code: "RESUME_CODE_ACTION_MISMATCH" });
-    expect(await readFile(store.statePath)).toEqual(beforeReadOnly);
+    expect(await store.readState()).toEqual(paused);
   });
 
   it("routes explicit provider retry through a new pipeline and cancel through cancellation", async () => {
@@ -1292,7 +1286,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       },
       updatedAt: new Date().toISOString()
     });
-    const before = await readFile(store.statePath);
+    const before = await store.readState();
     const runtime = new ProjectRuntime({ dataDirectory });
 
     await expect(runtime.handle({
@@ -1310,6 +1304,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         expectedStateVersion: state.stateVersion + 1
       }
     })).rejects.toMatchObject({ code: "RESUME_ACTION_PAYLOAD_MISMATCH" });
-    expect(await readFile(store.statePath)).toEqual(before);
+    expect(await store.readState()).toEqual(before);
   });
 });

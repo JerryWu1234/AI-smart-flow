@@ -6,6 +6,7 @@ import { afterEach, expect, it } from "vitest";
 
 import {
   buildGitCandidate,
+  buildGitTreePatch,
   captureGitSnapshot,
   initializeGitObjectStore,
   materializeGitSnapshot,
@@ -66,17 +67,26 @@ it("builds a cumulative Git Candidate without changing the active Workspace or u
     includedPathPolicyHash: capabilities.inclusionPolicyHash
   });
   const candidate = await buildGitCandidate({
-    runGitDirectory: store.gitDirectory,
     runBaseline: baseline,
     revisionInput: baseline,
     revisionResult: result
   });
 
+  expect(candidate.candidate).toMatchObject({
+    schemaVersion: 3,
+    runBaselineSnapshotHash: baseline.snapshotHash,
+    resultSnapshotHash: result.snapshotHash
+  });
   expect(candidate.candidate.operations).toContainEqual(expect.objectContaining({
     kind: "MODIFY",
     path: "sum.js"
   }));
-  expect(candidate.cumulativePatch.toString("utf8")).toContain("a/sum.js");
+  const patch = await buildGitTreePatch({
+    runGitDirectory: store.gitDirectory,
+    baseTreeId: baseline.treeId,
+    resultTreeId: result.treeId
+  });
+  expect(patch.toString("utf8")).toContain("a/sum.js");
   expect(hash(await readFile(activeSourcePath))).toBe(hash(activeSource));
   expect(await readFile(resolve(harness.projectDir, ".git/index")).catch(() => Buffer.alloc(0)))
     .toEqual(userIndex);

@@ -198,7 +198,7 @@ describe("ProjectState schema and recovery source", () => {
     }).success).toBe(false);
   });
 
-  it("uses state.json as the only recovery fact even if events.jsonl is corrupt", async () => {
+  it("uses SQLite state as the only recovery fact even if legacy events.jsonl is corrupt", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const dataDirectory = resolve(harness.dataDir, "project-1");

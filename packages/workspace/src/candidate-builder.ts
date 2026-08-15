@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 
 import { runGitCommand } from "./git-command.js";
-import type { GitSnapshotEntry, GitWorkspaceSnapshot } from "./git-snapshot.js";
+import {
+  verifyGitWorkspaceSnapshot,
+  type GitSnapshotEntry,
+  type GitWorkspaceSnapshot
+} from "./git-snapshot.js";
 import { canonical } from "./internal-utils.js";
 
 export type CandidateEntry =
@@ -13,15 +17,21 @@ export type CandidateOperation =
   | { kind: "MODIFY"; path: string; oldEntry: CandidateEntry; newEntry: CandidateEntry }
   | { kind: "DELETE"; path: string; oldEntry: CandidateEntry };
 
-export interface Candidate {
+/** Unversioned Candidate persisted before the Git-backed Candidate schemas. */
+export interface LegacyCandidate {
+  schemaVersion?: 1;
   baselineHash: string;
   operations: CandidateOperation[];
   hash: string;
 }
 
-export interface GitCandidate extends Candidate {
+/** Persisted v2 shape retained for recovery and artifact verification only. */
+export interface GitCandidateV2 {
   schemaVersion: 2;
   revision: number;
+  baselineHash: string;
+  operations: CandidateOperation[];
+  hash: string;
   runBaselineSnapshotHash: string;
   inputSnapshotHash: string;
   resultSnapshotHash: string;
@@ -34,39 +44,75 @@ export interface GitCandidate extends Candidate {
   candidateHash: string;
 }
 
-export interface GitCandidateBuildResult {
-  candidate: GitCandidate;
-  incrementalPatch: Buffer;
-  cumulativePatch: Buffer;
-  evidenceBytes: Buffer;
+/** Current minimal Candidate. Tree/blob/mode evidence is derivable from the bound snapshots. */
+export interface GitCandidateV3 {
+  schemaVersion: 3;
+  revision: number;
+  runBaselineSnapshotHash: string;
+  inputSnapshotHash: string;
+  resultSnapshotHash: string;
+  operations: CandidateOperation[];
+  candidateHash: string;
 }
 
+export type GitCandidate = GitCandidateV2 | GitCandidateV3;
+export type Candidate = LegacyCandidate | GitCandidate;
 
+export interface GitCandidateBuildResult {
+  candidate: GitCandidateV3;
+}
 
-function candidateHash(candidate: Pick<Candidate, "baselineHash" | "operations">): string {
-  return createHash("sha256")
-    .update(canonical({ baselineHash: candidate.baselineHash, operations: candidate.operations }), "utf8")
-    .digest("hex");
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function legacyCandidateHash(candidate: Pick<LegacyCandidate, "baselineHash" | "operations">): string {
+  return sha256(canonical({ baselineHash: candidate.baselineHash, operations: candidate.operations }));
+}
+
+function gitCandidateV3Hash(
+  candidate: Omit<GitCandidateV3, "candidateHash">
+): string {
+  return sha256(canonical(candidate));
+}
+
+export function getCandidateHash(candidate: Candidate): string {
+  return candidate.schemaVersion === 3 ? candidate.candidateHash : candidate.hash;
+}
+
+export function getCandidateBaselineHash(candidate: Candidate): string {
+  return candidate.schemaVersion === 3
+    ? candidate.runBaselineSnapshotHash
+    : candidate.baselineHash;
 }
 
 export function verifyCandidate(candidate: Candidate): boolean {
-  if ((candidate as Partial<GitCandidate>).schemaVersion === 2) {
-    const gitCandidate = candidate as GitCandidate;
+  if (candidate.schemaVersion === 2) {
     const hashBody = {
-      revision: gitCandidate.revision,
-      runBaselineSnapshotHash: gitCandidate.runBaselineSnapshotHash,
-      inputSnapshotHash: gitCandidate.inputSnapshotHash,
-      resultSnapshotHash: gitCandidate.resultSnapshotHash,
-      operations: gitCandidate.operations,
-      evidenceArtifactHash: gitCandidate.evidenceArtifactHash
+      revision: candidate.revision,
+      runBaselineSnapshotHash: candidate.runBaselineSnapshotHash,
+      inputSnapshotHash: candidate.inputSnapshotHash,
+      resultSnapshotHash: candidate.resultSnapshotHash,
+      operations: candidate.operations,
+      evidenceArtifactHash: candidate.evidenceArtifactHash
     };
-    return /^[a-f0-9]{64}$/u.test(gitCandidate.baselineHash) &&
-      gitCandidate.baselineHash === gitCandidate.runBaselineSnapshotHash &&
-      gitCandidate.hash === gitCandidate.candidateHash &&
-      gitCandidate.hash === createHash("sha256").update(canonical(hashBody), "utf8").digest("hex");
+    return /^[a-f0-9]{64}$/u.test(candidate.baselineHash) &&
+      candidate.baselineHash === candidate.runBaselineSnapshotHash &&
+      candidate.hash === candidate.candidateHash &&
+      candidate.hash === sha256(canonical(hashBody));
+  }
+  if (candidate.schemaVersion === 3) {
+    const { candidateHash, ...hashBody } = candidate;
+    return Number.isInteger(candidate.revision) &&
+      candidate.revision > 0 &&
+      /^[a-f0-9]{64}$/u.test(candidate.runBaselineSnapshotHash) &&
+      /^[a-f0-9]{64}$/u.test(candidate.inputSnapshotHash) &&
+      /^[a-f0-9]{64}$/u.test(candidate.resultSnapshotHash) &&
+      /^[a-f0-9]{64}$/u.test(candidateHash) &&
+      candidateHash === gitCandidateV3Hash(hashBody);
   }
   return /^[a-f0-9]{64}$/u.test(candidate.baselineHash) &&
-    candidate.hash === candidateHash(candidate);
+    candidate.hash === legacyCandidateHash(candidate);
 }
 
 function candidateEntry(entry: GitSnapshotEntry): CandidateEntry {
@@ -118,26 +164,88 @@ function gitOperations(
   return operations;
 }
 
-async function gitPatch(
-  runGitDirectory: string,
-  oldTree: string,
-  newTree: string,
-  gitBinary: string
-): Promise<Buffer> {
-  return (await runGitCommand(gitBinary, [
-    "--git-dir", runGitDirectory, "diff", "--binary", "--full-index", "--no-ext-diff",
-    "--no-renames", oldTree, newTree
-  ])).stdout;
-}
-
-export async function buildGitCandidate(input: {
-  runGitDirectory: string;
+export function verifyCandidateSnapshotBindings(input: {
+  candidate: Candidate;
   runBaseline: GitWorkspaceSnapshot;
   revisionInput: GitWorkspaceSnapshot;
   revisionResult: GitWorkspaceSnapshot;
+}): boolean {
+  const { candidate, runBaseline, revisionInput, revisionResult } = input;
+  if (
+    !verifyCandidate(candidate) ||
+    !verifyGitWorkspaceSnapshot(runBaseline) ||
+    !verifyGitWorkspaceSnapshot(revisionInput) ||
+    !verifyGitWorkspaceSnapshot(revisionResult)
+  ) return false;
+  const revision = candidate.schemaVersion === 2 || candidate.schemaVersion === 3
+    ? candidate.revision
+    : revisionResult.revision;
+  if (
+    runBaseline.snapshotKind !== "RUN_BASELINE" ||
+    runBaseline.revision !== 1 ||
+    revisionResult.snapshotKind !== "REVISION_RESULT" ||
+    revisionResult.revision !== revision ||
+    runBaseline.repositoryId !== revisionInput.repositoryId ||
+    runBaseline.repositoryId !== revisionResult.repositoryId ||
+    runBaseline.includedPathPolicyHash !== revisionInput.includedPathPolicyHash ||
+    runBaseline.includedPathPolicyHash !== revisionResult.includedPathPolicyHash ||
+    (revision === 1
+      ? revisionInput.snapshotHash !== runBaseline.snapshotHash
+      : revisionInput.snapshotKind !== "REVISION_RESULT" ||
+        revisionInput.revision !== revision - 1) ||
+    canonical(candidate.operations) !== canonical(gitOperations(runBaseline, revisionResult))
+  ) return false;
+  if (candidate.schemaVersion === 3) {
+    return candidate.runBaselineSnapshotHash === runBaseline.snapshotHash &&
+      candidate.inputSnapshotHash === revisionInput.snapshotHash &&
+      candidate.resultSnapshotHash === revisionResult.snapshotHash;
+  }
+  if (candidate.schemaVersion === 2) {
+    const baselineEntries = new Map(runBaseline.entries.map((entry) => [entry.path, entry]));
+    const resultEntries = new Map(revisionResult.entries.map((entry) => [entry.path, entry]));
+    const blobs = Object.fromEntries(candidate.operations.map((operation) => [
+      operation.path,
+      {
+        oldBlobId: baselineEntries.get(operation.path)?.blobId ?? null,
+        newBlobId: resultEntries.get(operation.path)?.blobId ?? null
+      }
+    ]));
+    const modes = Object.fromEntries(candidate.operations.map((operation) => [
+      operation.path,
+      {
+        oldMode: baselineEntries.get(operation.path)?.mode ?? null,
+        newMode: resultEntries.get(operation.path)?.mode ?? null
+      }
+    ]));
+    return candidate.runBaselineSnapshotHash === runBaseline.snapshotHash &&
+      candidate.inputSnapshotHash === revisionInput.snapshotHash &&
+      candidate.resultSnapshotHash === revisionResult.snapshotHash &&
+      candidate.runBaselineTreeId === runBaseline.treeId &&
+      candidate.inputTreeId === revisionInput.treeId &&
+      candidate.resultTreeId === revisionResult.treeId &&
+      canonical(candidate.blobs) === canonical(blobs) &&
+      canonical(candidate.modes) === canonical(modes);
+  }
+  return candidate.baselineHash === runBaseline.snapshotHash;
+}
+
+export async function buildGitTreePatch(input: {
+  runGitDirectory: string;
+  baseTreeId: string;
+  resultTreeId: string;
   gitBinary?: string;
+}): Promise<Buffer> {
+  return (await runGitCommand(input.gitBinary ?? "git", [
+    "--git-dir", input.runGitDirectory, "diff", "--binary", "--full-index", "--no-ext-diff",
+    "--no-renames", input.baseTreeId, input.resultTreeId
+  ])).stdout;
+}
+
+export function buildGitCandidate(input: {
+  runBaseline: GitWorkspaceSnapshot;
+  revisionInput: GitWorkspaceSnapshot;
+  revisionResult: GitWorkspaceSnapshot;
 }): Promise<GitCandidateBuildResult> {
-  const gitBinary = input.gitBinary ?? "git";
   if (
     input.runBaseline.repositoryId !== input.revisionInput.repositoryId ||
     input.runBaseline.repositoryId !== input.revisionResult.repositoryId ||
@@ -148,64 +256,18 @@ export async function buildGitCandidate(input: {
   ) {
     throw new Error("GIT_CANDIDATE_SNAPSHOT_BINDING_INVALID");
   }
-  const operations = gitOperations(input.runBaseline, input.revisionResult);
-  const baselineEntries = new Map(input.runBaseline.entries.map((entry) => [entry.path, entry]));
-  const resultEntries = new Map(input.revisionResult.entries.map((entry) => [entry.path, entry]));
-  const blobs = Object.fromEntries(operations.map((operation) => [
-    operation.path,
-    {
-      oldBlobId: baselineEntries.get(operation.path)?.blobId ?? null,
-      newBlobId: resultEntries.get(operation.path)?.blobId ?? null
-    }
-  ]));
-  const modes = Object.fromEntries(operations.map((operation) => [
-    operation.path,
-    {
-      oldMode: baselineEntries.get(operation.path)?.mode ?? null,
-      newMode: resultEntries.get(operation.path)?.mode ?? null
-    }
-  ]));
-  const [incrementalPatch, cumulativePatch] = await Promise.all([
-    gitPatch(input.runGitDirectory, input.revisionInput.treeId, input.revisionResult.treeId, gitBinary),
-    gitPatch(input.runGitDirectory, input.runBaseline.treeId, input.revisionResult.treeId, gitBinary)
-  ]);
-  const evidenceBody = {
-    revision: input.revisionResult.revision,
-    runBaselineTreeId: input.runBaseline.treeId,
-    inputTreeId: input.revisionInput.treeId,
-    resultTreeId: input.revisionResult.treeId,
-    blobs,
-    modes,
-    incrementalPatchHash: createHash("sha256").update(incrementalPatch).digest("hex"),
-    cumulativePatchHash: createHash("sha256").update(cumulativePatch).digest("hex")
-  };
-  const evidenceBytes = Buffer.from(canonical(evidenceBody), "utf8");
-  const evidenceArtifactHash = createHash("sha256").update(evidenceBytes).digest("hex");
-  const candidateHashBody = {
+  const hashBody: Omit<GitCandidateV3, "candidateHash"> = {
+    schemaVersion: 3,
     revision: input.revisionResult.revision,
     runBaselineSnapshotHash: input.runBaseline.snapshotHash,
     inputSnapshotHash: input.revisionInput.snapshotHash,
     resultSnapshotHash: input.revisionResult.snapshotHash,
-    operations,
-    evidenceArtifactHash
+    operations: gitOperations(input.runBaseline, input.revisionResult)
   };
-  const candidateHash = createHash("sha256").update(canonical(candidateHashBody), "utf8").digest("hex");
-  const candidate: GitCandidate = {
-    schemaVersion: 2,
-    revision: input.revisionResult.revision,
-    baselineHash: input.runBaseline.snapshotHash,
-    operations,
-    hash: candidateHash,
-    runBaselineSnapshotHash: input.runBaseline.snapshotHash,
-    inputSnapshotHash: input.revisionInput.snapshotHash,
-    resultSnapshotHash: input.revisionResult.snapshotHash,
-    runBaselineTreeId: input.runBaseline.treeId,
-    inputTreeId: input.revisionInput.treeId,
-    resultTreeId: input.revisionResult.treeId,
-    blobs,
-    modes,
-    evidenceArtifactHash,
-    candidateHash
-  };
-  return { candidate, incrementalPatch, cumulativePatch, evidenceBytes };
+  return Promise.resolve({
+    candidate: {
+      ...hashBody,
+      candidateHash: gitCandidateV3Hash(hashBody)
+    }
+  });
 }

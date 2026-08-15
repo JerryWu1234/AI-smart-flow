@@ -1,12 +1,18 @@
+import { access, mkdir, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  PublishCoordinator,
   RecoveryManager,
   type PublishRecoveryObservation,
   type RecoveryAction,
   type RecoveryRuntime
 } from "@smartflow/daemon";
+import { parseSerializedDeliveryBundle, type PublishServiceResult } from "@smartflow/publish";
 import type { RunPhase } from "@smartflow/protocol";
+import { canonicalHash } from "@smartflow/state-store";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 import { createLifecycleStore } from "./recovery-test-fixture.js";
 
@@ -15,6 +21,21 @@ const runtime: RecoveryRuntime = {
   reconcilePublish: (): Promise<PublishRecoveryObservation> => Promise.resolve({ status: "PENDING" }),
   continueCancellation: () => Promise.resolve("BLOCKED")
 };
+
+function publishObservation(result: PublishServiceResult): PublishRecoveryObservation {
+  if (result.status === "COMMITTED") return { status: "COMMITTED", result: result.result };
+  if (result.status === "PUBLISH_RECOVERY_BLOCKED" && result.result?.status === "CONFLICT") {
+    return { status: "CONFLICT", result: result.result };
+  }
+  return {
+    status: "UNKNOWN",
+    ...(result.status === "PUBLISH_RECOVERY_BLOCKED" ? { result: result.result } : {})
+  };
+}
+
+function parseArtifact(bytes: Uint8Array): Record<string, unknown> {
+  return JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
+}
 
 const stableActions: ReadonlyArray<[RunPhase, RecoveryAction]> = [
   ["PREPARING", "REBUILD_WORKSPACE"],
@@ -68,6 +89,312 @@ describe("phase-complete crash recovery", () => {
     expect(await new RecoveryManager(store, runtime).recover("job-1"))
       .toMatchObject({ phase: "PAUSED", action: "NONE" });
     expect((await store.readState()).stateVersion).toBe(paused.stateVersion);
+  });
+
+  it("reconciles default Publish completion atomically and cleans temporary Git content", async () => {
+    const harness = await createRuntimeHarness();
+    harnesses.push(harness);
+    const store = await createLifecycleStore(harness, "PUBLISHING");
+    const state = await store.readState();
+    const run = state.runs["job-1"];
+    const revision = run?.gitWorkspace?.revisions["1"];
+    if (
+      run?.publish === undefined ||
+      run.deliveryBundle === undefined ||
+      run.gitWorkspace === undefined ||
+      revision === undefined
+    ) throw new Error("publish cleanup fixture missing");
+    const publish = { ...run.publish, adapterId: "filesystem-preflight-batch-v1" };
+    const setupAt = new Date().toISOString();
+    await store.writeState({
+      ...state,
+      stateVersion: state.stateVersion + 1,
+      publishLease: {
+        jobId: run.jobId,
+        operationId: publish.operationId,
+        acquiredAt: setupAt
+      },
+      runs: {
+        ...state.runs,
+        [run.jobId]: { ...run, publish, updatedAt: setupAt }
+      },
+      updatedAt: setupAt
+    });
+    const beforeRecovery = await store.readState();
+    const bundle = parseSerializedDeliveryBundle(
+      await store.readArtifact(run.deliveryBundle)
+    ).bundle;
+    const workspacePath = resolve(store.dataDirectory, revision.workspacePath);
+    const indexPath = resolve(store.dataDirectory, revision.indexPath);
+    const gitDirectory = dirname(resolve(store.dataDirectory, run.gitWorkspace.objectDirectory));
+    await mkdir(workspacePath, { recursive: true });
+    await writeFile(resolve(workspacePath, "temporary.txt"), "temporary", "utf8");
+    await mkdir(dirname(indexPath), { recursive: true });
+    await writeFile(indexPath, "index", "utf8");
+    await mkdir(resolve(gitDirectory, "objects"), { recursive: true });
+    const publishResult = {
+      operationId: publish.operationId,
+      operationsHash: publish.operationsHash,
+      status: "COMMITTED" as const,
+      paths: bundle.manifest.operations.map((operation) => ({
+        path: operation.path,
+        status: "COMMITTED" as const,
+        observedHash: operation.newHash,
+        observedMode: operation.newMode
+      }))
+    };
+    const resultDirectory = resolve(store.dataDirectory, "publish-results");
+    await mkdir(resultDirectory, { recursive: true });
+    await writeFile(
+      resolve(resultDirectory, `${publish.operationId}.json`),
+      JSON.stringify(publishResult),
+      "utf8"
+    );
+    const coordinator = new PublishCoordinator(
+      store,
+      resolve(store.dataDirectory, "unused-recovery-signing-key.pem")
+    );
+    const committedRuntime: RecoveryRuntime = {
+      ...runtime,
+      reconcilePublish: async (operationId, operationHash) => publishObservation(
+        await coordinator.recover(run.jobId, operationId, operationHash)
+      )
+    };
+
+    await expect(new RecoveryManager(store, committedRuntime).recover(run.jobId))
+      .resolves.toMatchObject({
+        phase: "COMPLETED",
+        action: "PUBLISH_RECONCILED",
+        stateVersion: beforeRecovery.stateVersion + 1
+      });
+    const completed = await store.readState();
+    expect(completed.stateVersion).toBe(beforeRecovery.stateVersion + 1);
+    expect(completed.publishLease).toBeNull();
+    expect(completed.activeRunsByTaskPath[run.canonicalTaskPath]).toBeUndefined();
+    expect(completed.runs[run.jobId]?.publish).toEqual({
+      ...publish,
+      status: "COMMITTED",
+      result: publishResult
+    });
+    await expect(access(workspacePath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(access(indexPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(access(gitDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(store.readArtifact(run.deliveryBundle)).resolves.toBeInstanceOf(Uint8Array);
+
+    await expect(new RecoveryManager(store, committedRuntime).recover(run.jobId))
+      .resolves.toMatchObject({ phase: "COMPLETED", action: "NONE" });
+    expect((await store.readState()).stateVersion).toBe(completed.stateVersion);
+  });
+
+  it("blocks a Review whose body no longer matches reviewHash", async () => {
+    const harness = await createRuntimeHarness();
+    harnesses.push(harness);
+    const store = await createLifecycleStore(harness, "READY_TO_PUBLISH");
+    const state = await store.readState();
+    const run = state.runs["job-1"];
+    if (run?.review === undefined) throw new Error("review hash fixture missing");
+    const review = parseArtifact(await store.readArtifact(run.review));
+    const staleReviewRef = await store.writeArtifact(
+      "runs/job-1/revision-1/reviews/stale-review-hash.json",
+      Buffer.from(JSON.stringify({ ...review, claimId: "claim-tampered" }), "utf8")
+    );
+    const updatedAt = new Date().toISOString();
+    await store.writeState({
+      ...state,
+      stateVersion: state.stateVersion + 1,
+      runs: {
+        ...state.runs,
+        [run.jobId]: { ...run, review: staleReviewRef, updatedAt }
+      },
+      updatedAt
+    });
+
+    await expect(new RecoveryManager(store, runtime).recover(run.jobId)).resolves.toMatchObject({
+      phase: "PAUSED",
+      action: "BLOCKED",
+      reason: "ARTIFACT_SEMANTIC_MISMATCH:review"
+    });
+  });
+
+  it("blocks a Leader Decision whose body no longer matches decisionHash", async () => {
+    const harness = await createRuntimeHarness();
+    harnesses.push(harness);
+    const store = await createLifecycleStore(harness, "READY_TO_PUBLISH");
+    const state = await store.readState();
+    const run = state.runs["job-1"];
+    if (run?.leaderDecision === undefined) throw new Error("leader hash fixture missing");
+    const decision = parseArtifact(await store.readArtifact(run.leaderDecision));
+    const staleDecisionRef = await store.writeArtifact(
+      "runs/job-1/revision-1/leader-decisions/stale-decision-hash.json",
+      Buffer.from(JSON.stringify({ ...decision, reason: "tampered after approval" }), "utf8")
+    );
+    const updatedAt = new Date().toISOString();
+    await store.writeState({
+      ...state,
+      stateVersion: state.stateVersion + 1,
+      runs: {
+        ...state.runs,
+        [run.jobId]: { ...run, leaderDecision: staleDecisionRef, updatedAt }
+      },
+      updatedAt
+    });
+
+    await expect(new RecoveryManager(store, runtime).recover(run.jobId)).resolves.toMatchObject({
+      phase: "PAUSED",
+      action: "BLOCKED",
+      reason: "ARTIFACT_SEMANTIC_MISMATCH:leaderDecision"
+    });
+  });
+
+  it("blocks a canonical non-accept Leader Decision on the publish path", async () => {
+    const harness = await createRuntimeHarness();
+    harnesses.push(harness);
+    const store = await createLifecycleStore(harness, "READY_TO_PUBLISH");
+    const state = await store.readState();
+    const run = state.runs["job-1"];
+    if (run?.leaderDecision === undefined) throw new Error("publish approval fixture missing");
+    const decisionBody = parseArtifact(await store.readArtifact(run.leaderDecision));
+    delete decisionBody.decisionHash;
+    decisionBody.decision = "pause";
+    decisionBody.reason = "leader paused before publish";
+    decisionBody.repairItems = [];
+    const pausedDecision = {
+      ...decisionBody,
+      decisionHash: canonicalHash(decisionBody)
+    };
+    const pausedDecisionRef = await store.writeArtifact(
+      `runs/job-1/revision-1/leader-decisions/${pausedDecision.decisionHash}.json`,
+      Buffer.from(JSON.stringify(pausedDecision), "utf8")
+    );
+    const updatedAt = new Date().toISOString();
+    await store.writeState({
+      ...state,
+      stateVersion: state.stateVersion + 1,
+      runs: {
+        ...state.runs,
+        [run.jobId]: { ...run, leaderDecision: pausedDecisionRef, updatedAt }
+      },
+      updatedAt
+    });
+
+    await expect(new RecoveryManager(store, runtime).recover(run.jobId)).resolves.toMatchObject({
+      phase: "PAUSED",
+      action: "BLOCKED",
+      reason: "ARTIFACT_SEMANTIC_MISMATCH:leaderDecision"
+    });
+  });
+
+  it("allows canonical repair evidence while recovering FIXING", async () => {
+    const harness = await createRuntimeHarness();
+    harnesses.push(harness);
+    const store = await createLifecycleStore(harness, "READY_TO_PUBLISH");
+    const state = await store.readState();
+    const run = state.runs["job-1"];
+    if (run?.review === undefined || run.leaderDecision === undefined) {
+      throw new Error("repair evidence fixture missing");
+    }
+    const reviewBody = parseArtifact(await store.readArtifact(run.review));
+    const reviewAttemptId = reviewBody.reviewAttemptId;
+    delete reviewBody.reviewHash;
+    const gate = reviewBody.gate as Record<string, unknown>;
+    const result = gate.result as Record<string, unknown>;
+    reviewBody.gate = {
+      ...gate,
+      accepted: false,
+      allowedLeaderDecisions: ["repair", "pause"],
+      result: { ...result, verdict: "REQUEST_CHANGES" },
+      reasons: ["VERDICT_NOT_APPROVE"]
+    };
+    const repairReview = { ...reviewBody, reviewHash: canonicalHash(reviewBody) };
+    const repairReviewRef = await store.writeArtifact(
+      "runs/job-1/revision-1/reviews/repair-review.json",
+      Buffer.from(JSON.stringify(repairReview), "utf8")
+    );
+    const leaderBody = parseArtifact(await store.readArtifact(run.leaderDecision));
+    delete leaderBody.decisionHash;
+    leaderBody.reviewHash = repairReview.reviewHash;
+    leaderBody.decision = "repair";
+    leaderBody.repairItems = [{
+      source: "leader",
+      code: "REPAIR_REQUIRED",
+      taskId: "T001",
+      path: "sum.js",
+      reason: "address the requested review change"
+    }];
+    leaderBody.reason = "repair before another review";
+    const repairDecision = { ...leaderBody, decisionHash: canonicalHash(leaderBody) };
+    const repairDecisionRef = await store.writeArtifact(
+      `runs/job-1/revision-1/leader-decisions/${repairDecision.decisionHash}.json`,
+      Buffer.from(JSON.stringify(repairDecision), "utf8")
+    );
+    const updatedAt = new Date().toISOString();
+    await store.writeState({
+      ...state,
+      stateVersion: state.stateVersion + 1,
+      runs: {
+        ...state.runs,
+        [run.jobId]: {
+          ...run,
+          phase: "FIXING",
+          review: repairReviewRef,
+          leaderDecision: repairDecisionRef,
+          reviewHistory: run.reviewHistory?.map((entry) => ({
+            ...entry,
+            reviewHash: entry.reviewAttemptId === reviewAttemptId
+              ? repairReview.reviewHash
+              : entry.reviewHash
+          })),
+          updatedAt
+        }
+      },
+      updatedAt
+    });
+    const beforeRecovery = await store.readState();
+
+    await expect(new RecoveryManager(store, runtime).recover(run.jobId)).resolves.toMatchObject({
+      phase: "FIXING",
+      action: "PREPARE_REPAIR",
+      stateVersion: beforeRecovery.stateVersion
+    });
+    expect((await store.readState()).stateVersion).toBe(beforeRecovery.stateVersion);
+  });
+
+  it("blocks a valid but unrelated Result Snapshot Artifact", async () => {
+    const harness = await createRuntimeHarness();
+    harnesses.push(harness);
+    const store = await createLifecycleStore(harness, "READY_TO_PUBLISH");
+    const state = await store.readState();
+    const run = state.runs["job-1"];
+    const revision = run?.gitWorkspace?.revisions["1"];
+    if (run?.gitWorkspace === undefined || revision === undefined) {
+      throw new Error("snapshot binding fixture missing");
+    }
+    const updatedAt = new Date().toISOString();
+    await store.writeState({
+      ...state,
+      stateVersion: state.stateVersion + 1,
+      runs: {
+        ...state.runs,
+        "job-1": {
+          ...run,
+          gitWorkspace: {
+            ...run.gitWorkspace,
+            revisions: {
+              ...run.gitWorkspace.revisions,
+              "1": { ...revision, resultSnapshot: revision.inputSnapshot }
+            }
+          },
+          updatedAt
+        }
+      },
+      updatedAt
+    });
+
+    await expect(new RecoveryManager(store, runtime).recover("job-1")).resolves.toMatchObject({
+      phase: "PAUSED",
+      action: "BLOCKED",
+      reason: "ARTIFACT_SEMANTIC_MISMATCH:candidateSnapshots"
+    });
   });
 
   it.each(["CANCELED", "FAILED"] as const)(

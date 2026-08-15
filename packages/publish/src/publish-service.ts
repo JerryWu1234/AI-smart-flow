@@ -158,13 +158,14 @@ export class PublishService {
     return this.finish(operationId, hash, operations, result);
   }
 
-  public async recover(
-    operationId: string,
+  public static async observeRecovery(
+    attempt: Pick<PublishAttemptRecord, "operationId" | "operationsHash" | "adapterId">,
     operations: ApplyOperation[],
     adapter: WorkspaceApplyAdapter
   ): Promise<PublishServiceResult> {
-    const attempt = await this.store.get(operationId);
-    if (attempt === undefined || attempt.operationsHash !== operationsHash(operations)) {
+    const operationId = attempt.operationId;
+    const hash = operationsHash(operations);
+    if (attempt.operationsHash !== hash) {
       throw new Error("PUBLISH_ATTEMPT_NOT_FOUND_OR_MISMATCH");
     }
     const capabilities = await adapter.probe();
@@ -182,7 +183,30 @@ export class PublishService {
     if (observed === "PENDING" || observed === "UNKNOWN") {
       return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
     }
-    return this.finish(operationId, attempt.operationsHash, operations, observed);
+    return reconcile(operationId, hash, operations, observed) === "COMMITTED"
+      ? { status: "COMMITTED", operationId, result: observed }
+      : { status: "PUBLISH_RECOVERY_BLOCKED", operationId, result: observed };
+  }
+
+  public async recover(
+    operationId: string,
+    operations: ApplyOperation[],
+    adapter: WorkspaceApplyAdapter
+  ): Promise<PublishServiceResult> {
+    const attempt = await this.store.get(operationId);
+    if (attempt === undefined) throw new Error("PUBLISH_ATTEMPT_NOT_FOUND_OR_MISMATCH");
+    const observed = await PublishService.observeRecovery(attempt, operations, adapter);
+    if (observed.status === "COMMITTED") {
+      await this.store.complete(operationId, "COMMITTED", observed.result);
+      return observed;
+    }
+    if (observed.status === "PUBLISH_RECOVERY_BLOCKED" && observed.result !== undefined) {
+      const status = reconcile(operationId, attempt.operationsHash, operations, observed.result) === "CONFLICT"
+        ? "CONFLICT"
+        : "UNKNOWN";
+      await this.store.complete(operationId, status, observed.result);
+    }
+    return observed;
   }
 
   private async finish(

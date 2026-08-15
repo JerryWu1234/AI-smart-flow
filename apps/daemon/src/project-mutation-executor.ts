@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 
 import {
-  ProjectLock,
   StateStore,
   StateStoreError,
   canonicalHash,
@@ -69,6 +68,22 @@ function currentAttempt(run: RunRecord | undefined): RunRecord["workerAttempts"]
   return run?.workerAttempts.at(-1);
 }
 
+function canonicalReplay<T>(
+  state: ProjectState,
+  requestId: string,
+  requestHash: string
+): ProjectMutationResult<T> | undefined {
+  const existing = state.processedRequests[requestId];
+  if (existing === undefined) return undefined;
+  if (existing.requestHash !== requestHash) {
+    throw new StateStoreError(
+      "IDEMPOTENCY_KEY_REUSED",
+      `requestId ${requestId} was reused with a different payload`
+    );
+  }
+  return { response: existing.response as T, state, replayed: true };
+}
+
 export class ProjectMutationExecutor {
   public constructor(private readonly store: StateStore) {}
 
@@ -104,33 +119,19 @@ export class ProjectMutationExecutor {
     ) => Promise<() => Promise<TEffect>>
   ): Promise<ProjectMutationResult<T> | ProjectMutationEffectResult<T, TEffect>> {
     return enqueue(this.store.dataDirectory, async () => {
-      const before = await this.store.readState();
-      const lock = await ProjectLock.acquire(
-        this.store.lockPath,
-        `mutation-${randomUUID()}`,
-        before.projectFence
+      const lease = await this.store.acquireMutationLease(
+        `mutation:${request.requestId}:${randomUUID()}`
       );
       try {
         const state = await this.store.readState();
-        if (state.projectFence !== before.projectFence) {
-          throw new StateStoreError("STALE_FENCE", "Project fence changed while acquiring mutation lock");
-        }
         const requestHash = canonicalHash(request.payload);
-        const existing = state.processedRequests[request.requestId];
-        if (existing !== undefined) {
-          if (existing.requestHash !== requestHash) {
-            throw new StateStoreError(
-              "IDEMPOTENCY_KEY_REUSED",
-              `requestId ${request.requestId} was reused with a different payload`
-            );
-          }
-          if (request.replayPolicy !== "CURRENT_EPOCH") {
-            const replay = { response: existing.response as T, state, replayed: true };
-            return prepareEffect === undefined
-              ? replay
-              : { ...replay, effectStarted: false, effect: undefined };
-          }
+        const existingReplay = canonicalReplay<T>(state, request.requestId, requestHash);
+        if (existingReplay !== undefined && request.replayPolicy !== "CURRENT_EPOCH") {
+          return prepareEffect === undefined
+            ? existingReplay
+            : { ...existingReplay, effectStarted: false, effect: undefined };
         }
+        const existing = state.processedRequests[request.requestId];
         if (
           existing === undefined &&
           request.expectedStateVersion !== undefined &&
@@ -194,14 +195,17 @@ export class ProjectMutationExecutor {
             `Expected phase ${request.expectedPhases.join("|")}, observed ${String(run?.phase)}`
           );
         }
-        if (existing !== undefined) {
-          const replay = { response: existing.response as T, state, replayed: true };
+        if (existingReplay !== undefined) {
           return prepareEffect === undefined
-            ? replay
-            : { ...replay, effectStarted: false, effect: undefined };
+            ? existingReplay
+            : { ...existingReplay, effectStarted: false, effect: undefined };
         }
+
         const nextStateVersion = state.stateVersion + 1;
-        const fence = request.advanceFence === true ? lock.fence : (run?.fence ?? lock.fence);
+        const nextProjectFence = state.projectFence + 1;
+        const fence = request.advanceFence === true
+          ? nextProjectFence
+          : (run?.fence ?? nextProjectFence);
         const draft = await build(state, { fence, nextStateVersion, run });
         const responseHash = canonicalHash(draft.response);
         let nextState = draft.nextState;
@@ -217,25 +221,44 @@ export class ProjectMutationExecutor {
             };
           }
         }
-        const committed = await this.store.writeState(projectStateSchema.parse({
-          ...nextState,
-          projectFence: lock.fence,
-          stateVersion: nextStateVersion,
-          processedRequests: {
-            ...state.processedRequests,
-            [request.requestId]: {
-              requestId: request.requestId,
-              requestHash,
-              response: draft.response,
-              responseHash,
-              committedAtStateVersion: nextStateVersion
+        let committed: ProjectState;
+        try {
+          committed = await lease.writeState(projectStateSchema.parse({
+            ...nextState,
+            projectFence: nextProjectFence,
+            stateVersion: nextStateVersion,
+            processedRequests: {
+              ...state.processedRequests,
+              [request.requestId]: {
+                requestId: request.requestId,
+                requestHash,
+                response: draft.response,
+                responseHash,
+                committedAtStateVersion: nextStateVersion
+              }
+            },
+            updatedAt: new Date().toISOString()
+          }));
+        } catch (error) {
+          if (
+            error instanceof StateStoreError &&
+            error.code === "STATE_VERSION_MISMATCH" &&
+            request.replayPolicy !== "CURRENT_EPOCH"
+          ) {
+            const latest = await this.store.readState();
+            const replay = canonicalReplay<T>(latest, request.requestId, requestHash);
+            if (replay !== undefined) {
+              return prepareEffect === undefined
+                ? replay
+                : { ...replay, effectStarted: false, effect: undefined };
             }
-          },
-          updatedAt: new Date().toISOString()
-        }));
+          }
+          throw error;
+        }
         const result = { response: draft.response, state: committed, replayed: false };
         if (prepareEffect === undefined) return result;
         const startEffect = await prepareEffect(committed, draft.response);
+        await lease.assertOwned();
         let effect: Promise<TEffect>;
         try {
           effect = startEffect();
@@ -246,7 +269,7 @@ export class ProjectMutationExecutor {
         }
         return { ...result, effectStarted: true, effect };
       } finally {
-        await lock.release();
+        await lease.release();
       }
     });
   }

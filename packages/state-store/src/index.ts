@@ -14,3 +14,4 @@ export type {
   WorkerAttempt
 } from "./schema.js";
 export { StateStore } from "./state-store.js";
+export type { StateMutationLease } from "./state-store.js";

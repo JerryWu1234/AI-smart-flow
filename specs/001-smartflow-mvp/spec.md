@@ -223,7 +223,7 @@ Host 保留两类非机械责任：执行 `CREATE | RESUME` Reviewer，并在 `U
 
 #### State, recovery and publish
 
-- **FR-023**：Daemon MUST 承载后台长任务与方案 D 的机械编排；MCP mutation MUST 快速返回，`state.json` MUST 是唯一恢复事实，唯一公开 Review continuation MUST 是 `smartflow_review_turn`。
+- **FR-023**：Daemon MUST 承载后台长任务与方案 D 的机械编排；MCP mutation MUST 快速返回，`state.sqlite` MUST 是唯一恢复事实，唯一公开 Review continuation MUST 是 `smartflow_review_turn`。
 - **FR-024**：同一规范化任务路径同时最多一个 Active Run；不同任务文件 MAY 并行，但状态与 workspace MUST 按 job 隔离。
 - **FR-025**：每次 Worker 执行 MUST 持久化 `attemptId`、Pi session 标识、Sandbox containment 标识、generation 和 Revision 绑定。
 - **FR-026**：Host 重连且 Worker 存活时 MUST 继续同一 Pi session；进程崩溃恢复同一 Revision 时 MUST 创建新 attempt/Pi session；新 Revision MUST 创建新 Pi session。

@@ -44,7 +44,7 @@
 
 **Decision**: Host reconnect continues the same live Attempt/session. Worker or Daemon crash creates a new Attempt/Pi session with the same job, Revision and workspace. A frozen Attempt deadline terminates the containment and persists `TIMED_OUT` before controlled recovery. A new Revision creates a new Pi session. An independent new feature creates a new Task/Run, as classified by Host/Leader from user intent.
 
-**Rationale**: Task Artifacts, Revision snapshots and `state.json` are durable; an in-memory Agent session is not. Recovery must remain correct even when session files or processes are gone.
+**Rationale**: Task Artifacts, Revision snapshots and `state.sqlite` are durable; an in-memory Agent session is not. Recovery must remain correct even when session files or processes are gone.
 
 **Alternatives considered**: Requiring every crashed process to resume the identical Pi session was rejected because it makes recovery depend on unproven external state.
 

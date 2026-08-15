@@ -150,7 +150,6 @@ export class ProductionRuntimeComposition {
     const recoveryRuntime: RecoveryRuntime = {
       inspectWorker: (attempt) => this.inspectWorker(context, attempt),
       reconcilePublish: async (operationId, operationsHash) => {
-        if (this.workspaceApplyAdapter === undefined) return { status: "UNKNOWN" };
         const result: PublishServiceResult = await new PublishCoordinator(
           context.store,
           resolve(this.daemonDataDirectory, "signing", "ed25519-private.pem"),

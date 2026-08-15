@@ -52,7 +52,7 @@
 | `HostTurn.AWAITING_REVIEW` | state schema; coordinator | One CAS mutation binds token/owner/review attempt/deadline; restart restores the same checkpoint without renewal |
 | `HostTurn.AWAITING_USER_INPUT` | state schema; coordinator | Typed pause preserves and validates the prior owner unless an explicit handoff is added |
 | `autoRepairRounds` | state schema; `ReviewCoordinator.finalizeStoredReview` | `resume_review_decision` atomically re-evaluates stored Review with a reset allowance and proceeds directly to repair or a real pause |
-| Host ownership | `hostTurnId + turnToken + revision` | Enforced in `smartflow_review_turn` and every Daemon-internal Review mutation under the Project lock |
+| Host ownership | `hostTurnId + turnToken + revision` | Enforced in `smartflow_review_turn` and every Daemon-internal Review mutation under the SQLite mutation lease and `stateVersion` CAS |
 | Single recovery authority | `ProjectRuntime.recover` → `HostTurnCoordinator.recoverRun` | Fresh-state reread prevents general Run recovery from racing an active Host-turn checkpoint |
 
 ## Public-tool mapping

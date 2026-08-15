@@ -40,7 +40,7 @@ This walkthrough validates the Pi migration, removal of Broker/OpenCode, daemon-
 
 1. Disconnect/reconnect Host while Pi child lives; confirm job, Attempt, and Pi session are unchanged.
 2. Crash Pi child; confirm old Attempt is reconciled and one new Attempt/session starts on the same Revision/workspace.
-3. Restart Daemon outside an active Review turn; confirm recovery uses `state.json`, not an assumed live Pi session.
+3. Restart Daemon outside an active Review turn; confirm recovery uses `state.sqlite`, not an assumed live Pi session.
 4. Complete a repair Revision; confirm a new Pi session starts from previous Result Tree.
 5. Submit an independent feature; confirm Host classifies it as a new Task/Run/session.
 6. Cancel a Run; confirm the full Pi process tree exits before CANCELED is durable.

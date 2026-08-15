@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import {
   PublishService,
@@ -12,7 +12,9 @@ import {
   requireExternalBundleSignature,
   serializeDeliveryBundle,
   operationsHash,
+  stableOperationId,
   type ApplyOperation,
+  type DeliveryBundle,
   type PublishAttemptRecord,
   type PublishAttemptStore,
   type PublishResult,
@@ -22,7 +24,10 @@ import {
 import { StateStore, type ProjectState, type RunRecord } from "@smartflow/state-store";
 import { taskManifestSchema } from "@smartflow/task-manifest";
 import {
+  buildGitTreePatch,
   cleanupGitRunTemporaryState,
+  getCandidateBaselineHash,
+  getCandidateHash,
   verifyCandidate,
   type Candidate,
   type GitWorkspaceSnapshot
@@ -40,6 +45,27 @@ function canonical(value: unknown): string {
 
 function hash(value: Uint8Array | string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function deliveryBundleBlobReader(bundle: DeliveryBundle): {
+  read(ref: NonNullable<ApplyOperation["blobRef"]>): Promise<Uint8Array>;
+} {
+  const blobsByHash = new Map(bundle.manifest.blobs.map((blob) => {
+    const bytes = bundle.blobs[blob.path];
+    if (bytes === undefined || bytes.byteLength !== blob.size || hash(bytes) !== blob.sha256) {
+      throw new Error(`DELIVERY_BUNDLE_BLOB_INVALID: ${blob.path}`);
+    }
+    return [`${blob.sha256}:${String(blob.size)}`, bytes] as const;
+  }));
+  return {
+    read: (ref): Promise<Uint8Array> => {
+      const bytes = blobsByHash.get(`${ref.sha256.replace(/^sha256:/u, "")}:${String(ref.size)}`);
+      if (bytes === undefined) {
+        return Promise.reject(new Error(`DELIVERY_BUNDLE_BLOB_MISSING: ${ref.relativePath}`));
+      }
+      return Promise.resolve(bytes);
+    }
+  };
 }
 
 function nextState(
@@ -370,7 +396,7 @@ export class PublishCoordinator {
       run.candidate === undefined ||
       run.review === undefined ||
       run.leaderDecision === undefined ||
-      run.workspace === undefined
+      (run.workspace === undefined && run.deliveryBundle === undefined)
     ) {
       throw new Error("PUBLISH_EVIDENCE_NOT_READY");
     }
@@ -402,14 +428,15 @@ export class PublishCoordinator {
     const allowedLeaderDecisions = (
       reviewDecision.gate as { allowedLeaderDecisions?: unknown } | undefined
     )?.allowedLeaderDecisions;
+    const candidateHash = getCandidateHash(candidate);
     if (
       manifest.revision !== run.revision ||
       !verifyCandidate(candidate) ||
-      candidate.baselineHash !== baselineHash ||
+      getCandidateBaselineHash(candidate) !== baselineHash ||
       !semanticHash(reviewDecision, "reviewHash") ||
       reviewHistoryEntry?.taskSourceHash !== reviewDecision.taskSourceHash ||
-      reviewHistoryEntry?.candidateHash !== candidate.hash ||
-      reviewDecision.candidateHash !== candidate.hash ||
+      reviewHistoryEntry?.candidateHash !== candidateHash ||
+      reviewDecision.candidateHash !== candidateHash ||
       !Array.isArray(allowedLeaderDecisions) ||
       !allowedLeaderDecisions.includes("accept") ||
       typeof reviewHash !== "string" ||
@@ -419,24 +446,29 @@ export class PublishCoordinator {
     ) {
       throw new Error("PUBLISH_EVIDENCE_BINDING_INVALID");
     }
-    const workspaceRoot = resolve(this.store.dataDirectory, run.workspace.relativePath);
-    const { operations, blobs } = await this.operations(candidate, workspaceRoot, jobId, run.revision);
-    const cumulativePatchRef = run.gitWorkspace?.revisions[String(run.revision)]?.cumulativePatch;
-    const patch = cumulativePatchRef === undefined
-      ? this.patch(operations)
-      : new TextDecoder().decode(await this.store.readArtifact(cumulativePatchRef));
-    const bundle = createDeliveryBundle({
-      revision: run.revision,
-      taskManifestHash: run.taskManifest.sha256,
-      baselineHash,
-      candidateHash: candidate.hash,
-      reviewHash,
-      operations,
-      patch,
-      blobs
-    });
     let bundleArtifact = run.deliveryBundle;
+    let durableBundle: DeliveryBundle;
     if (bundleArtifact === undefined) {
+      if (run.workspace === undefined) throw new Error("PUBLISH_WORKSPACE_MISSING");
+      const workspaceRoot = resolve(this.store.dataDirectory, run.workspace.relativePath);
+      const { operations, blobs } = await this.operations(
+        candidate,
+        workspaceRoot,
+        jobId,
+        run.revision,
+        this.adapter !== undefined
+      );
+      const patch = await this.deliveryPatch(run, baseline);
+      const bundle = createDeliveryBundle({
+        revision: run.revision,
+        taskManifestHash: run.taskManifest.sha256,
+        baselineHash,
+        candidateHash,
+        reviewHash,
+        operations,
+        patch,
+        blobs
+      });
       const signingKey = await loadOrCreateInstallationSigningKey(this.signingKeyPath);
       const envelope = requireExternalBundleSignature(bundle.canonicalManifestHash, signingKey);
       const serialized = serializeDeliveryBundle(
@@ -473,12 +505,15 @@ export class PublishCoordinator {
         }
       );
       bundleArtifact = bundleCommit.response.artifact;
+      durableBundle = parseSerializedDeliveryBundle(
+        await this.store.readArtifact(bundleArtifact)
+      ).bundle;
     } else {
-      const existing = parseSerializedDeliveryBundle(await this.store.readArtifact(bundleArtifact));
-      if (existing.bundle.canonicalManifestHash !== bundle.canonicalManifestHash) {
-        throw new Error("PUBLISH_DELIVERY_BUNDLE_IDENTITY_MISMATCH");
-      }
+      durableBundle = parseSerializedDeliveryBundle(
+        await this.store.readArtifact(bundleArtifact)
+      ).bundle;
     }
+    const publishOperations = durableBundle.manifest.operations;
     const attemptStore = new StateStorePublishAttemptStore(
       this.store,
       jobId,
@@ -489,7 +524,7 @@ export class PublishCoordinator {
         run,
         identity,
         bundleArtifact,
-        operations
+        publishOperations
       )
     );
     const service = await new PublishService(attemptStore).publish(
@@ -498,13 +533,13 @@ export class PublishCoordinator {
         projectId: state.projectId,
         jobId,
         revision: run.revision,
-        candidateHash: candidate.hash,
+        candidateHash,
         reviewHash
       },
-      operations,
+      publishOperations,
       this.adapter ?? new FilesystemWorkspaceApplyAdapter(
         state.canonicalProjectRoot,
-        { read: (ref): Promise<Uint8Array> => this.store.readArtifact(ref) },
+        deliveryBundleBlobReader(durableBundle),
         resolve(this.store.dataDirectory, "publish-results")
       )
     );
@@ -577,32 +612,48 @@ export class PublishCoordinator {
       run.phase !== "PUBLISHING" ||
       run.publish?.operationId !== operationId ||
       run.publish.operationsHash !== expectedOperationsHash ||
+      run.deliveryBundle === undefined ||
       run.candidate === undefined ||
-      run.workspace === undefined
+      run.review === undefined
     ) {
       return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
     }
     if (await verifyRunArtifacts(this.store, run) !== undefined) {
       return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
     }
-    const identity = publishIdentity(run);
+    const durableBundle = parseSerializedDeliveryBundle(
+      await this.store.readArtifact(run.deliveryBundle)
+    ).bundle;
     const candidate = JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(run.candidate))
     ) as Candidate;
-    if (!verifyCandidate(candidate)) return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
-    const workspaceRoot = resolve(this.store.dataDirectory, run.workspace.relativePath);
-    const { operations } = await this.operations(candidate, workspaceRoot, jobId, run.revision);
-    if (operationsHash(operations) !== expectedOperationsHash) {
+    const reviewDecision = JSON.parse(
+      new TextDecoder().decode(await this.store.readArtifact(run.review))
+    ) as Record<string, unknown>;
+    const reviewHash = reviewDecision.reviewHash;
+    const operations = durableBundle.manifest.operations;
+    const operationHash = operationsHash(operations);
+    if (
+      typeof reviewHash !== "string" ||
+      run.publish.revision !== run.revision ||
+      operationHash !== expectedOperationsHash ||
+      stableOperationId({
+        projectId: state.projectId,
+        jobId,
+        revision: run.revision,
+        candidateHash: getCandidateHash(candidate),
+        reviewHash,
+        operationsHash: operationHash
+      }) !== operationId
+    ) {
       return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
     }
     const adapter = this.adapter ?? new FilesystemWorkspaceApplyAdapter(
       state.canonicalProjectRoot,
-      { read: (ref): Promise<Uint8Array> => this.store.readArtifact(ref) },
+      deliveryBundleBlobReader(durableBundle),
       resolve(this.store.dataDirectory, "publish-results")
     );
-    return new PublishService(
-      new StateStorePublishAttemptStore(this.store, jobId, identity)
-    ).recover(operationId, operations, adapter);
+    return PublishService.observeRecovery(run.publish, operations, adapter);
   }
 
   private async assertAdapterApplyBoundary(
@@ -645,7 +696,8 @@ export class PublishCoordinator {
     candidate: Candidate,
     workspaceRoot: string,
     jobId: string,
-    revision: number
+    revision: number,
+    materializeBlobs: boolean
   ): Promise<{ operations: ApplyOperation[]; blobs: Record<string, Uint8Array> }> {
     const blobs: Record<string, Uint8Array> = {};
     const operations: ApplyOperation[] = [];
@@ -660,10 +712,16 @@ export class PublishCoordinator {
         const bytes = await readFile(resolve(workspaceRoot, operation.path));
         if (hash(bytes) !== newEntry.sha256) throw new Error("PUBLISH_CANDIDATE_BLOB_DRIFT");
         blobs[operation.path] = bytes;
-        blobRef = await this.store.writeArtifact(
-          `runs/${jobId}/revision-${String(revision)}/publish-blobs/${newEntry.sha256}`,
-          bytes
-        );
+        blobRef = materializeBlobs
+          ? await this.store.writeArtifact(
+              `runs/${jobId}/revision-${String(revision)}/publish-blobs/${newEntry.sha256}`,
+              bytes
+            )
+          : {
+              relativePath: `delivery-bundle/blobs/${newEntry.sha256}`,
+              sha256: newEntry.sha256,
+              size: bytes.byteLength
+            };
       }
       operations.push({
         path: operation.path,
@@ -679,11 +737,26 @@ export class PublishCoordinator {
     return { operations, blobs };
   }
 
-  private patch(operations: ApplyOperation[]): string {
-    return operations.map((operation) => [
-      `--- ${operation.type === "ADD" ? "/dev/null" : `a/${operation.path}`}`,
-      `+++ ${operation.type === "DELETE" ? "/dev/null" : `b/${operation.path}`}`,
-      `@@ smartflow ${operation.type} old=${operation.expectedOldHash ?? "absent"} new=${operation.newHash ?? "deleted"} @@`
-    ].join("\n")).join("\n");
+  private async deliveryPatch(
+    run: RunRecord,
+    baseline: GitWorkspaceSnapshot
+  ): Promise<string> {
+    const revisionWorkspace = run.gitWorkspace?.revisions[String(run.revision)];
+    if (revisionWorkspace?.cumulativePatch !== undefined) {
+      return new TextDecoder().decode(
+        await this.store.readArtifact(revisionWorkspace.cumulativePatch)
+      );
+    }
+    if (run.gitWorkspace === undefined || revisionWorkspace?.resultSnapshot === undefined) {
+      throw new Error("PUBLISH_GIT_PATCH_INPUT_MISSING");
+    }
+    const result = JSON.parse(
+      new TextDecoder().decode(await this.store.readArtifact(revisionWorkspace.resultSnapshot))
+    ) as GitWorkspaceSnapshot;
+    return new TextDecoder().decode(await buildGitTreePatch({
+      runGitDirectory: dirname(resolve(this.store.dataDirectory, run.gitWorkspace.objectDirectory)),
+      baseTreeId: baseline.treeId,
+      resultTreeId: result.treeId
+    }));
   }
 }
