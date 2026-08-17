@@ -49,6 +49,7 @@ function input(): WorkerStartInput {
 
 class FakeSandbox extends ExecutionSandboxAdapter {
   public terminations = 0;
+  public renewals = 0;
   public lastRequest: SandboxedSpawnRequest | undefined;
 
   public override probe(): Promise<SandboxCapabilities> {
@@ -88,6 +89,12 @@ class FakeSandbox extends ExecutionSandboxAdapter {
         })}\n`);
         if (command.type === "prompt") {
           stdout.write(`${JSON.stringify({
+            type: "extension_ui_request",
+            method: "setStatus",
+            statusKey: "smartflow-heartbeat",
+            statusText: String(Date.now())
+          })}\n`);
+          stdout.write(`${JSON.stringify({
             type: "tool_execution_start",
             toolName: "write",
             toolCallId: "call-1"
@@ -102,6 +109,11 @@ class FakeSandbox extends ExecutionSandboxAdapter {
         }
       }
     });
+    let settleExit!: (result: Awaited<ReturnType<SandboxedProcessHandle["wait"]>>) => void;
+    const exit = new Promise<Awaited<ReturnType<SandboxedProcessHandle["wait"]>>>((settle) => {
+      settleExit = settle;
+    });
+    let terminated = false;
     return Promise.resolve({
       attemptId: request.attemptId,
       containmentId: "containment-1",
@@ -111,9 +123,22 @@ class FakeSandbox extends ExecutionSandboxAdapter {
       stdin,
       stdout,
       stderr,
-      wait: () => new Promise(() => undefined),
+      wait: () => exit,
+      renewDeadline: (): boolean => {
+        this.renewals += 1;
+        return true;
+      },
       terminate: (): Promise<{ treeEmpty: boolean }> => {
         this.terminations += 1;
+        if (!terminated) {
+          terminated = true;
+          settleExit({
+            exitCode: null,
+            signal: "SIGTERM",
+            timedOut: false,
+            treeEmpty: true
+          });
+        }
         return Promise.resolve({ treeEmpty: true });
       }
     });
@@ -154,6 +179,7 @@ describe("Pi Provider", () => {
       "TOOL_FINISHED",
       "COMPLETED"
     ]);
+    expect(sandbox.renewals).toBe(1);
     expect(events[0]).toMatchObject({
       piSessionId: "pi-session-1",
       containmentId: "containment-1"

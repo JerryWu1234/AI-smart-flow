@@ -80,6 +80,15 @@ async function executeJson(
   throw new Error(`Installed command returned no JSON: ${lastOutput}`);
 }
 
+async function packSmartFlow(tarball: string, cacheRoot: string): Promise<void> {
+  await executeFile("pnpm", ["pack", "--out", tarball], {
+    cwd: process.cwd(),
+    env: { ...process.env, npm_config_cache: cacheRoot },
+    timeout: 120_000,
+    maxBuffer: 20_000_000
+  });
+}
+
 function installedTasksSource(): string {
   return `# Installed MCP lifecycle
 
@@ -140,6 +149,32 @@ async function stopLaunchedDaemon(dataDirectory: string): Promise<void> {
 }
 
 describe("installed SmartFlow package", () => {
+  it("omits the removed Host SDK export and artifact from the tarball", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "smartflow-pack-audit-"));
+    const tarball = resolve(root, "smartflow.tgz");
+    const cacheRoot = resolve(root, "npm-cache");
+    await mkdir(cacheRoot);
+    try {
+      await packSmartFlow(tarball, cacheRoot);
+      const [{ stdout: packedFiles }, { stdout: manifestSource }] = await Promise.all([
+        executeFile("tar", ["-tf", tarball], { timeout: 30_000, maxBuffer: 2_000_000 }),
+        executeFile("tar", ["-xOf", tarball, "package/package.json"], {
+          timeout: 30_000,
+          maxBuffer: 2_000_000
+        })
+      ]);
+      expect(packedFiles).not.toMatch(/(?:^|\/)\.specify(?:\/|$)|(?:^|\/)specs(?:\/|$)/u);
+      const removedHostSdkArtifact = `package/dist/${["host", "skill"].join("-")}.mjs`;
+      expect(packedFiles).not.toContain(removedHostSdkArtifact);
+      const packedManifest = asRecord(JSON.parse(manifestSource) as unknown, "packed manifest");
+      expect(asRecord(packedManifest.exports, "packed exports")).toEqual({
+        ".": "./dist/smartflow.mjs"
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
   it.runIf(runRealPiE2e)("runs approved tasks through installed MCP, daemon, Pi, review, and filesystem publish", async () => {
     const root = await mkdtemp(resolve(tmpdir(), "smartflow-installed-"));
     const tarball = resolve(root, "smartflow.tgz");
@@ -152,19 +187,7 @@ describe("installed SmartFlow package", () => {
     await Promise.all([mkdir(installRoot), mkdir(projectRoot), mkdir(dataRoot), mkdir(cacheRoot)]);
     try {
       lifecycleStage = "pack";
-      await executeFile("pnpm", ["--pm-on-fail=ignore", "pack", "--out", tarball], {
-        cwd: process.cwd(),
-        env: { ...process.env, npm_config_cache: cacheRoot },
-        timeout: 120_000,
-        maxBuffer: 20_000_000
-      });
-      lifecycleStage = "inspect-pack";
-      const { stdout: packedFiles } = await executeFile("tar", ["-tf", tarball], {
-        timeout: 30_000,
-        maxBuffer: 2_000_000
-      });
-      expect(packedFiles).not.toMatch(/(?:^|\/)\.specify(?:\/|$)|(?:^|\/)specs(?:\/|$)/u);
-      expect(packedFiles).toContain("package/dist/host-skill.mjs");
+      await packSmartFlow(tarball, cacheRoot);
       lifecycleStage = "install";
       let installError: unknown;
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -196,14 +219,6 @@ describe("installed SmartFlow package", () => {
         "smartflow",
         "dist",
         "smartflow.mjs"
-      );
-      const hostSkillEntry = resolve(
-        installRoot,
-        "node_modules",
-        "@jerrywu1234",
-        "smartflow",
-        "dist",
-        "host-skill.mjs"
       );
       const environment = {
         ...Object.fromEntries(
@@ -239,22 +254,6 @@ describe("installed SmartFlow package", () => {
       expect(doctorReport.status).toBe("optional-unavailable");
       expect(`${doctor.stdout}\n${doctor.stderr}`).not.toContain("never-log-this-token");
       expect(`${doctor.stdout}\n${doctor.stderr}`).not.toContain("never-log-this-password");
-      lifecycleStage = "host-skill-import";
-      const hostSkill = await executeFile(
-        process.execPath,
-        [
-          "--input-type=module",
-          "--eval",
-          [
-            `const skill = await import(${JSON.stringify(pathToFileURL(hostSkillEntry).href)});`,
-            'if (typeof skill.executeApprovedWorkflow !== "function" || typeof skill.approveTasksSource !== "function" || typeof skill.validateHostReviewOutput !== "function") process.exit(1);',
-            'if ("CodexCliReviewerHost" in skill || "HostReviewer" in skill || "HostActionLoop" in skill) process.exit(2);'
-          ].join("\n")
-        ],
-        { cwd: projectRoot, env: environment, timeout: 30_000, maxBuffer: 2_000_000 }
-      );
-      expect(`${hostSkill.stdout}\n${hostSkill.stderr}`).not.toContain("never-log-this");
-
       lifecycleStage = "write-project";
       const tasksSource = installedTasksSource();
       await Promise.all([
@@ -291,8 +290,7 @@ describe("installed SmartFlow package", () => {
           resolve(process.cwd(), "tests", "fixtures", "installed-mcp-lifecycle-child.mjs"),
           resolve(installRoot, "node_modules", ".bin", "smartflow"),
           projectRoot,
-          daemonRoot,
-          hostSkillEntry
+          daemonRoot
         ],
         {
           cwd: projectRoot,

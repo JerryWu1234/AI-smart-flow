@@ -11,7 +11,7 @@ import {
 import {
   type HostActionCallbacks,
   type ReviewActionResult
-} from "@smartflow/host-skill";
+} from "../helpers/host-workflow/index.js";
 import type {
   ReviewSubmission,
   ReviewTurnOutput

@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createMcpModelRegistration,
-  registerMcpModel
+  PI_HEARTBEAT_INTERVAL_MS,
+  PI_HEARTBEAT_STATUS_KEY,
+  registerMcpModel,
+  type McpModelExtensionApi
 } from "../../../../packages/provider-pi/src/mcp-model-extension.js";
 import {
   PI_API_KEY_ENVIRONMENT_VARIABLE,
@@ -19,14 +22,16 @@ describe("SmartFlow Pi model Extension", () => {
       SMARTFLOW_PI_CONTEXT_WINDOW: "1000000",
       SMARTFLOW_PI_MAX_TOKENS: "384000",
       SMARTFLOW_PI_THINKING: "high",
-      SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "1800000",
+      SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "300000",
       SMARTFLOW_PI_API_KEY: "secret-value"
     };
     const registerProvider = vi.fn();
+    const on = vi.fn();
 
-    registerMcpModel({ registerProvider }, environment);
+    registerMcpModel({ registerProvider, on }, environment);
 
     expect(registerProvider).toHaveBeenCalledTimes(1);
+    expect(on).toHaveBeenCalledTimes(2);
     expect(registerProvider).toHaveBeenCalledWith(PI_INTERNAL_PROVIDER_ID, {
       name: "SmartFlow MCP Model",
       api,
@@ -45,6 +50,47 @@ describe("SmartFlow Pi model Extension", () => {
     expect(JSON.stringify(registerProvider.mock.calls)).not.toContain("secret-value");
   });
 
+  it("emits heartbeats immediately, on cadence, and only while the session is active", () => {
+    vi.useFakeTimers();
+    try {
+      const environment = {
+        SMARTFLOW_PI_API: "openai-completions",
+        SMARTFLOW_PI_BASE_URL: "https://models.example.test/v1",
+        SMARTFLOW_PI_MODEL: "model-test",
+        SMARTFLOW_PI_CONTEXT_WINDOW: "1000000",
+        SMARTFLOW_PI_MAX_TOKENS: "384000",
+        SMARTFLOW_PI_THINKING: "high",
+        SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "300000",
+        SMARTFLOW_PI_API_KEY: "secret-value"
+      };
+      type SessionEvent = Parameters<McpModelExtensionApi["on"]>[0];
+      type SessionHandler = Parameters<McpModelExtensionApi["on"]>[1];
+      const handlers = new Map<SessionEvent, SessionHandler>();
+      const on: McpModelExtensionApi["on"] = (event, handler) => {
+        handlers.set(event, handler);
+      };
+      registerMcpModel({ registerProvider: vi.fn(), on }, environment);
+      const setStatus = vi.fn();
+      const context = { ui: { setStatus } };
+      const start = handlers.get("session_start");
+      const shutdown = handlers.get("session_shutdown");
+      if (start === undefined || shutdown === undefined) throw new Error("SESSION_HANDLER_MISSING");
+
+      start({}, context);
+      expect(setStatus).toHaveBeenLastCalledWith(PI_HEARTBEAT_STATUS_KEY, expect.any(String));
+      expect(setStatus).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(PI_HEARTBEAT_INTERVAL_MS);
+      expect(setStatus).toHaveBeenCalledTimes(2);
+
+      shutdown({}, context);
+      vi.advanceTimersByTime(PI_HEARTBEAT_INTERVAL_MS * 2);
+      expect(setStatus).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects numeric settings outside the safe-integer range", () => {
     const environment = {
       SMARTFLOW_PI_API: "openai-completions",
@@ -53,7 +99,7 @@ describe("SmartFlow Pi model Extension", () => {
       SMARTFLOW_PI_CONTEXT_WINDOW: "1000000",
       SMARTFLOW_PI_MAX_TOKENS: "384000",
       SMARTFLOW_PI_THINKING: "high",
-      SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "1800000",
+      SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "300000",
       SMARTFLOW_PI_API_KEY: "secret-value"
     };
     for (const unsafe of [String(Number.MAX_SAFE_INTEGER + 1), "9".repeat(400)]) {
@@ -67,6 +113,10 @@ describe("SmartFlow Pi model Extension", () => {
         SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: unsafe
       })).toThrow(/positive safe integer/u);
     }
+    expect(() => createMcpModelRegistration({
+      ...environment,
+      SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "59999"
+    })).toThrow(/must be at least 60000/u);
   });
 
   it("rejects incomplete child configuration without exposing the API Key", () => {

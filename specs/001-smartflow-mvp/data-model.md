@@ -56,7 +56,7 @@ interface PiRuntimeConfiguration {
   contextWindow: number;       // default 1_000_000
   maxTokens: number;           // default 384_000
   thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-  attemptDeadlineMs: number;   // default 1_800_000
+  attemptDeadlineMs: number;   // default 300_000; minimum 60_000 rolling heartbeat window
   resourcePolicy: "workspace-project-resources";
 }
 

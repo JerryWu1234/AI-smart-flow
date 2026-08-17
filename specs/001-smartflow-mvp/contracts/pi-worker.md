@@ -11,7 +11,7 @@
 1. The SmartFlow MCP server process environment is the sole user configuration source, and one MCP instance binds exactly one endpoint/model.
 2. Required fields are `SMARTFLOW_PI_API`, `SMARTFLOW_PI_BASE_URL`, `SMARTFLOW_PI_MODEL` and `SMARTFLOW_PI_API_KEY`.
 3. `SMARTFLOW_PI_API` accepts only `openai-completions`, `openai-responses`, `anthropic-messages` and `google-generative-ai`. It identifies the wire protocol, not a Worker Provider or supplier name.
-4. Optional `SMARTFLOW_PI_CONTEXT_WINDOW`, `SMARTFLOW_PI_MAX_TOKENS`, `SMARTFLOW_PI_THINKING` and `SMARTFLOW_PI_ATTEMPT_DEADLINE_MS` default to `1000000`, `384000`, `high` and `1800000`; all numeric values are positive integers and max tokens cannot exceed context.
+4. Optional `SMARTFLOW_PI_CONTEXT_WINDOW`, `SMARTFLOW_PI_MAX_TOKENS`, `SMARTFLOW_PI_THINKING` and `SMARTFLOW_PI_ATTEMPT_DEADLINE_MS` default to `1000000`, `384000`, `high` and `300000`; the deadline is a rolling heartbeat window with a minimum override of `60000`, all numeric values are positive integers, and max tokens cannot exceed context.
 5. Model capability is registered as reasoning-capable and text-input by default. `SMARTFLOW_PI_THINKING=off` disables reasoning for the session without changing model identity.
 6. `SMARTFLOW_WORKER`, `SMARTFLOW_MODEL_API_FORMAT`, `SMARTFLOW_MODEL_API_KEY`, `SMARTFLOW_MODEL_BASE_URL`, `SMARTFLOW_MODEL`, `SMARTFLOW_PI_PROVIDER` and `SMARTFLOW_PI_CREDENTIAL_ENV` are unsupported and are not fallback sources.
 7. API Key is kept outside runtime configuration/state. It may be present only in MCP/Daemon/Pi process memory and the Pi child environment; it cannot enter argv, hashes, manifests, state, sessions, Artifacts, diagnostics or errors.
@@ -28,9 +28,9 @@
 
 1. Pi SDK Agent loop and bundled model Extension run in a child process created by `ExecutionSandboxAdapter`, never inside Daemon.
 2. Parent and child use SDK JSONL RPC over stdin/stdout; stderr is diagnostic only.
-3. The sandbox handle exposes stable containment/process identity, bidirectional streams, exit reconciliation and full process-tree termination.
+3. The sandbox handle exposes stable containment/process identity, bidirectional streams, rolling-deadline renewal, exit reconciliation and full process-tree termination.
 4. Unexpected child exit, malformed RPC or lost containment ends the current Attempt. Host code must not continue the Agent loop outside the sandbox.
-5. The frozen Attempt deadline applies to the child and all descendants. Expiry terminates the containment tree, persists `TIMED_OUT`, and pauses the Run; unproven termination blocks replacement execution.
+5. The child emits an independent heartbeat every 30 seconds through the SDK JSONL RPC channel. Each heartbeat renews the frozen rolling window, which defaults to five minutes; one full window without a heartbeat terminates the child and all descendants, persists `TIMED_OUT`, and pauses the Run. Unproven termination blocks replacement execution.
 
 ## Tool ownership
 
@@ -67,7 +67,7 @@
 |---|---|
 | Host reconnect while child lives | continue same Attempt/session |
 | Pi child or Daemon crash | reconcile old containment; create new Attempt/session on same Revision/workspace |
-| Attempt deadline expires | terminate containment; persist `TIMED_OUT`; wait for Leader recovery decision |
+| Configured heartbeat window expires | terminate containment; persist `TIMED_OUT`; wait for Leader recovery decision |
 | Approved repair/new Revision | create new Attempt/session from prior Result Snapshot |
 | Independent new feature | Leader creates new Task/Run/session |
 | Cancel | terminate entire containment tree and persist CANCELED |

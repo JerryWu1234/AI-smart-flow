@@ -42,7 +42,7 @@
 
 ## Decision 6: Recover business state, not an assumed live Pi session
 
-**Decision**: Host reconnect continues the same live Attempt/session. Worker or Daemon crash creates a new Attempt/Pi session with the same job, Revision and workspace. A frozen Attempt deadline terminates the containment and persists `TIMED_OUT` before controlled recovery. A new Revision creates a new Pi session. An independent new feature creates a new Task/Run, as classified by Host/Leader from user intent.
+**Decision**: Host reconnect continues the same live Attempt/session. Worker or Daemon crash creates a new Attempt/Pi session with the same job, Revision and workspace. A rolling deadline, five minutes by default, is renewed by independent Pi child heartbeats; one full configured window without a heartbeat terminates the containment and persists `TIMED_OUT` before controlled recovery. A new Revision creates a new Pi session. An independent new feature creates a new Task/Run, as classified by Host/Leader from user intent.
 
 **Rationale**: Task Artifacts, Revision snapshots and `state.sqlite` are durable; an in-memory Agent session is not. Recovery must remain correct even when session files or processes are gone.
 

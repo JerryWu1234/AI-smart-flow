@@ -115,7 +115,7 @@ Host 不重复提交这些机械决策。每个 repair 使用新 Revision/new Pi
 
 `tasks.md` 只表达业务任务、稳定 Task ID、目标路径和验收条件。Provider、模型、凭据、Sandbox 与运行参数不得写入任务正文。
 
-SmartFlow MCP server 环境提供 `SMARTFLOW_PI_API`、`SMARTFLOW_PI_BASE_URL`、`SMARTFLOW_PI_MODEL`、`SMARTFLOW_PI_API_KEY`；每个 Revision 冻结非敏感 `providerRuntimeConfigHash`。支持四种标准协议，context/max output/thinking/deadline 默认 `1000000/384000/high/1800000ms`。
+SmartFlow MCP server 环境提供 `SMARTFLOW_PI_API`、`SMARTFLOW_PI_BASE_URL`、`SMARTFLOW_PI_MODEL`、`SMARTFLOW_PI_API_KEY`；每个 Revision 冻结非敏感 `providerRuntimeConfigHash`。支持四种标准协议，context/max output/thinking/rolling deadline 默认 `1000000/384000/high/300000ms`，deadline 覆盖值最低 `60000ms`；Pi child 每 30 秒心跳续期。
 
 Pi child 加载静态 Extension，通过官方 `pi.registerProvider()` 在内存中注册唯一模型。SmartFlow 不生成/读取 `models.json`，不读取宿主用户 Pi 配置，不在 argv、状态、session、Artifact 或日志中保存 API Key。
 

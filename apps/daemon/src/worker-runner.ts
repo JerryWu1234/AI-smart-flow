@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
+import type { StructuredLogger } from "@smartflow/observability";
 import type {
   ProviderProbeResult,
   WorkerEvent,
@@ -58,6 +59,11 @@ export interface WorkerRunnerHooks {
   }): void | Promise<void>;
 }
 
+export interface WorkerRunnerOptions {
+  hooks?: WorkerRunnerHooks;
+  logger?: Pick<StructuredLogger, "log">;
+}
+
 const terminalEvents = new Set<WorkerEvent["type"]>([
   "COMPLETED",
   "BLOCKED",
@@ -77,11 +83,6 @@ function isInside(root: string, target: string): boolean {
 
 function currentAttempt(run: RunRecord | undefined): RunRecord["workerAttempts"][number] | undefined {
   return run?.workerAttempts.at(-1);
-}
-
-function requiredValue<T>(value: T | undefined, code: string): T {
-  if (value === undefined) throw new Error(code);
-  return value;
 }
 
 function replaceAttempt(
@@ -124,13 +125,17 @@ function requiredCapabilities(probe: Extract<ProviderProbeResult, { available: t
 class WorkspacePreparationPaused extends Error {}
 
 export class WorkerRunner {
+  private readonly hooks: WorkerRunnerHooks;
+  private readonly logger: Pick<StructuredLogger, "log"> | undefined;
   private readonly mutations: ProjectMutationExecutor;
 
   public constructor(
     private readonly store: StateStore,
     private readonly provider: WorkerProvider,
-    private readonly hooks: WorkerRunnerHooks = {}
+    options: WorkerRunnerOptions = {}
   ) {
+    this.hooks = options.hooks ?? {};
+    this.logger = options.logger;
     this.mutations = new ProjectMutationExecutor(store);
   }
 
@@ -176,16 +181,16 @@ export class WorkerRunner {
       if (error instanceof WorkspacePreparationPaused) {
         return { phase: (await this.currentRun(request.jobId)).phase, stale: false };
       }
-      if (
-        error instanceof StateStoreError &&
-        new Set(["STATE_VERSION_MISMATCH", "STALE_FENCE", "REVISION_MISMATCH", "STATE_INVALID"])
-          .has(error.code)
-      ) {
-        return { phase: (await this.currentRun(request.jobId)).phase, stale: true };
+      if (error instanceof StateStoreError) {
+        if (
+          new Set(["STATE_VERSION_MISMATCH", "STALE_FENCE", "REVISION_MISMATCH", "STATE_INVALID"])
+            .has(error.code)
+        ) {
+          return { phase: (await this.currentRun(request.jobId)).phase, stale: true };
+        }
       }
       throw error;
     }
-
     const generation = (currentAttempt(prepared.run)?.generation ?? -1) + 1;
     const attemptId = `attempt-${randomUUID()}`;
     const registryPath = resolve(
@@ -375,30 +380,24 @@ export class WorkerRunner {
     let baseline: GitWorkspaceSnapshot;
     let inputSnapshot: GitWorkspaceSnapshot;
     let baselineRef: RunRecord["baseline"];
-    let capabilityRef = run.gitWorkspace?.capability;
     let runGitDirectory: string;
     let objectDirectory: string;
     let inputSnapshotRef: NonNullable<RunRecord["baseline"]>;
 
     if (run.gitWorkspace === undefined) {
       const capability = await probeGitRepository(initial.canonicalProjectRoot);
-      const portableCapability = Object.fromEntries(
-        Object.entries(capability).filter(([key]) =>
-          key !== "repositoryRoot" && key !== "gitDirectory"
-        )
-      );
-      const capabilityBytes = Buffer.from(JSON.stringify(portableCapability), "utf8");
-      const writtenCapabilityRef = await this.store.writeArtifact(
-        `runs/${request.jobId}/revision-1/git/capability-${createHash("sha256").update(capabilityBytes).digest("hex")}.json`,
-        capabilityBytes
-      );
-      capabilityRef = writtenCapabilityRef;
       if (capability.status !== "READY" || capability.repositoryId === undefined) {
         const code = capability.pause?.code ?? "GIT_REPOSITORY_REQUIRED";
         await this.mutations.mutate(
           {
             requestId: `git-capability:${request.jobId}:${code}:s${String(initial.stateVersion)}`,
-            payload: capability,
+            payload: {
+              code,
+              inclusionPolicyHash: capability.inclusionPolicyHash,
+              worktreeSupported: capability.worktreeSupported,
+              symlinks: capability.symlinks,
+              fileMode: capability.fileMode
+            },
             expectedStateVersion: initial.stateVersion,
             expectedJobId: request.jobId,
             expectedFence: run.fence,
@@ -416,14 +415,43 @@ export class WorkerRunner {
                 message: capability.pause?.message ?? "Git repository is unsupported",
                 retryable: true,
                 nextActions: ["retry_git_probe", "cancel"],
-                artifacts: [writtenCapabilityRef]
+                artifacts: []
               }
             })),
             response: { phase: "PAUSED", code }
           })
         );
+        this.logger?.log({
+          level: "warn",
+          event: "worker.git_capability_paused",
+          stage: "git-capability",
+          correlation: { jobId: request.jobId, revision: request.revision },
+          data: {
+            code,
+            ...(capability.repositoryId === undefined
+              ? {}
+              : { repositoryId: capability.repositoryId }),
+            inclusionPolicyHash: capability.inclusionPolicyHash,
+            worktreeSupported: capability.worktreeSupported,
+            symlinks: capability.symlinks,
+            fileMode: capability.fileMode
+          }
+        });
         throw new WorkspacePreparationPaused(code);
       }
+      this.logger?.log({
+        level: "info",
+        event: "worker.git_capability_ready",
+        stage: "git-capability",
+        correlation: { jobId: request.jobId, revision: request.revision },
+        data: {
+          repositoryId: capability.repositoryId,
+          inclusionPolicyHash: capability.inclusionPolicyHash,
+          worktreeSupported: capability.worktreeSupported,
+          symlinks: capability.symlinks,
+          fileMode: capability.fileMode
+        }
+      });
       const objectStore = await initializeGitObjectStore(runRoot);
       runGitDirectory = objectStore.gitDirectory;
       objectDirectory = portableRelative(this.store.dataDirectory, objectStore.objectDirectory);
@@ -465,10 +493,6 @@ export class WorkerRunner {
     await this.syncCanonicalTask(initial.canonicalProjectRoot, run, workspaceRoot);
     const workspaceRelativePath = portableRelative(this.store.dataDirectory, workspaceRoot);
     const sandboxId = `workspace-${randomUUID()}`;
-    const preparedCapabilityRef = requiredValue(
-      capabilityRef,
-      "GIT_WORKSPACE_BINDING_MISSING"
-    );
     const result = await this.mutations.mutate(
       {
         requestId: `worker-workspace:${request.jobId}:r${revisionKey}:${sandboxId}`,
@@ -487,7 +511,6 @@ export class WorkerRunner {
           lastError: undefined,
           baseline: baselineRef,
           gitWorkspace: {
-            capability: preparedCapabilityRef,
             repositoryId: baseline.repositoryId,
             inclusionPolicyHash: baseline.includedPathPolicyHash,
             objectDirectory,
@@ -919,6 +942,7 @@ export class WorkerRunner {
             typeof entry.reviewerSessionId === "string" ? [entry.reviewerSessionId] : []
           ))];
           if (reviewerSessions.length > 1) throw new Error("REVIEWER_SESSION_HISTORY_INVALID");
+          const boundReviewerSessionId = reviewerSessions[0];
           pendingAction = {
             ...createReviewHostAction(
               {
@@ -927,9 +951,9 @@ export class WorkerRunner {
                 candidateHash: candidate.candidateHash,
                 changedPaths: candidate.operations.map((operation) => operation.path),
                 piSessionId: attempt.piSessionId,
-                ...(reviewerSessions[0] === undefined
+                ...(typeof boundReviewerSessionId !== "string"
                   ? {}
-                  : { boundReviewerSessionId: reviewerSessions[0] })
+                  : { boundReviewerSessionId })
               },
               new Date(Date.now() + 15 * 60_000).toISOString()
             )

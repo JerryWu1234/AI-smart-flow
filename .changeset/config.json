@@ -9,7 +9,6 @@
   "updateInternalDependencies": "patch",
   "ignore": [
     "@smartflow/daemon",
-    "@smartflow/host-skill",
     "@smartflow/mcp-server",
     "@smartflow/observability",
     "@smartflow/protocol",

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { PI_MINIMUM_ATTEMPT_DEADLINE_MS } from "../../../../packages/provider-pi/src/heartbeat.js";
 import { PiProvider } from "../../../../packages/provider-pi/src/pi-provider.js";
 import {
   parsePiRuntimeConfiguration,
@@ -35,6 +36,10 @@ describe("Pi runtime configuration", () => {
       .toThrow(/PI_RUNTIME_CONFIG_INVALID/u);
     expect(() => parsePiRuntimeConfiguration({ ...configuration, maxTokens: 1_000_001 }))
       .toThrow(/PI_RUNTIME_CONFIG_INVALID/u);
+    expect(() => parsePiRuntimeConfiguration({
+      ...configuration,
+      attemptDeadlineMs: PI_MINIMUM_ATTEMPT_DEADLINE_MS - 1
+    })).toThrow(/PI_RUNTIME_CONFIG_INVALID/u);
   });
 
   it("fails a Worker Attempt before launch when the frozen hash drifts", async () => {

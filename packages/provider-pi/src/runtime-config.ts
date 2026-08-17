@@ -1,5 +1,7 @@
 import { hashCanonical } from "@smartflow/task-manifest";
 
+import { PI_MINIMUM_ATTEMPT_DEADLINE_MS } from "./heartbeat.js";
+
 export const PI_CODING_AGENT_VERSION = "0.83.0";
 export const PI_NODE_MINIMUM = "22.19.0";
 export const PI_INTERNAL_PROVIDER_ID = "smartflow-mcp";
@@ -70,6 +72,7 @@ export function parsePiRuntimeConfiguration(input: unknown): PiRuntimeConfigurat
     value.maxTokens > value.contextWindow ||
     typeof value.thinkingLevel !== "string" || !thinkingLevels.has(value.thinkingLevel as PiThinkingLevel) ||
     !positiveInteger(value.attemptDeadlineMs) ||
+    value.attemptDeadlineMs < PI_MINIMUM_ATTEMPT_DEADLINE_MS ||
     value.resourcePolicy !== "workspace-project-resources" ||
     Object.keys(value).some((key) => !configurationKeys.has(key))
   ) {

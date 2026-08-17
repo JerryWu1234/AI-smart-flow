@@ -56,13 +56,20 @@ export interface PiRpcTransport {
   stderr: Readable;
 }
 
+export type PiRpcEventInterceptor = (
+  event: Readonly<Record<string, unknown>>
+) => boolean;
+
 export class PiRpcClient {
   private readonly eventsQueue = new AsyncEventQueue<Record<string, unknown>>();
   private readonly pending = new Map<string, PendingRequest>();
   private nextId = 1;
   private readonly lines;
 
-  public constructor(private readonly transport: PiRpcTransport) {
+  public constructor(
+    private readonly transport: PiRpcTransport,
+    private readonly interceptEvent?: PiRpcEventInterceptor
+  ) {
     this.lines = createInterface({ input: transport.stdout, crlfDelay: Infinity });
     this.lines.on("line", (line) => this.acceptLine(line));
     this.lines.on("close", () => this.close());
@@ -114,6 +121,12 @@ export class PiRpcClient {
       this.pending.delete(message.id);
       if (message.success === true) pending.resolve(message);
       else pending.reject(new Error(this.responseError(message)));
+      return;
+    }
+    try {
+      if (this.interceptEvent?.(message) === true) return;
+    } catch (error) {
+      this.fail(error instanceof Error ? error : new Error("PI_RPC_EVENT_INTERCEPTOR_FAILED"));
       return;
     }
     this.eventsQueue.push(message);

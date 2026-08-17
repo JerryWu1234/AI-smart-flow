@@ -1,3 +1,14 @@
+import {
+  PI_HEARTBEAT_INTERVAL_MS,
+  PI_HEARTBEAT_STATUS_KEY,
+  PI_MINIMUM_ATTEMPT_DEADLINE_MS
+} from "./heartbeat.js";
+
+export {
+  PI_HEARTBEAT_INTERVAL_MS,
+  PI_HEARTBEAT_STATUS_KEY
+} from "./heartbeat.js";
+
 const PI_API_KEY_ENVIRONMENT_VARIABLE = "SMARTFLOW_PI_API_KEY";
 const PI_INTERNAL_PROVIDER_ID = "smartflow-mcp";
 const PI_MODEL_APIS = [
@@ -29,8 +40,18 @@ interface McpProviderConfig {
   models: McpProviderModelConfig[];
 }
 
+interface McpHeartbeatContext {
+  ui: {
+    setStatus(key: string, text: string | undefined): void;
+  };
+}
+
 export interface McpModelExtensionApi {
   registerProvider(name: string, config: McpProviderConfig): void;
+  on(
+    event: "session_start" | "session_shutdown",
+    handler: (event: unknown, context: McpHeartbeatContext) => void
+  ): void;
 }
 
 export interface McpModelRegistration {
@@ -93,7 +114,12 @@ export function createMcpModelRegistration(
   if (!PI_THINKING_LEVELS.has(thinkingLevel)) {
     throw new Error("PI_MODEL_EXTENSION_INVALID: SMARTFLOW_PI_THINKING is unsupported");
   }
-  integer(environment, "SMARTFLOW_PI_ATTEMPT_DEADLINE_MS");
+  const attemptDeadlineMs = integer(environment, "SMARTFLOW_PI_ATTEMPT_DEADLINE_MS");
+  if (attemptDeadlineMs < PI_MINIMUM_ATTEMPT_DEADLINE_MS) {
+    throw new Error(
+      `PI_MODEL_EXTENSION_INVALID: SMARTFLOW_PI_ATTEMPT_DEADLINE_MS must be at least ${String(PI_MINIMUM_ATTEMPT_DEADLINE_MS)}`
+    );
+  }
   if (maxTokens > contextWindow) {
     throw new Error("PI_MODEL_EXTENSION_INVALID: max tokens exceed context window");
   }
@@ -124,6 +150,23 @@ export function registerMcpModel(
 ): void {
   const registration = createMcpModelRegistration(environment);
   pi.registerProvider(registration.providerId, registration.config);
+
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  const stopHeartbeat = (): void => {
+    if (heartbeat === undefined) return;
+    clearInterval(heartbeat);
+    heartbeat = undefined;
+  };
+  pi.on("session_start", (_event, context) => {
+    stopHeartbeat();
+    const sendHeartbeat = (): void => {
+      context.ui.setStatus(PI_HEARTBEAT_STATUS_KEY, String(Date.now()));
+    };
+    sendHeartbeat();
+    heartbeat = setInterval(sendHeartbeat, PI_HEARTBEAT_INTERVAL_MS);
+    heartbeat.unref();
+  });
+  pi.on("session_shutdown", stopHeartbeat);
 }
 
 export default registerMcpModel;

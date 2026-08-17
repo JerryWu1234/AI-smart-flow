@@ -135,5 +135,6 @@ Exactly six tools are registered:
 - Coordinator/recovery: `apps/daemon/src/host-turn-coordinator.ts`, `apps/daemon/src/project-runtime.ts`, `tests/unit/apps/daemon/host-turn-coordinator.test.ts`
 - State checkpoint: `packages/state-store/src/schema.ts`, `tests/unit/packages/state-store/schema.test.ts`
 - Mechanical policy: `packages/review/src/review-decision.ts`, `tests/unit/packages/review/review-decision.test.ts`
-- Host two-tool loop: `packages/host-skill/src/workflow.ts`, `tests/unit/packages/host-skill/workflow.test.ts`
+- Native Host contract/direct MCP loop: `apps/mcp-server/src/server.ts`, `tests/fixtures/installed-mcp-lifecycle-child.mjs`
+- Repository-only Host simulation: `tests/helpers/host-workflow/workflow.ts`, `tests/unit/helpers/host-workflow/workflow.test.ts`
 - Production composition: `tests/e2e/production-repair-loop.test.ts`

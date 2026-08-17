@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { WorkerRunner } from "@smartflow/daemon";
+import { StructuredLogger } from "@smartflow/observability";
 import type {
   CancelReceipt,
   ProviderProbeResult,
@@ -14,7 +15,12 @@ import type {
   WorkerProvider,
   WorkerStartInput
 } from "@smartflow/provider-core";
-import { StateStore, runArtifactInventory, type ProjectState } from "@smartflow/state-store";
+import {
+  StateStore,
+  projectStateSchema,
+  runArtifactInventory,
+  type ProjectState
+} from "@smartflow/state-store";
 import { compileTaskManifest } from "@smartflow/task-manifest";
 import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
@@ -196,7 +202,7 @@ describe("Pi WorkerRunner", () => {
         SMARTFLOW_PI_CONTEXT_WINDOW: "1000000",
         SMARTFLOW_PI_MAX_TOKENS: "384000",
         SMARTFLOW_PI_THINKING: "high",
-        SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "1800000",
+        SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "300000",
         SMARTFLOW_PI_API_KEY: credentialCanary
       }
     });
@@ -213,7 +219,13 @@ describe("Pi WorkerRunner", () => {
     const harness = await createRuntimeHarness();
     harnesses.push(harness);
     const { store, configHash } = await initializedStore(harness);
-    const result = await new WorkerRunner(store, new TestPiProvider(configHash, "COMPLETED")).run({
+    const logLines: string[] = [];
+    const logger = new StructuredLogger("pi-runner-test", (line) => logLines.push(line));
+    const result = await new WorkerRunner(
+      store,
+      new TestPiProvider(configHash, "COMPLETED"),
+      { logger }
+    ).run({
       jobId: "job-1",
       revision: 1,
       prompt: "implement",
@@ -222,10 +234,60 @@ describe("Pi WorkerRunner", () => {
     });
 
     expect(result.phase).toBe("REVIEW_PENDING");
-    const run = (await store.readState()).runs["job-1"];
-    if (run?.candidate === undefined || run.workspace === undefined) {
+    const state = await store.readState();
+    const run = state.runs["job-1"];
+    if (
+      run?.candidate === undefined ||
+      run.workspace === undefined ||
+      run.gitWorkspace === undefined
+    ) {
       throw new Error("completed Pi run evidence missing");
     }
+    expect(run.gitWorkspace).not.toHaveProperty("capability");
+    expect(projectStateSchema.safeParse({
+      ...state,
+      runs: {
+        ...state.runs,
+        "job-1": {
+          ...run,
+          gitWorkspace: {
+            ...run.gitWorkspace,
+            capability: run.gitWorkspace.runBaselineSnapshot
+          }
+        }
+      }
+    }).success).toBe(false);
+    expect(runArtifactInventory(run).bindings.some((binding) =>
+      binding.name.endsWith(".capability")
+    )).toBe(false);
+    await expect(readdir(resolve(
+      store.dataDirectory,
+      "runs",
+      "job-1",
+      "revision-1",
+      "git"
+    ))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(logLines).toHaveLength(1);
+    const capabilityLog = JSON.parse(logLines[0] ?? "{}") as {
+      data?: { symlinks?: unknown; fileMode?: unknown };
+      [key: string]: unknown;
+    };
+    expect(capabilityLog).toMatchObject({
+      level: "info",
+      event: "worker.git_capability_ready",
+      stage: "git-capability",
+      correlation: { jobId: "job-1", revision: 1 },
+      data: {
+        repositoryId: run.gitWorkspace.repositoryId,
+        inclusionPolicyHash: run.gitWorkspace.inclusionPolicyHash,
+        worktreeSupported: true
+      }
+    });
+    expect(typeof capabilityLog.data?.symlinks).toBe("boolean");
+    expect(typeof capabilityLog.data?.fileMode).toBe("boolean");
+    const capabilityLogLine = logLines.join("\n");
+    expect(capabilityLogLine).not.toContain(harness.projectDir);
+    expect(capabilityLogLine).not.toContain(store.dataDirectory);
     expect(run.workerAttempts).toHaveLength(1);
     expect(run.workerAttempts[0]?.status).toBe("COMPLETED");
     expect(run.workerAttempts[0]?.piSessionId).toMatch(/^pi-session-/u);
@@ -236,7 +298,7 @@ describe("Pi WorkerRunner", () => {
     expect(candidate.schemaVersion).toBe(3);
     expect(candidate.operations.map((operation) => operation.path)).toContain("sum.js");
     expect(candidate.operations.some((operation) => operation.path.startsWith(".smartflow-runtime/"))).toBe(false);
-    const revision = run.gitWorkspace?.revisions["1"];
+    const revision = run.gitWorkspace.revisions["1"];
     expect(revision).toMatchObject({
       revision: 1,
       candidate: run.candidate

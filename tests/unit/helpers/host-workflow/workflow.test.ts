@@ -4,8 +4,8 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { approveTasksSource, type HostGateway } from "../../../../packages/host-skill/src/approval.js";
-import { executeApprovedWorkflow } from "../../../../packages/host-skill/src/workflow.js";
+import { approveTasksSource, type HostGateway } from "../../../helpers/host-workflow/approval.js";
+import { executeApprovedWorkflow } from "../../../helpers/host-workflow/workflow.js";
 
 const digest = "a".repeat(64);
 

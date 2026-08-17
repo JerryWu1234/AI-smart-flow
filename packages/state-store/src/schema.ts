@@ -35,7 +35,6 @@ export const gitRevisionWorkspaceSchema = z.object({
 }).strict();
 
 export const gitRunWorkspaceSchema = z.object({
-  capability: artifactRefSchema,
   repositoryId: z.string().regex(/^[a-f0-9]{64}$/u),
   inclusionPolicyHash: z.string().regex(/^[a-f0-9]{64}$/u),
   objectDirectory: z.string().min(1),
@@ -451,7 +450,6 @@ export interface RunArtifactBinding {
   semantic:
     | "TASK_MANIFEST"
     | "TASK_SOURCE"
-    | "GIT_CAPABILITY"
     | "GIT_SNAPSHOT"
     | "GIT_PATCH"
     | "GIT_EVIDENCE"
@@ -501,7 +499,6 @@ export function runArtifactInventory(run: RunRecord): RunArtifactInventory {
   add("taskManifest", run.taskManifest, run.revision, "TASK_MANIFEST", true);
   add("taskSource", run.taskSource, run.revision, "TASK_SOURCE", true);
   if (run.gitWorkspace !== undefined) {
-    add("gitWorkspace.capability", run.gitWorkspace.capability, 1, "GIT_CAPABILITY", true);
     add("gitWorkspace.runBaselineSnapshot", run.gitWorkspace.runBaselineSnapshot, 1, "GIT_SNAPSHOT", true);
     for (const revision of Object.values(run.gitWorkspace.revisions)) {
       add(

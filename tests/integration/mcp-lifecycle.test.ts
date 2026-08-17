@@ -13,7 +13,7 @@ import {
   approveTasksSource,
   executeApprovedTasks,
   type HostGateway
-} from "@smartflow/host-skill";
+} from "../helpers/host-workflow/index.js";
 import type {
   ReviewTurnOutput,
   RunPhase

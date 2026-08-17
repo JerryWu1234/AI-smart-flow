@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { StructuredLogger } from "@smartflow/observability";
 import type { PublishServiceResult, WorkspaceApplyAdapter } from "@smartflow/publish";
 import type { WorkerProvider } from "@smartflow/provider-core";
+import { PI_MINIMUM_ATTEMPT_DEADLINE_MS } from "@smartflow/provider-pi";
 import type { ProjectState, RunRecord, WorkerAttempt } from "@smartflow/state-store";
 import { taskManifestSchema } from "@smartflow/task-manifest";
 import { ExecutionSandboxAdapter } from "@smartflow/workspace";
@@ -41,12 +42,14 @@ function currentAttempt(run: RunRecord | undefined): WorkerAttempt | undefined {
 function attemptDeadlineMs(config: Readonly<Record<string, unknown>>): number {
   const configuration = config.configuration;
   if (typeof configuration !== "object" || configuration === null || Array.isArray(configuration)) {
-    return 1_800_000;
+    return 300_000;
   }
   const value = (configuration as Record<string, unknown>).attemptDeadlineMs;
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= PI_MINIMUM_ATTEMPT_DEADLINE_MS
     ? value
-    : 1_800_000;
+    : 300_000;
 }
 
 export class ProductionRuntimeComposition {
@@ -108,7 +111,9 @@ export class ProductionRuntimeComposition {
       ]),
       "When the requested work is complete, answer briefly and stop."
     ].join("\n");
-    const worker = await new WorkerRunner(context.store, providerRuntime.provider).run({
+    const worker = await new WorkerRunner(context.store, providerRuntime.provider, {
+      logger: this.logger
+    }).run({
       jobId: context.jobId,
       revision: manifest.revision,
       prompt,

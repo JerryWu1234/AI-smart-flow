@@ -8,6 +8,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
 import { WorkspaceError } from "./errors.js";
+import { RollingDeadlineTimer } from "./rolling-deadline-timer.js";
 
 export interface SandboxCapabilities {
   available: boolean;
@@ -58,6 +59,7 @@ export interface SandboxedProcessHandle extends SandboxProcessIdentity {
   stdout: Readable;
   stderr: Readable;
   wait(): Promise<SandboxExitResult>;
+  renewDeadline(deadlineAt: string): boolean;
   terminate(): Promise<{ treeEmpty: boolean }>;
 }
 
@@ -273,16 +275,17 @@ export class ExecutionSandboxAdapter {
   }
 
   public async spawn(request: SandboxedSpawnRequest): Promise<SandboxedProcessHandle> {
-    const capabilities = await this.probe();
-    if (!capabilities.available) {
-      throw new Error(`SANDBOX_UNAVAILABLE: ${capabilities.reason ?? "no verified adapter"}`);
-    }
     if (request.argv.length === 0 || !/^[a-f0-9]{64}$/u.test(request.configHash)) {
       throw new Error("SANDBOX_REQUEST_INVALID");
     }
     const deadline = Date.parse(request.deadlineAt);
-    if (!Number.isFinite(deadline) || deadline <= Date.now()) {
-      throw new Error("SANDBOX_DEADLINE_INVALID");
+    if (!Number.isFinite(deadline)) throw new Error("SANDBOX_DEADLINE_INVALID");
+    if (deadline <= Date.now()) throw new Error("SANDBOX_DEADLINE_EXCEEDED");
+
+    const capabilities = await this.probe();
+    if (deadline <= Date.now()) throw new Error("SANDBOX_DEADLINE_EXCEEDED");
+    if (!capabilities.available) {
+      throw new Error(`SANDBOX_UNAVAILABLE: ${capabilities.reason ?? "no verified adapter"}`);
     }
     const existing = this.executions.get(request.attemptId);
     if (existing !== undefined) {
@@ -295,6 +298,7 @@ export class ExecutionSandboxAdapter {
       mkdir(request.tempDirectory, { recursive: true, mode: 0o700 })
     ]);
     const canonical = await canonicalizeRequest(request);
+    if (deadline <= Date.now()) throw new Error("SANDBOX_DEADLINE_EXCEEDED");
     const record: ExecutionRecord = {
       attemptId: request.attemptId,
       configHash: request.configHash,
@@ -342,15 +346,14 @@ export class ExecutionSandboxAdapter {
     await this.persistRegistry();
 
     let timeoutTermination: Promise<{ treeEmpty: boolean }> | undefined;
-    const timeout = setTimeout(() => {
+    const deadlineTimer = new RollingDeadlineTimer(deadline, () => {
       record.timedOut = true;
       timeoutTermination = this.terminate(request.attemptId);
-    }, Math.max(1, deadline - Date.now()));
-    timeout.unref();
+    });
 
     const wait = async (): Promise<SandboxExitResult> => {
       const exit = await exitPromise;
-      clearTimeout(timeout);
+      deadlineTimer.stop();
       await timeoutTermination;
       let treeEmpty = !processGroupExists(child.pid ?? -1);
       if (!treeEmpty) treeEmpty = (await this.terminate(request.attemptId)).treeEmpty;
@@ -369,8 +372,10 @@ export class ExecutionSandboxAdapter {
       stdout: child.stdout,
       stderr: child.stderr,
       wait,
+      renewDeadline: (deadlineAt: string): boolean => deadlineTimer.renew(deadlineAt),
       terminate: async (): Promise<{ treeEmpty: boolean }> => {
-        clearTimeout(timeout);
+        const timedOut = deadlineTimer.stop();
+        if (timedOut && timeoutTermination !== undefined) return timeoutTermination;
         return this.terminate(request.attemptId);
       }
     };

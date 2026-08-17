@@ -9,7 +9,6 @@ export default defineConfig({
   cwd: projectRoot,
   entry: {
     smartflow: "apps/cli/src/main.ts",
-    "host-skill": "packages/host-skill/src/index.ts",
     "worker-entry": "packages/provider-pi/src/worker-entry.ts",
     "mcp-model-extension": "packages/provider-pi/src/mcp-model-extension.ts"
   },

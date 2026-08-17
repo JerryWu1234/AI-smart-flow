@@ -14,7 +14,10 @@ import {
 } from "@smartflow/workspace";
 
 import { PiEventNormalizer, redactPiValue } from "./event-normalizer.js";
-import { createMcpModelRegistration } from "./mcp-model-extension.js";
+import {
+  createMcpModelRegistration,
+  PI_HEARTBEAT_STATUS_KEY
+} from "./mcp-model-extension.js";
 import { PiRpcClient } from "./rpc-client.js";
 import {
   PI_API_KEY_ENVIRONMENT_VARIABLE,
@@ -70,6 +73,12 @@ function responseData(response: unknown): Record<string, unknown> {
     throw new Error("PI_RPC_RESPONSE_INVALID");
   }
   return data as Record<string, unknown>;
+}
+
+function isHeartbeatEvent(event: Readonly<Record<string, unknown>>): boolean {
+  return event.type === "extension_ui_request" &&
+    event.method === "setStatus" &&
+    event.statusKey === PI_HEARTBEAT_STATUS_KEY;
 }
 
 export class PiProvider implements WorkerProvider {
@@ -185,6 +194,25 @@ export class PiProvider implements WorkerProvider {
     ];
     const normalizer = new PiEventNormalizer(input.attemptId, redactionRoots, [credential]);
     let active: ActiveAttempt | undefined;
+    let exitPromise: ReturnType<SandboxedProcessHandle["wait"]> | undefined;
+    const terminalFromExit = (
+      result: Awaited<ReturnType<SandboxedProcessHandle["wait"]>>
+    ): WorkerEvent => {
+      if (result.timedOut) {
+        return {
+          type: "TIMED_OUT",
+          attemptId: input.attemptId,
+          code: "ATTEMPT_DEADLINE_EXCEEDED"
+        };
+      }
+      if (active?.canceled === true) return { type: "CANCELED", attemptId: input.attemptId };
+      return {
+        type: "FAILED",
+        attemptId: input.attemptId,
+        code: "PI_PROCESS_EXITED",
+        message: `Pi process exited ${String(result.exitCode)}/${String(result.signal)}`
+      };
+    };
     try {
       const resources = createPiRuntimeResources(
         input,
@@ -199,8 +227,27 @@ export class PiProvider implements WorkerProvider {
       handle.stderr.resume();
       active = { handle, canceled: false };
       this.active.set(input.attemptId, active);
-      const client = new PiRpcClient(handle);
-      const state = responseData(await client.request({ type: "get_state" }));
+      const processExit = handle.wait();
+      exitPromise = processExit;
+      const client = new PiRpcClient(handle, (event) => {
+        if (!isHeartbeatEvent(event)) return false;
+        handle.renewDeadline(
+          new Date(Date.now() + this.configuration.attemptDeadlineMs).toISOString()
+        );
+        return true;
+      });
+      const stateObserved = await Promise.race([
+        client.request({ type: "get_state" }).then((response) => ({
+          kind: "response" as const,
+          response
+        })),
+        processExit.then((result) => ({ kind: "exit" as const, result }))
+      ]);
+      if (stateObserved.kind === "exit") {
+        yield terminalFromExit(stateObserved.result);
+        return;
+      }
+      const state = responseData(stateObserved.response);
       const piSessionId = state.sessionId;
       if (typeof piSessionId !== "string" || piSessionId.length === 0) {
         throw new Error("PI_SESSION_ID_MISSING");
@@ -214,45 +261,36 @@ export class PiProvider implements WorkerProvider {
         processStartToken: handle.processStartToken
       };
 
-      await client.request({
-        type: "prompt",
-        message: [
-          input.prompt,
-          "Work only inside the current workspace. Use the official Pi coding tools directly.",
-          "Do not ask the user. If work cannot continue, end with SMARTFLOW_BLOCKED: CODE: reason."
-        ].join("\n\n")
-      });
+      const promptObserved = await Promise.race([
+        client.request({
+          type: "prompt",
+          message: [
+            input.prompt,
+            "Work only inside the current workspace. Use the official Pi coding tools directly.",
+            "Do not ask the user. If work cannot continue, end with SMARTFLOW_BLOCKED: CODE: reason."
+          ].join("\n\n")
+        }).then(() => ({ kind: "response" as const })),
+        processExit.then((result) => ({ kind: "exit" as const, result }))
+      ]);
+      if (promptObserved.kind === "exit") {
+        yield terminalFromExit(promptObserved.result);
+        return;
+      }
 
       const iterator = client.events()[Symbol.asyncIterator]();
-      const exitPromise = handle.wait();
       let nextEvent = iterator.next();
       let terminal = false;
       while (!terminal) {
         const observed = await Promise.race([
           nextEvent.then((result) => ({ kind: "event" as const, result })),
-          exitPromise.then((result) => ({ kind: "exit" as const, result }))
+          processExit.then((result) => ({ kind: "exit" as const, result }))
         ]);
         if (observed.kind === "exit") {
-          if (active.canceled) {
-            yield { type: "CANCELED", attemptId: input.attemptId };
-          } else if (observed.result.timedOut) {
-            yield {
-              type: "TIMED_OUT",
-              attemptId: input.attemptId,
-              code: "ATTEMPT_DEADLINE_EXCEEDED"
-            };
-          } else {
-            yield {
-              type: "FAILED",
-              attemptId: input.attemptId,
-              code: "PI_PROCESS_EXITED",
-              message: `Pi process exited ${String(observed.result.exitCode)}/${String(observed.result.signal)}`
-            };
-          }
+          yield terminalFromExit(observed.result);
           break;
         }
         if (observed.result.done) {
-          const exit = await exitPromise;
+          const exit = await processExit;
           yield exit.timedOut
             ? { type: "TIMED_OUT", attemptId: input.attemptId, code: "ATTEMPT_DEADLINE_EXCEEDED" }
             : {
@@ -269,27 +307,53 @@ export class PiProvider implements WorkerProvider {
         if (event.type === "agent_end" && event.willRetry !== true) {
           const last = responseData(await client.request({ type: "get_last_assistant_text" })).text;
           const blocked = normalizer.blockedTerminal(typeof last === "string" ? last : "");
-          if (blocked !== undefined) yield blocked;
-          else yield { type: "COMPLETED", attemptId: input.attemptId, piSessionId };
           terminal = true;
           const stopped = await handle.terminate();
           if (!stopped.treeEmpty) throw new Error("PI_CONTAINMENT_RECONCILIATION_REQUIRED");
+          const exit = await processExit;
+          if (exit.timedOut) {
+            yield {
+              type: "TIMED_OUT",
+              attemptId: input.attemptId,
+              code: "ATTEMPT_DEADLINE_EXCEEDED"
+            };
+          } else if (active.canceled) {
+            yield { type: "CANCELED", attemptId: input.attemptId };
+          } else if (blocked !== undefined) yield blocked;
+          else yield { type: "COMPLETED", attemptId: input.attemptId, piSessionId };
         } else {
           nextEvent = iterator.next();
         }
       }
     } catch (error) {
-      if (active !== undefined) await active.handle.terminate().catch(() => ({ treeEmpty: false }));
-      yield {
-        type: "FAILED",
-        attemptId: input.attemptId,
-        code: "PI_PROVIDER_FAILED",
-        message: redactPiValue(
-          error instanceof Error ? error.message : String(error),
-          redactionRoots,
-          [credential]
-        ) as string
-      };
+      let exit: Awaited<ReturnType<SandboxedProcessHandle["wait"]>> | undefined;
+      if (active !== undefined) {
+        await active.handle.terminate().catch(() => ({ treeEmpty: false }));
+        exit = await exitPromise?.catch(() => undefined);
+      }
+      if (
+        (error instanceof Error && error.message === "SANDBOX_DEADLINE_EXCEEDED") ||
+        exit?.timedOut === true
+      ) {
+        yield {
+          type: "TIMED_OUT",
+          attemptId: input.attemptId,
+          code: "ATTEMPT_DEADLINE_EXCEEDED"
+        };
+      } else if (active?.canceled === true) {
+        yield { type: "CANCELED", attemptId: input.attemptId };
+      } else {
+        yield {
+          type: "FAILED",
+          attemptId: input.attemptId,
+          code: "PI_PROVIDER_FAILED",
+          message: redactPiValue(
+            error instanceof Error ? error.message : String(error),
+            redactionRoots,
+            [credential]
+          ) as string
+        };
+      }
     } finally {
       this.active.delete(input.attemptId);
     }

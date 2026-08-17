@@ -151,7 +151,7 @@ SMARTFLOW_PI_MODEL
 SMARTFLOW_PI_API_KEY
 ```
 
-`SMARTFLOW_PI_API` 只接受 `openai-completions`、`openai-responses`、`anthropic-messages` 和 `google-generative-ai`。可选字段 `SMARTFLOW_PI_CONTEXT_WINDOW`、`SMARTFLOW_PI_MAX_TOKENS`、`SMARTFLOW_PI_THINKING`、`SMARTFLOW_PI_ATTEMPT_DEADLINE_MS` 分别默认 `1000000`、`384000`、`high`、`1800000`。模型注册固定 `reasoning: true` 和 `input: ["text"]`；`SMARTFLOW_PI_THINKING=off` 可关闭当前 session 的推理。
+`SMARTFLOW_PI_API` 只接受 `openai-completions`、`openai-responses`、`anthropic-messages` 和 `google-generative-ai`。可选字段 `SMARTFLOW_PI_CONTEXT_WINDOW`、`SMARTFLOW_PI_MAX_TOKENS`、`SMARTFLOW_PI_THINKING`、`SMARTFLOW_PI_ATTEMPT_DEADLINE_MS` 分别默认 `1000000`、`384000`、`high`、`300000`。最后一项是由 Pi child 每 30 秒 heartbeat 续期的滚动窗口，不限制 Attempt 总时长，合法覆盖值不得低于 `60000`。模型注册固定 `reasoning: true` 和 `input: ["text"]`；`SMARTFLOW_PI_THINKING=off` 可关闭当前 session 的推理。
 
 Daemon 解析并冻结除 API Key 外的配置。Child 只收到最小环境和一个固定内部注册 ID（例如 `smartflow-mcp`）；该 ID 是 Pi Extension API 的实现细节，不是 SmartFlow Provider 字段，不进入 TaskManifest、Run state 或 MCP 配置。Extension 使用环境变量引用解析 API Key，在内存中注册一个模型，然后由官方 RPC 通过固定内部 ID 和冻结 model ID 选择该模型。
 
@@ -191,7 +191,7 @@ Pi ResourceLoader 必须以 isolated workspace 为项目 cwd，并把 user/globa
 
 ### Runtime configuration
 
-TaskManifest v3 只保存 `providerRuntimeConfigHash`，不保存 Provider 字段。哈希覆盖会改变 Agent 行为的稳定配置：API、Base URL、模型标识、context、max output、思考参数、Attempt 运行时限和资源加载选项；凭据本身不写入 Manifest、状态、session、Artifact 或日志。
+TaskManifest v3 只保存 `providerRuntimeConfigHash`，不保存 Provider 字段。哈希覆盖会改变 Agent 行为的稳定配置：API、Base URL、模型标识、context、max output、思考参数、Attempt heartbeat deadline 窗口和资源加载选项；凭据本身不写入 Manifest、状态、session、Artifact 或日志。
 
 Daemon 只向 child 传递运行所需最小环境：模型凭据、Run-local runtime 路径和基础进程环境。不得传递原始项目路径、SmartFlow Data Dir 根路径、其他 Run 路径或无关敏感环境变量。
 
@@ -209,6 +209,7 @@ interface SandboxedProcessHandle {
   stdout: ReadableStream;
   stderr: ReadableStream;
   wait(): Promise<SandboxedProcessExit>;
+  renewDeadline(deadlineAt: string): boolean;
   terminate(): Promise<void>;
 }
 
@@ -217,7 +218,7 @@ interface ExecutionSandboxAdapter {
 }
 ```
 
-实际 TypeScript 名称可在实现中调整，但必须保留四个契约：可双向流式通信、稳定 containment identity、终止完整进程树、等待并对账退出事实。
+实际 TypeScript 名称可在实现中调整，但必须保留五个契约：可双向流式通信、稳定 containment identity、由独立 child heartbeat 按冻结窗口续期 deadline（默认五分钟）、终止完整进程树、等待并对账退出事实。
 
 ### Filesystem policy
 
@@ -422,9 +423,11 @@ packages/
 
 apps/
 ├── daemon/                      # Pi composition, lifecycle, recovery/cancel
-├── mcp-server/                  # remove tool-decision surface
-├── host-skill/                  # remove Worker block/tool approval branch
+├── mcp-server/                  # six public MCP tools + native Host instructions
 └── cli/                         # Pi doctor/installed gate
+
+tests/
+└── helpers/host-workflow/       # repository-only Host simulation; never published
 ```
 
 同时更新 workspace manifests、root dependencies/scripts、package entry points 和安装产物，确保发布包不再包含 OpenCode binary/dependency、Broker 或 Claude placeholder。

@@ -56,13 +56,13 @@ const STAGE_LIST = [
     tone: "cyan",
     layout: { row: 1, column: 1 },
     actorIds: ["host", "mcp", "project"],
-    summary: "Host 稳定读取任务源并形成用户批准的内容哈希。",
-    plainLanguage: "先把用户真正同意的任务内容锁定。此时还没有 Run，内容漂移会直接拒绝而不是创建一半工作单。",
+    summary: "Host 批准任务源，并向 smartflow_execute 提供项目内路径和内容哈希。",
+    plainLanguage: "先把用户真正同意的任务内容锁定。此时还没有 Run；Daemon 会重新读取并校验哈希，内容漂移会直接拒绝而不是创建一半工作单。",
     before: { run: "不存在", taskBytes: "未授权", projectWrite: "LOCKED" },
     after: { run: "不存在", taskBytes: "approvedSourceHash 已绑定", projectWrite: "LOCKED" },
-    outputs: ["ApprovedTasksSnapshot", "approvedSourceHash"],
+    outputs: ["tasksPath", "approvedSourceHash"],
     sources: [
-      source("packages/host-skill/src/approval.ts", "readStableApprovedTasks"),
+      source("packages/protocol/src/schema/mcp-tools.ts", "executeInputSchema"),
       source("apps/daemon/src/approved-source.ts", "observeApprovedSource")
     ]
   }),
@@ -199,7 +199,7 @@ const STAGE_LIST = [
     after: { phase: "REVIEWING", reviewer: "bound reviewerSessionId", result: "every Task scored" },
     outputs: ["ReviewSubmission", "reviewerSessionId", "findings"],
     sources: [
-      source("packages/host-skill/src/reviewer.ts", "reviewer integration"),
+      source("apps/mcp-server/src/server.ts", "createSmartFlowMcpServer"),
       source("apps/daemon/src/review-coordinator.ts", "assertReviewerContext")
     ]
   }),

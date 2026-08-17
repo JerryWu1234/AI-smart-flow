@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
+  PI_MINIMUM_ATTEMPT_DEADLINE_MS,
   PI_MODEL_APIS,
   parsePiRuntimeConfiguration,
   type PiRuntimeConfiguration,
@@ -113,8 +114,13 @@ export function resolveWorkerLaunchConfiguration(
   const attemptDeadlineMs = optionalPositiveInteger(
     environment,
     "SMARTFLOW_PI_ATTEMPT_DEADLINE_MS",
-    1_800_000
+    300_000
   );
+  if (attemptDeadlineMs < PI_MINIMUM_ATTEMPT_DEADLINE_MS) {
+    throw new Error(
+      `WORKER_CONFIGURATION_INVALID: SMARTFLOW_PI_ATTEMPT_DEADLINE_MS must be at least ${String(PI_MINIMUM_ATTEMPT_DEADLINE_MS)}`
+    );
+  }
   const credential = required(environment, "SMARTFLOW_PI_API_KEY");
   const runtimeConfig = parsePiRuntimeConfiguration({
     api,

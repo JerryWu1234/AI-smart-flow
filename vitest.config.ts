@@ -10,10 +10,6 @@ export default defineConfig({
         replacement: resolve(import.meta.dirname, "apps/daemon/src/index.ts")
       },
       {
-        find: "@smartflow/host-skill",
-        replacement: resolve(import.meta.dirname, "packages/host-skill/src/index.ts")
-      },
-      {
         find: "@smartflow/mcp-server",
         replacement: resolve(import.meta.dirname, "apps/mcp-server/src/index.ts")
       },

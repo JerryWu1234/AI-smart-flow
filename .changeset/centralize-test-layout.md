@@ -1,5 +1,5 @@
 ---
-"@smartflow/cli": patch
+"@smartflow/cli": major
 ---
 
-Move the production Host Skill source into `packages/host-skill` and centralize repository unit tests and test fixtures under `tests/` while preserving the public `./host-skill` package export.
+Remove the public `./host-skill` package export and its bundled artifact. Host applications now drive the six public MCP tools directly; repository-only Host workflow simulation remains under `tests/helpers/host-workflow`.

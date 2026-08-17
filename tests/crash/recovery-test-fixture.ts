@@ -165,10 +165,6 @@ export async function createLifecycleStore(
     evidenceArtifactHash,
     candidateHash
   };
-  const capabilityRef = await store.writeArtifact(
-    "runs/job-1/revision-1/git/capability.json",
-    Buffer.from(JSON.stringify({ status: "READY", repositoryId: baseline.repositoryId }), "utf8")
-  );
   const baselineRef = await store.writeArtifact(
     "runs/job-1/revision-1/snapshots/baseline.json",
     Buffer.from(JSON.stringify(baseline), "utf8")
@@ -308,7 +304,6 @@ export async function createLifecycleStore(
       ? {
           baseline: baselineRef,
           gitWorkspace: {
-            capability: capabilityRef,
             repositoryId: baseline.repositoryId,
             inclusionPolicyHash: baseline.includedPathPolicyHash,
             objectDirectory,

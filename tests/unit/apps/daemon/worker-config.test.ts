@@ -70,7 +70,7 @@ describe("Pi Worker launch configuration", () => {
         contextWindow: 1_000_000,
         maxTokens: 384_000,
         thinkingLevel: "high",
-        attemptDeadlineMs: 1_800_000
+        attemptDeadlineMs: 300_000
       });
     }
   });
@@ -82,6 +82,10 @@ describe("Pi Worker launch configuration", () => {
       ...environment,
       SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "0"
     })).toThrow(/SMARTFLOW_PI_ATTEMPT_DEADLINE_MS/u);
+    expect(() => resolveWorkerLaunchConfiguration(["mcp"], {
+      ...environment,
+      SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "59999"
+    })).toThrow(/must be at least 60000/u);
     expect(() => resolveWorkerLaunchConfiguration(["mcp"], {
       ...environment,
       SMARTFLOW_PI_MAX_TOKENS: "200001"

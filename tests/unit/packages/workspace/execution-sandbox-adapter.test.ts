@@ -3,13 +3,15 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ExecutionSandboxAdapter } from "../../../../packages/workspace/src/execution-sandbox-adapter.js";
+import { RollingDeadlineTimer } from "../../../../packages/workspace/src/rolling-deadline-timer.js";
 
 const roots: string[] = [];
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -35,6 +37,47 @@ async function fixture(): Promise<{
     protectedPath
   };
 }
+
+describe("RollingDeadlineTimer", () => {
+  it("renews beyond the initial deadline and rejects renewal after expiry starts", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-17T00:00:00.000Z"));
+    const onDeadline = vi.fn();
+    const deadline = new RollingDeadlineTimer(Date.now() + 100, onDeadline);
+
+    vi.advanceTimersByTime(75);
+    expect(deadline.renew(new Date(Date.now() + 100).toISOString())).toBe(true);
+    vi.advanceTimersByTime(25);
+    expect(onDeadline).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(75);
+
+    expect(onDeadline).toHaveBeenCalledTimes(1);
+    expect(deadline.renew(new Date(Date.now() + 100).toISOString())).toBe(false);
+  });
+
+  it("expires synchronously when renewal observes startup deadline elapsed", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-17T00:00:00.000Z"));
+    const onDeadline = vi.fn();
+    const deadline = new RollingDeadlineTimer(Date.now() - 1, onDeadline);
+
+    expect(deadline.renew(new Date(Date.now() + 100).toISOString())).toBe(false);
+    expect(onDeadline).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1);
+    expect(onDeadline).toHaveBeenCalledTimes(1);
+  });
+
+  it("cannot revive a deadline reached before its queued callback runs", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-17T00:00:00.000Z"));
+    const onDeadline = vi.fn();
+    const deadline = new RollingDeadlineTimer(Date.now() + 100, onDeadline);
+    vi.setSystemTime(new Date(Date.now() + 100));
+
+    expect(deadline.renew(new Date(Date.now() + 100).toISOString())).toBe(false);
+    expect(onDeadline).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("ExecutionSandboxAdapter Pi process containment", () => {
   it("streams stdin/stdout JSONL and keeps stable containment identity", async () => {
@@ -91,7 +134,7 @@ describe("ExecutionSandboxAdapter Pi process containment", () => {
     await expect(handle.terminate()).resolves.toEqual({ treeEmpty: true });
   });
 
-  it("terminates the full process tree at the frozen deadline", async () => {
+  it("terminates the full process tree when the rolling deadline expires", async () => {
     const { adapter, workspace, runtime, protectedPath } = await fixture();
     if (!(await adapter.probe()).available) return;
     const script = "require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)']);setInterval(()=>{},1000)";
@@ -107,8 +150,11 @@ describe("ExecutionSandboxAdapter Pi process containment", () => {
       deniedReadPaths: [protectedPath],
       environment: {},
       networkAccess: "ALLOW",
-      deadlineAt: new Date(Date.now() + 150).toISOString()
+      deadlineAt: new Date(Date.now() + 350).toISOString()
     });
+    expect(handle.renewDeadline(new Date(Date.now() + 700).toISOString())).toBe(true);
+    await new Promise<void>((settle) => setTimeout(settle, 400));
+    expect(adapter.query("attempt-timeout")).toBe("RUNNING");
     await expect(handle.wait()).resolves.toMatchObject({ timedOut: true, treeEmpty: true });
     expect(adapter.query("attempt-timeout")).toBe("EXITED");
   });

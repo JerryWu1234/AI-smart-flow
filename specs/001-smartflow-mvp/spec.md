@@ -59,7 +59,7 @@ Current decision details are normative in [adr-daemon-owned-review-turn.md](adr-
 3. **Given** Run 已启动，**When** 源任务文件发生变化，**Then** 当前 Revision 继续使用启动时冻结的内容。
 4. **Given** Pi runtime 配置缺失或哈希漂移，**When** Worker 准备启动或恢复，**Then** Run 明确暂停或失败，不选择其他 Worker、API 或模型。
 5. **Given** MCP server 提供一个合法 API、Base URL、模型和 API Key，**When** Daemon 冻结 Worker 配置，**Then** 当前 Revision 只绑定该模型及其非敏感运行参数，凭据明文不进入 Manifest、状态或日志。
-6. **Given** MCP 配置未提供上下文、最大输出、思考级别或 Attempt deadline，**When** 配置被解析，**Then** 分别使用 `1000000`、`384000`、`high` 和 `1800000ms`。
+6. **Given** MCP 配置未提供上下文、最大输出、思考级别或 Attempt deadline，**When** 配置被解析，**Then** 分别使用 `1000000`、`384000`、`high` 和滚动窗口 `300000ms`。
 7. **Given** 旧 OpenCode/间接凭据字段或 unsupported API 值，**When** MCP server 启动，**Then** 配置被明确拒绝，且不会读取旧字段或回退到其他配置来源。
 
 ---
@@ -139,7 +139,7 @@ Pi Worker 完成后生成不可变 Candidate。Host 通过 `smartflow_review_tur
 3. **Given** Daemon 自动批准同范围 repair，或 Host/用户批准同一 Task 的补充 Revision，**When** Worker 启动，**Then** 从上一 Result Snapshot 创建新的 Pi session。
 4. **Given** 用户提出独立新功能，**When** Host/Leader 分类请求，**Then** 创建新的 Task/Run/Pi session，不复用旧 Run。
 5. **Given** 用户取消 Run，**When** Daemon 执行取消，**Then** Pi Worker 及全部子进程被终止，状态和 lease 完成对账。
-6. **Given** Pi Attempt 超过冻结的运行时限，**When** deadline 到达，**Then** Daemon 终止完整进程树，将 Attempt 持久化为 `TIMED_OUT`，并把 Run 置为可由 Leader 重试、创建新 Revision 或取消的 `PAUSED`；停止事实不可证明时保持恢复阻塞。
+6. **Given** Pi Attempt 连续一个冻结窗口（默认五分钟）没有独立 runtime 心跳，**When** 滚动 deadline 到达，**Then** Daemon 终止完整进程树，将 Attempt 持久化为 `TIMED_OUT`，并把 Run 置为可由 Leader 重试、创建新 Revision 或取消的 `PAUSED`；正常心跳持续续期且不限制 Attempt 总时长，停止事实不可证明时保持恢复阻塞。
 
 ## Review and Repair Rules
 
@@ -238,13 +238,13 @@ Host 保留两类非机械责任：执行 `CREATE | RESUME` Reviewer，并在 `U
 - **FR-033**：Git capability probe MUST NOT 检测或阻断 Git LFS、`.gitattributes` 或自定义 `clean`、`smudge`、`process` filter；workspace 内容 MUST 按普通文件流程读写。
 - **FR-034**：终态对账后 MUST 清理临时 workspace、Pi runtime/session 临时内容、index 和 object store，同时保留 Task/Snapshot/Candidate/Review/automatic-decision 的可验证 Artifact references、PublishAttempt/PublishResult、必要的 precheck/recovery facts 与审计记录。
 - **FR-035**：运行中的 workspace、SmartFlow 状态和 Pi session 真实绝对路径 MUST NOT 通过 MCP、API、UI 或日志暴露；对外只允许逻辑 ID、项目相对路径与受控 Artifact 引用。例外仅限 owning Host：`REVIEW_REQUIRED` 可披露 Reviewer worktree，发布相关 `USER_INPUT_REQUIRED` 可披露同一已审核 Candidate worktree；二者都不得披露原项目、StateStore 或其他 Run 路径。Finalize 后的 Artifact 仍不得泄露内部绝对路径。
-- **FR-036**：每个 Pi Attempt MUST 使用 MCP server 环境配置中冻结的运行时限；超时 MUST 终止 Pi 及全部子进程、持久化 `TIMED_OUT` 并进入可恢复 `PAUSED`，且在进程停止得到证明前不得生成 Candidate 或启动替代 Attempt。
+- **FR-036**：每个 Pi Attempt MUST 使用 MCP server 环境配置中冻结的滚动 deadline（默认五分钟）；Pi child MUST 每 30 秒发送独立 runtime 心跳，每次心跳 MUST 按该冻结窗口续期且不得写入 ProjectState。连续一个完整窗口无心跳 MUST 终止 Pi 及全部子进程、持久化 `TIMED_OUT` 并进入可恢复 `PAUSED`，且在进程停止得到证明前不得生成 Candidate 或启动替代 Attempt。
 
 #### MCP Pi model configuration
 
 - **FR-037**：每个 MCP server 实例 MUST 只绑定一个 Pi 模型；必填环境字段 MUST 是 `SMARTFLOW_PI_API`、`SMARTFLOW_PI_BASE_URL`、`SMARTFLOW_PI_MODEL` 和 `SMARTFLOW_PI_API_KEY`。
 - **FR-038**：`SMARTFLOW_PI_API` MUST 只接受 `openai-completions`、`openai-responses`、`anthropic-messages` 或 `google-generative-ai`；供应商只要遵循所选标准协议即可使用，不得把 Worker Provider 与 API 协议混为同一配置字段。
-- **FR-039**：`SMARTFLOW_PI_CONTEXT_WINDOW`、`SMARTFLOW_PI_MAX_TOKENS`、`SMARTFLOW_PI_THINKING` 和 `SMARTFLOW_PI_ATTEMPT_DEADLINE_MS` MUST 可选，并分别默认 `1000000`、`384000`、`high` 和 `1800000ms`；`maxTokens` 不得大于 `contextWindow`。
+- **FR-039**：`SMARTFLOW_PI_CONTEXT_WINDOW`、`SMARTFLOW_PI_MAX_TOKENS`、`SMARTFLOW_PI_THINKING` 和 `SMARTFLOW_PI_ATTEMPT_DEADLINE_MS` MUST 可选，并分别默认 `1000000`、`384000`、`high` 和 `300000ms`；最后一项表示每次 heartbeat 续期的滚动窗口而非 Attempt 总时长，且 MUST 至少为 `60000ms`；`maxTokens` 不得大于 `contextWindow`。
 - **FR-040**：SmartFlow MUST 将已校验的 MCP 配置直接传入 isolated Pi 子进程，并通过 Pi 官方运行时扩展接口在内存中注册该模型；MUST NOT 生成、读取或要求用户提供 `models.json`，也不得读取宿主用户级 Pi 模型配置。
 - **FR-041**：API Key MUST 只存在于 MCP/Daemon/Pi 子进程内存和子进程环境中，不得进入 argv、runtime config hash、Manifest、Run 状态、session、Artifact、日志或错误文本；Daemon MAY 仅以不可逆摘要检测凭据轮换。
 
@@ -267,7 +267,7 @@ Host 保留两类非机械责任：执行 `CREATE | RESUME` Reviewer，并在 `U
 |---|---|---|
 | TaskSourceArtifact | 启动时冻结的任务文件内容 | canonical task path + source Hash |
 | TaskManifest | 当前任务与 Pi 运行配置快照 | Run + Revision + task/config Hash |
-| PiRuntimeConfiguration | MCP server 冻结的单模型非敏感运行参数 | API + Base URL + model + context/output/thinking/deadline |
+| PiRuntimeConfiguration | MCP server 冻结的单模型非敏感运行参数 | API + Base URL + model + context/output/thinking/rolling deadline |
 | RunBaselineSnapshot | Run 启动时不变的项目快照 | Project + Tree/Artifact Hash |
 | RevisionSnapshot | 某轮输入或结果的不可变 Tree | Run + Revision + Tree/Artifact Hash |
 | PiWorkerAttempt | 一次 Sandbox 内 Pi 执行 | Revision + attempt + Pi session + containment |
@@ -298,7 +298,7 @@ Host 保留两类非机械责任：执行 `CREATE | RESUME` Reviewer，并在 `U
 - Pi Shell 运行项目 test、lint、build：允许；结果可供 Pi 使用，但 SmartFlow 不新增独立 verify/gate 阶段。
 - Pi、SDK error、stack trace 或 Shell 输出包含 workspace/runtime 绝对路径：对外返回和持久化日志必须替换为逻辑 ID 或项目相对路径。
 - Pi session 无法恢复：废弃旧 attempt；同一 Revision 和 workspace 创建新 attempt/session，不切换 Worker、API 或模型。
-- Pi 或其子进程超过 Attempt deadline：终止整个 containment，持久化 `TIMED_OUT`；无法证明进程已停止时不得重试。
+- Pi runtime 连续一个冻结窗口（默认五分钟）没有 heartbeat：终止整个 containment，持久化 `TIMED_OUT`；正常 heartbeat 续期不限制 Attempt 总时长，无法证明进程已停止时不得重试。
 - MCP 配置选择的 API 与 endpoint 实际协议不一致：Pi 启动或首个请求明确失败，不尝试其他协议。
 - MCP 未覆盖模型能力参数：按 1M context、384K max output、推理 `high` 注册；目标模型限制更低时，用户必须在同一 MCP 配置中显式覆盖。
 - MCP 配置仍包含 `SMARTFLOW_WORKER`、`SMARTFLOW_MODEL_*`、`SMARTFLOW_PI_PROVIDER` 或 `SMARTFLOW_PI_CREDENTIAL_ENV`：不得作为有效配置读取。
@@ -336,7 +336,7 @@ Host 保留两类非机械责任：执行 `CREATE | RESUME` Reviewer，并在 `U
 - **SC-011**：使用已知绝对路径 canary 扫描 MCP、API、UI payload、日志和 Finalize Artifact，内部 workspace、状态目录和 session 绝对路径泄露数为 0。
 - **SC-012**：Pi Attempt 超时后存活的 containment 进程数为 0、持久化的 `TIMED_OUT` Attempt 数为 1，且在 Leader 明确恢复前新 Candidate 和替代 Attempt 数均为 0。
 - **SC-013**：四个受支持 API 值分别可将一个 MCP 配置模型注册到 Pi；每个 MCP server 实例可用模型数恰好为 1，Provider/模型 fallback 次数为 0。
-- **SC-014**：未提供可选模型参数时，冻结配置中的 context、max output、thinking 和 deadline 分别为 `1000000`、`384000`、`high`、`1800000ms`；合法覆盖值在同一 Revision 内保持不变。
+- **SC-014**：未提供可选模型参数时，冻结配置中的 context、max output、thinking 和 rolling deadline 分别为 `1000000`、`384000`、`high`、`300000ms`；合法覆盖值在同一 Revision 内保持不变。
 - **SC-015**：运行、恢复、取消和 Finalize 后扫描 workspace、Data Dir、argv、状态、session、Artifact 与日志，`models.json` 生成/读取次数为 0，API Key 明文泄露数为 0。
 - **SC-016**：对所有 composite turn 测试，输出种类只属于四态之一；`NOT_READY`、stale continuation、非发布 `USER_INPUT_REQUIRED` 和 `DONE` 的 `worktreePath` 出现次数为 0。已原子提交 `REVIEWING + AWAITING_REVIEW` 的 `REVIEW_REQUIRED` 恰好提供当前 Reviewer path；`PUBLISH_ADAPTER_UNAVAILABLE`、`PUBLISH_PRECHECK_CONFLICT` 与 `MANUAL_PUBLISH_TARGET_MISMATCH` 的 owning Host `USER_INPUT_REQUIRED` 恰好提供已审核 Candidate worktree，且原项目/StateStore path 泄露数为 0。
 - **SC-017**：在 atomic Review begin、`AWAITING_REVIEW`、atomic finalize、direct repair decision 与等待用户输入各边界注入 restart/CAS mismatch/重复请求后，重复 Review、repair 和 Publish 次数均为 0；有效单 deadline 恢复率为 100%。

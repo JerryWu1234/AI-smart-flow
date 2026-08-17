@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   validateHostReviewOutput,
   type HostReviewContext
-} from "../../../../packages/host-skill/src/reviewer.js";
+} from "../../../helpers/host-workflow/reviewer.js";
 
 const digest = "a".repeat(64);
 

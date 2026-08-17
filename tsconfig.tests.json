@@ -6,7 +6,6 @@
     "declarationMap": false,
     "paths": {
       "@smartflow/daemon": ["./apps/daemon/src/index.ts"],
-      "@smartflow/host-skill": ["./packages/host-skill/src/index.ts"],
       "@smartflow/mcp-server": ["./apps/mcp-server/src/index.ts"],
       "@smartflow/*": ["./packages/*/src/index.ts"]
     }

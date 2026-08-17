@@ -5,7 +5,7 @@ This walkthrough validates the Pi migration, removal of Broker/OpenCode, daemon-
 ## 1. Freeze task and Pi configuration
 
 1. Start the MCP server with exactly one configured model: `SMARTFLOW_PI_API`, `SMARTFLOW_PI_BASE_URL`, `SMARTFLOW_PI_MODEL`, and `SMARTFLOW_PI_API_KEY`.
-2. Omit optional values and confirm context `1000000`, max output `384000`, thinking `high`, and Attempt deadline `1800000ms`; repeat with legal overrides.
+2. Omit optional values and confirm context `1000000`, max output `384000`, thinking `high`, and rolling Attempt deadline `300000ms`; confirm deadline overrides below `60000ms` are rejected and repeat with legal overrides.
 3. Start a Run from `tasks-a.md`; record canonical path, Task Artifact, `tasksSha256`, and `providerRuntimeConfigHash` while confirming the API Key is absent.
 4. Confirm the canonical task file is mirrored to the Run workspace before Worker execution and the Reviewer reads that copy.
 5. Change effective Pi runtime config; confirm the active Revision pauses/fails instead of changing model/API.
@@ -16,7 +16,7 @@ This walkthrough validates the Pi migration, removal of Broker/OpenCode, daemon-
 
 1. Confirm `ExecutionSandboxAdapter` launches the Pi SDK child and records Attempt, Pi session, and containment identity.
 2. Confirm the child loads only the bundled SmartFlow model Extension and registers one MCP-configured model through Pi's official runtime API.
-3. Confirm JSONL RPC ready/prompt/events/terminal flow over stdin/stdout.
+3. Confirm JSONL RPC ready/prompt/events/terminal flow plus the independent 30-second heartbeat that renews the configured deadline (five minutes by default).
 4. Confirm the child uses the frozen Task, receives no SmartFlow MCP/Host-global Skill, and never asks the user directly.
 5. Place `models.json` canaries in the host Pi directory and workspace; confirm neither is read and none is created.
 
@@ -44,7 +44,7 @@ This walkthrough validates the Pi migration, removal of Broker/OpenCode, daemon-
 4. Complete a repair Revision; confirm a new Pi session starts from previous Result Tree.
 5. Submit an independent feature; confirm Host classifies it as a new Task/Run/session.
 6. Cancel a Run; confirm the full Pi process tree exits before CANCELED is durable.
-7. Force Attempt deadline; confirm zero surviving processes, exactly one `TIMED_OUT`, Run `PAUSED`, and no replacement before allowed recovery.
+7. Suppress Pi heartbeats for one configured window (five minutes by default); confirm zero surviving processes, exactly one `TIMED_OUT`, Run `PAUSED`, and no replacement before allowed recovery.
 
 ## 6. Validate the sole public Review workflow
 
@@ -56,7 +56,7 @@ This walkthrough validates the Pi migration, removal of Broker/OpenCode, daemon-
 6. Inspect state writes to prove the Daemon used one atomic Review-begin mutation and one Review-plus-decision finalization; no claim/renew or independent Leader-decision bridge exists.
 7. Confirm the registered public MCP surface is exactly `smartflow_execute`, `smartflow_review_turn`, `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`.
 8. Confirm the old `smartflow_wait`, claim/renew, submit-review, and submit-leader symbols, schemas, handlers, registrations, and aliases do not exist.
-9. Confirm `HostActionLoop` and `packages/host-skill/src/action-loop.ts` are absent; the Host workflow has no alternate Review orchestration branch.
+9. Confirm no production Host SDK, workspace package, subpath export, bundled artifact, or `HostActionLoop` remains; native Hosts drive the MCP tools directly, while repository-only simulation lives under `tests/helpers/host-workflow`.
 
 ## 7. Validate independent Run management APIs
 

@@ -117,12 +117,6 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
 
-  packages/host-skill:
-    dependencies:
-      '@smartflow/protocol':
-        specifier: workspace:*
-        version: link:../protocol
-
   packages/observability: {}
 
   packages/protocol:

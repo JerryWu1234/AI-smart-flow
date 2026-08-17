@@ -15,21 +15,20 @@ const detail = (id, definition) => Object.freeze({
 
 export const DATA_DETAILS = Object.freeze({
   "data.approval.snapshot": detail("data.approval.snapshot", {
-    objectName: "ApprovedTasksSnapshot",
-    category: "derived",
+    objectName: "Approved task source",
+    category: "message-input",
     producer: "Host",
     consumer: "smartflow_execute / ProjectRuntime",
-    summary: "用户明确批准的任务原始字节及其 SHA-256 绑定。",
+    summary: "用户明确批准的任务路径及其 SHA-256 内容绑定。",
     purpose: "把授权固定到内容而不是文件名，防止批准后任务被替换。",
-    transformation: "稳定读取的任务字节 → SHA-256 → approvedSourceHash",
-    lifecycle: "execute 前存在于 Host；Run 创建后保存为 TaskSource Artifact。",
+    transformation: "Host 批准的任务字节 → SHA-256 → approvedSourceHash；Daemon 重新读取并比较",
+    lifecycle: "Host 在 execute 前提供这两个输入；Run 创建后任务源保存为 TaskSource Artifact。",
     fields: [
       field("tasksPath", "string", true, "specs/001-smartflow-mvp/tasks.md", "被批准任务源的项目内路径。"),
-      field("sourceHash", "sha256", true, "sha256:9c72…e41b", "只授权与该摘要完全相同的字节。"),
-      field("approvedAt", "ISO datetime", true, "2026-08-12T09:42:00Z", "记录用户批准发生的审计时间。")
+      field("approvedSourceHash", "sha256", true, "sha256:9c72…e41b", "只授权与该摘要完全相同的字节。")
     ],
     sources: [
-      "packages/host-skill/src/approval.ts#readStableApprovedTasks",
+      "packages/protocol/src/schema/mcp-tools.ts#executeInputSchema",
       "apps/daemon/src/approved-source.ts#observeApprovedSource"
     ]
   }),

@@ -29,6 +29,36 @@ describe("Pi JSONL RPC client", () => {
     await expect(events.next()).resolves.toEqual({ done: false, value: { type: "agent_start" } });
   });
 
+  it("intercepts control events at receipt before queued events are consumed", async () => {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    let heartbeatCount = 0;
+    const client = new PiRpcClient(
+      { stdin, stdout, stderr: new PassThrough() },
+      (event) => {
+        if (event.type !== "extension_ui_request" || event.statusKey !== "smartflow-heartbeat") {
+          return false;
+        }
+        heartbeatCount += 1;
+        return true;
+      }
+    );
+
+    stdout.write(`${JSON.stringify({ type: "agent_start" })}\n`);
+    stdout.write(`${JSON.stringify({
+      type: "extension_ui_request",
+      method: "setStatus",
+      statusKey: "smartflow-heartbeat"
+    })}\n`);
+    stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(heartbeatCount).toBe(1);
+    const events = client.events()[Symbol.asyncIterator]();
+    await expect(events.next()).resolves.toEqual({ done: false, value: { type: "agent_start" } });
+    await expect(events.next()).resolves.toEqual({ done: false, value: { type: "agent_end" } });
+  });
+
   it("fails closed on malformed JSONL", async () => {
     const stdin = new PassThrough();
     const stdout = new PassThrough();
