@@ -18,7 +18,7 @@
 | 工具 | Pi 官方 read/bash/edit/write/grep/find/ls；无 SmartFlow Broker |
 | 安全边界 | Pi 进程树只能访问当前 isolated workspace 的项目数据；Shell/网络允许 |
 | Review | Host 首轮 CREATE、后续 RESUME 同一 Reviewer；原子持久化 `AWAITING_REVIEW` 后才暴露 worktree |
-| 状态恢复 | schema-v5 durable Host turn + v4 migration + Project-wide CAS |
+| 状态恢复 | schema-v6 durable Host turn + legacy migration + Project-wide CAS |
 | 自动修复 | 每组最多 15 轮；用户通过 `smartflow_review_turn` 的结构化 answer 授予下一组 |
 | 自动写回 | 仅 100% 有效 Review 后；项目级串行 + conflict-checked batch adapter |
 | 运行时 Spec Kit 依赖 | 无 |
@@ -75,7 +75,7 @@ Host freezes tasks.md
 
 Bounded poll、原子 Review begin/finalize、自动 decision 以及 repair/publish progression 由 Daemon 负责。旧 wait/claim/renew/submission/Leader primitive bridge 已删除；对应公开 symbols、schemas、handlers、registrations、aliases 均不存在。
 
-`NOT_READY`、stale continuation、用户暂停和终态不暴露 worktree path；只有 durable `AWAITING_REVIEW` 的 `REVIEW_REQUIRED` 可以向 owning Host 暴露。
+`NOT_READY`、stale continuation 和终态不暴露 worktree path。Durable `AWAITING_REVIEW` 的 `REVIEW_REQUIRED` 向 owning Host 暴露 Reviewer worktree；当 `PUBLISH_ADAPTER_UNAVAILABLE`、`PUBLISH_PRECHECK_CONFLICT` 或后续人工确认不匹配需要用户处理时，owning Host 的 `USER_INPUT_REQUIRED` 也会提供同一已审核 Candidate 的 `worktreePath`，但不会披露原项目或 StateStore 路径。
 
 ## Host, Daemon, Reviewer, and Worker Boundary
 
@@ -88,7 +88,7 @@ Host-only interaction 与 Daemon-owned mechanics 不矛盾：机械策略已由�
 
 ## Composite Review Turn and Durable State
 
-公开输出恰好四态；内部 schema-v5 checkpoint 恰好两阶段：
+公开输出恰好四态；内部 schema-v6 checkpoint 恰好两阶段：
 
 ```text
 AWAITING_REVIEW
@@ -125,7 +125,7 @@ Pi child 加载静态 Extension，通过官方 `pi.registerProvider()` 在内存
 - Parent/child 使用 SDK JSONL RPC；Daemon 只归一化事件和管理生命周期。
 - Pi 直接使用官方 coding tools，可在当前 workspace 修改项目文件、执行 Shell/子进程并访问网络。
 - 原始项目、SmartFlow 状态、其他 Run workspace 和宿主用户数据不可访问；必要 bootstrap 只读。
-- `.smartflow-runtime/` 在 Candidate 前清理/排除；Publish 是唯一原项目写入路径。
+- `.smartflow-runtime/` 在 Candidate 前清理/排除；Publish Adapter 是唯一 SmartFlow-managed 原项目写入路径。发布暂停后用户可从已审核 worktree 人工合并，Daemon 的确认步骤只观察目标状态。
 - ToolExecutionBroker、effects、Worker 工具审批和 `smartflow_submit_tool_decision` 已移除。
 
 ## Session and Recovery
@@ -142,7 +142,13 @@ Pi child 加载静态 Extension，通过官方 `pi.registerProvider()` 在内存
 
 ## Publish and Evidence Boundary
 
-只有 100% 有效 Review 才能自动 accept/Publish。Publish 使用项目级串行、expected-old-hash、稳定 operationId 和支持的 batch mode；冲突全路径零写入并返回 `0/N` 与 DeliveryBundle；PARTIAL/UNKNOWN durable block。
+只有 100% 有效 Review 才能自动 accept/Publish。`PublishCoordinator` 重新验证 Manifest、Candidate、Review、accept decision 与批准源绑定，并从当前 Candidate、同 Revision 的 immutable `REVISION_RESULT` snapshot 以及 Run Git object store 确定性派生 `ApplyOperation[]` 和经 path/hash/size 校验的 blob references；当前流程不另造交付 Artifact。
+
+`PublishService` 以 `projectId + jobId + revision + candidateHash + reviewHash + operationsHash` 派生稳定 `operationId`，在项目级 lease 下执行 adapter capability probe 和全路径 expected-old kind/hash/mode preflight。只有预检全部通过才持久化 `PREPARED`、进入 `PUBLISHING`、提交 adapter apply，并把 `SUBMITTED`、逐路径 `PublishResult` 与最终状态写入 result journal。响应丢失或 Daemon 重启时，以相同 operation identity 重建操作并查询 adapter 结果；不会盲目重放。
+
+`PRECHECK_CONFLICT` 保证 `publishedCount=0`、`activeWorkspaceChanged=false` 并持久化 `publishPrecheck`；adapter 缺失或原子 CAS/batch/query 能力不足则暂停为 `PUBLISH_ADAPTER_UNAVAILABLE`。这两类 owning Host 的 `USER_INPUT_REQUIRED` 提供已审核 Candidate 的 `worktreePath` 和 `retry_publish | confirm_manual_publish | cancel`。用户可把已审核结果人工合并到原项目，再提交 `confirm_manual_publish`；Daemon 只读观察所有 Candidate target operations。只有每条目标路径的 kind、hash 与 mode 精确匹配才合成 `manual-confirmation-v1` 的 `COMMITTED` attempt/result 并进入 `COMPLETED`；不匹配继续 `PAUSED/MANUAL_PUBLISH_TARGET_MISMATCH`。
+
+任何 PARTIAL、UNKNOWN、不可查询结果或 identity 不一致都保持 `PUBLISH_RECOVERY_BLOCKED`，保留 operation/result evidence，并且不能通过人工确认、重试声明或其他恢复动作绕过。
 
 Production-composition 的复合编排覆盖已完成。T204 覆盖 paused Host ownership、原子 begin/finalize、lost-response durable replay 与单 deadline restart；T205 覆盖 Reviewer callback 的 `changedPaths` 与 self-contained pause/no primitive result fallback。
 

@@ -152,7 +152,7 @@ export const resumeActionSchema = z.enum([
   "inspect_conflict",
   "inspect_repair_diff",
   "inspect_no_progress",
-  "export_bundle"
+  "confirm_manual_publish"
 ]);
 
 const reviewTurnInspectionActionSchema = z.enum([
@@ -161,8 +161,7 @@ const reviewTurnInspectionActionSchema = z.enum([
   "inspect_recovery",
   "inspect_conflict",
   "inspect_repair_diff",
-  "inspect_no_progress",
-  "export_bundle"
+  "inspect_no_progress"
 ]);
 
 const reviewTurnMutableActionSchema = resumeActionSchema.exclude([
@@ -171,8 +170,7 @@ const reviewTurnMutableActionSchema = resumeActionSchema.exclude([
   "inspect_recovery",
   "inspect_conflict",
   "inspect_repair_diff",
-  "inspect_no_progress",
-  "export_bundle"
+  "inspect_no_progress"
 ]);
 
 export const revisionApprovalSchema = z
@@ -260,7 +258,7 @@ export const resultOutputSchema = z
       "RUNNING",
       "PAUSED",
       "COMMITTED",
-      "BUNDLE_READY",
+      "MANUAL_PUBLISH_REQUIRED",
       "PRECHECK_CONFLICT",
       "PUBLISH_RECOVERY_BLOCKED",
       "FAILED",
@@ -401,6 +399,7 @@ const reviewTurnUserInputRequiredSchema = reviewTurnIdentitySchema.extend({
     })
     .strict(),
   result: resultOutputSchema,
+  worktreePath: z.string().min(1).optional(),
   review: reviewSubmissionSchema.optional(),
   repairDraft: repairDraftSchema.optional(),
   requiredInput: reviewTurnRevisionApprovalRequiredInputSchema.optional(),
@@ -426,7 +425,19 @@ export const reviewTurnOutputSchema = z.discriminatedUnion("kind", [
   reviewTurnReviewRequiredSchema,
   reviewTurnUserInputRequiredSchema,
   reviewTurnDoneSchema
-]);
+]).superRefine((output, context) => {
+  if (output.kind !== "USER_INPUT_REQUIRED" || output.worktreePath === undefined) return;
+  const publishPause = output.pause.code.includes("PUBLISH") ||
+    output.pause.code === "PROJECT_PUBLISH_BUSY" ||
+    (output.pause.code === "RUNTIME_STAGE_FAILED" && output.result.error?.stage === "publish");
+  if (!publishPause) {
+    context.addIssue({
+      code: "custom",
+      path: ["worktreePath"],
+      message: "worktreePath is allowed only for a publish-related pause"
+    });
+  }
+});
 
 export const mcpToolSchemas = {
   smartflow_execute: { input: executeInputSchema, output: executeOutputSchema },

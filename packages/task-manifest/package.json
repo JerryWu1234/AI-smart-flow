@@ -20,7 +20,7 @@
   "scripts": {
     "build": "tsdown --config ../../tsdown.workspace.config.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --root ../.. --passWithNoTests packages/task-manifest/src"
+    "test": "vitest run --root ../.. --passWithNoTests tests/unit/packages/task-manifest"
   },
   "dependencies": {
     "zod": "4.4.3"

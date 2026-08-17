@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -8,8 +8,8 @@ import { describe, expect, it } from "vitest";
 import { ProjectRuntime, PublishCoordinator } from "@smartflow/daemon";
 import {
   PublishService,
+  observeTargetState,
   operationsHash,
-  parseSerializedDeliveryBundle,
   stableOperationId,
   type ApplyOperation,
   type PublishAttemptRecord,
@@ -18,7 +18,9 @@ import {
   type WorkspaceApplyCapabilities,
   type WorkspaceApplyAdapter
 } from "@smartflow/publish";
-import { createTasksSource } from "../../packages/task-manifest/src/test-fixture.js";
+import type { Candidate, GitWorkspaceSnapshot } from "@smartflow/workspace";
+import { gitPublishOperations } from "../../apps/daemon/src/git-publish-source.js";
+import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
 import { createLifecycleStore } from "../crash/recovery-test-fixture.js";
 import { createRuntimeHarness } from "../helpers/runtime-harness.js";
 
@@ -110,6 +112,58 @@ const bindings = {
   reviewHash: "b".repeat(64)
 };
 
+async function operationsForRun(
+  store: Awaited<ReturnType<typeof createLifecycleStore>>
+): Promise<ApplyOperation[]> {
+  const state = await store.readState();
+  const run = state.runs["job-1"];
+  const resultSnapshot = run?.gitWorkspace?.revisions[String(run.revision)]?.resultSnapshot;
+  if (run?.candidate === undefined || resultSnapshot === undefined) {
+    throw new Error("Git publish source fixture missing");
+  }
+  const candidate = JSON.parse(
+    new TextDecoder().decode(await store.readArtifact(run.candidate))
+  ) as Candidate;
+  const snapshot = JSON.parse(
+    new TextDecoder().decode(await store.readArtifact(resultSnapshot))
+  ) as GitWorkspaceSnapshot;
+  return gitPublishOperations(candidate, snapshot);
+}
+
+async function requestManualConfirmation(
+  store: Awaited<ReturnType<typeof createLifecycleStore>>,
+  sourcePauseCode: "PUBLISH_ADAPTER_UNAVAILABLE" | "PUBLISH_PRECHECK_CONFLICT"
+): Promise<void> {
+  const state = await store.readState();
+  const run = state.runs["job-1"];
+  if (run === undefined) throw new Error("manual publish fixture missing");
+  const updatedAt = new Date().toISOString();
+  await store.writeState({
+    ...state,
+    stateVersion: state.stateVersion + 1,
+    runs: {
+      ...state.runs,
+      "job-1": {
+        ...run,
+        phase: "READY_TO_PUBLISH",
+        pause: undefined,
+        recovery: {
+          ...run.recovery,
+          manualPublishConfirmation: {
+            status: "REQUESTED",
+            revision: run.revision,
+            pauseCode: sourcePauseCode,
+            requestId: `manual-confirm-${String(state.stateVersion + 1)}`,
+            requestedAt: updatedAt
+          }
+        },
+        updatedAt
+      }
+    },
+    updatedAt
+  });
+}
+
 describe("durable CAS publish", () => {
   it("persists preflight conflicts for smartflow_result without applying any path", async () => {
     const harness = await createRuntimeHarness();
@@ -120,18 +174,14 @@ describe("durable CAS publish", () => {
         dataDirectory: resolve(dataDirectory, "projects", projectId),
         projectId
       });
-      const publishBlobsRoot = resolve(
-        store.dataDirectory,
-        "runs/job-1/revision-1/publish-blobs"
-      );
-      await rm(publishBlobsRoot, { recursive: true, force: true });
       const ready = await store.readState();
       const workspace = ready.runs["job-1"]?.workspace;
       if (workspace === undefined) throw new Error("precheck workspace missing");
-      const source = await readFile(resolve(harness.projectDir, "sum.js"));
+      const sourcePath = resolve(harness.projectDir, "sum.js");
+      const source = await readFile(sourcePath);
       const workspacePath = resolve(store.dataDirectory, workspace.relativePath, "sum.js");
       await mkdir(resolve(workspacePath, ".."), { recursive: true });
-      await writeFile(workspacePath, source);
+      await writeFile(workspacePath, "mutable worktree does not drive preflight", "utf8");
       let applyCalls = 0;
       const adapter: WorkspaceApplyAdapter = {
         probe: () => Promise.resolve({
@@ -148,11 +198,7 @@ describe("durable CAS publish", () => {
         getResult: () => Promise.resolve("UNKNOWN")
       };
 
-      await expect(new PublishCoordinator(
-        store,
-        resolve(store.dataDirectory, "precheck-signing-key.pem"),
-        adapter
-      ).publish("job-1")).resolves.toMatchObject({
+      await expect(new PublishCoordinator(store, adapter).publish("job-1")).resolves.toMatchObject({
         service: {
           status: "PRECHECK_CONFLICT",
           publishedCount: 0,
@@ -178,108 +224,77 @@ describe("durable CAS publish", () => {
         }
       });
       expect(applyCalls).toBe(0);
-      const sourceHash = createHash("sha256").update(source).digest("hex");
-      await expect(readFile(resolve(publishBlobsRoot, sourceHash))).resolves.toEqual(source);
+      expect(await readFile(sourcePath)).toEqual(source);
     } finally {
       await harness.cleanup();
     }
   });
 
-  it("uses the default filesystem adapter to publish into the active workspace", async () => {
+  it("uses immutable Result Snapshot blobs instead of mutable worktree bytes", async () => {
     const harness = await createRuntimeHarness();
     try {
       const projectId = `project-${"2".repeat(40)}`;
-      const dataDirectory = resolve(harness.dataDir, "delivery-bundle-retry");
+      const dataDirectory = resolve(harness.dataDir, "git-source-publish");
       const store = await createLifecycleStore(harness, "READY_TO_PUBLISH", {}, {
         dataDirectory: resolve(dataDirectory, "projects", projectId),
         projectId
       });
-      const publishBlobsRoot = resolve(
-        store.dataDirectory,
-        "runs/job-1/revision-1/publish-blobs"
-      );
-      await rm(publishBlobsRoot, { recursive: true, force: true });
       const ready = await store.readState();
       const workspace = ready.runs["job-1"]?.workspace;
       if (workspace === undefined) throw new Error("default publish workspace missing");
+      const operations = await operationsForRun(store);
+      expect(operations).toHaveLength(1);
+      expect(operations[0]?.blobRef?.relativePath)
+        .toMatch(/^git-object-store\/blobs\/[a-f0-9]{40,64}$/u);
       const sourcePath = resolve(harness.projectDir, "sum.js");
       const source = await readFile(sourcePath);
       const workspacePath = resolve(store.dataDirectory, workspace.relativePath, "sum.js");
       await mkdir(resolve(workspacePath, ".."), { recursive: true });
-      await writeFile(workspacePath, source);
+      await writeFile(workspacePath, "tampered mutable worktree bytes", "utf8");
       await rm(sourcePath);
 
-      const signingKeyPath = resolve(store.dataDirectory, "default-publish-signing-key.pem");
-      const published = await new PublishCoordinator(store, signingKeyPath).publish("job-1");
+      const published = await new PublishCoordinator(store).publish("job-1");
       if (published.service.status !== "COMMITTED") {
         throw new Error(`default publish failed: ${JSON.stringify(published.service)}`);
       }
       expect(published).toMatchObject({ service: { status: "COMMITTED" }, phase: "COMPLETED" });
-      const completed = await store.readState();
-      const bundleRef = completed.runs["job-1"]?.deliveryBundle;
-      if (bundleRef === undefined) throw new Error("delivery bundle missing");
-      expect(completed.runs["job-1"]).toMatchObject({
+      expect((await store.readState()).runs["job-1"]).toMatchObject({
         phase: "COMPLETED",
-        deliveryBundle: bundleRef,
-        publish: { status: "COMMITTED" }
+        publish: { status: "COMMITTED", adapterId: "filesystem-preflight-batch-v1" }
       });
-      const serializedBundle = await store.readArtifact(bundleRef);
-      const parsedBundle = parseSerializedDeliveryBundle(serializedBundle).bundle;
-      expect(serializedBundle.byteLength).toBeGreaterThan(0);
-      expect(parsedBundle.manifest.operations[0]?.blobRef?.relativePath)
-        .toMatch(/^delivery-bundle\/blobs\/[a-f0-9]{64}$/u);
-      expect(parsedBundle.blobs["sum.js"]).toEqual(source);
-      await expect(access(publishBlobsRoot)).rejects.toMatchObject({ code: "ENOENT" });
       expect(await readFile(sourcePath)).toEqual(source);
     } finally {
       await harness.cleanup();
     }
   });
 
-  it("reuses a durable legacy Bundle without rebuilding adapter-specific operation refs", async () => {
+  it("publishes from the Git object store after the revision worktree is removed", async () => {
     const harness = await createRuntimeHarness();
     try {
-      const store = await createLifecycleStore(harness, "PUBLISHING");
-      const publishing = await store.readState();
-      const run = publishing.runs["job-1"];
-      if (run?.deliveryBundle === undefined || run.workspace === undefined) {
-        throw new Error("legacy Bundle fixture missing");
-      }
-      const bundleBytes = await store.readArtifact(run.deliveryBundle);
-      const readyRun = { ...run, phase: "READY_TO_PUBLISH" as const };
-      delete readyRun.publish;
-      const updatedAt = new Date().toISOString();
-      await store.writeState({
-        ...publishing,
-        stateVersion: publishing.stateVersion + 1,
-        runs: { ...publishing.runs, "job-1": { ...readyRun, updatedAt } },
-        updatedAt
-      });
+      const store = await createLifecycleStore(harness, "READY_TO_PUBLISH");
+      const ready = await store.readState();
+      const run = ready.runs["job-1"];
+      if (run?.workspace === undefined) throw new Error("Git source fixture missing");
+      const operations = await operationsForRun(store);
+      const sourcePath = resolve(harness.projectDir, "sum.js");
+      const source = await readFile(sourcePath);
       await rm(resolve(store.dataDirectory, run.workspace.relativePath), {
         recursive: true,
         force: true
       });
-      const sourcePath = resolve(harness.projectDir, "sum.js");
-      const source = await readFile(sourcePath);
       await rm(sourcePath);
 
-      const result = await new PublishCoordinator(
-        store,
-        resolve(store.dataDirectory, "unused-signing-key.pem")
-      ).publish("job-1");
+      const result = await new PublishCoordinator(store).publish("job-1");
 
       expect(result).toMatchObject({ service: { status: "COMMITTED" }, phase: "COMPLETED" });
-      const completed = (await store.readState()).runs["job-1"];
-      expect(completed?.deliveryBundle).toEqual(run.deliveryBundle);
-      if (completed?.deliveryBundle === undefined) throw new Error("reused Bundle missing");
-      expect(await store.readArtifact(completed.deliveryBundle)).toEqual(bundleBytes);
+      expect(operations[0]?.newHash).toBe(createHash("sha256").update(source).digest("hex"));
       expect(await readFile(sourcePath)).toEqual(source);
     } finally {
       await harness.cleanup();
     }
   });
 
-  it("recovers the default filesystem adapter from Bundle operations without a worktree", async () => {
+  it("recovers the default filesystem adapter from Git-derived operations without a worktree", async () => {
     const harness = await createRuntimeHarness();
     try {
       const store = await createLifecycleStore(harness, "PUBLISHING");
@@ -287,12 +302,10 @@ describe("durable CAS publish", () => {
       const run = state.runs["job-1"];
       if (
         run?.publish === undefined ||
-        run.deliveryBundle === undefined ||
+        run.candidate === undefined ||
         run.workspace === undefined
       ) throw new Error("default recovery fixture missing");
-      const bundle = parseSerializedDeliveryBundle(
-        await store.readArtifact(run.deliveryBundle)
-      ).bundle;
+      const operations = await operationsForRun(store);
       const publish = {
         ...run.publish,
         adapterId: "filesystem-preflight-batch-v1"
@@ -312,7 +325,7 @@ describe("durable CAS publish", () => {
         operationId: publish.operationId,
         operationsHash: publish.operationsHash,
         status: "COMMITTED",
-        paths: bundle.manifest.operations.map((operation) => ({
+        paths: operations.map((operation) => ({
           path: operation.path,
           status: "COMMITTED" as const,
           observedHash: operation.newHash,
@@ -328,10 +341,11 @@ describe("durable CAS publish", () => {
       );
 
       const beforeRecovery = await store.readState();
-      await expect(new PublishCoordinator(
-        store,
-        resolve(store.dataDirectory, "unused-recovery-signing-key.pem")
-      ).recover("job-1", publish.operationId, publish.operationsHash)).resolves.toMatchObject({
+      await expect(new PublishCoordinator(store).recover(
+        "job-1",
+        publish.operationId,
+        publish.operationsHash
+      )).resolves.toMatchObject({
         status: "COMMITTED",
         operationId: publish.operationId,
         result: resultRecord
@@ -367,10 +381,11 @@ describe("durable CAS publish", () => {
         updatedAt
       });
 
-      await expect(new PublishCoordinator(
-        store,
-        resolve(store.dataDirectory, "unused-identity-signing-key.pem")
-      ).recover("job-1", operationId, run.publish.operationsHash)).resolves.toEqual({
+      await expect(new PublishCoordinator(store).recover(
+        "job-1",
+        operationId,
+        run.publish.operationsHash
+      )).resolves.toEqual({
         status: "PUBLISH_RECOVERY_BLOCKED",
         operationId
       });
@@ -431,11 +446,7 @@ describe("durable CAS publish", () => {
         },
         getResult: () => Promise.resolve("UNKNOWN")
       };
-      const publishing = new PublishCoordinator(
-        store,
-        resolve(store.dataDirectory, "cancel-race-signing-key.pem"),
-        adapter
-      ).publish("job-1");
+      const publishing = new PublishCoordinator(store, adapter).publish("job-1");
       await applyEntered.promise;
 
       const beforeCancel = await store.readState();
@@ -520,11 +531,7 @@ describe("durable CAS publish", () => {
         getResult: () => Promise.resolve("UNKNOWN")
       };
 
-      await expect(new PublishCoordinator(
-        store,
-        resolve(store.dataDirectory, "handoff-signing-key.pem"),
-        adapter
-      ).publish("job-1")).resolves.toMatchObject({
+      await expect(new PublishCoordinator(store, adapter).publish("job-1")).resolves.toMatchObject({
         service: { status: "PUBLISH_RECOVERY_BLOCKED" },
         phase: "PAUSED"
       });
@@ -548,8 +555,6 @@ describe("durable CAS publish", () => {
       const beforeState = await store.readState();
       const review = beforeState.runs["job-1"]?.review;
       if (review === undefined) throw new Error("review decision missing");
-      const deliveryRoot = resolve(store.dataDirectory, "runs/job-1/revision-1/delivery-bundles");
-      const beforeDeliveryFiles = (await readdir(deliveryRoot, { recursive: true })).sort();
       const activeWorkspacePath = resolve(harness.projectDir, "sum.js");
       const beforeWorkspace = await readFile(activeWorkspacePath);
       await writeFile(resolve(store.dataDirectory, review.relativePath), "{\"tampered\":true}");
@@ -573,17 +578,122 @@ describe("durable CAS publish", () => {
         getResult: () => Promise.resolve("UNKNOWN")
       };
 
-      await expect(new PublishCoordinator(
-        store,
-        resolve(store.dataDirectory, "signing-key.pem"),
-        adapter
-      ).publish("job-1")).rejects.toThrow(/PUBLISH_ARTIFACT_INTEGRITY_BLOCKED/u);
+      await expect(new PublishCoordinator(store, adapter).publish("job-1"))
+        .rejects.toThrow(/PUBLISH_ARTIFACT_INTEGRITY_BLOCKED/u);
 
       expect(probeCalls).toBe(0);
       expect(applyCalls).toBe(0);
       expect(await readFile(activeWorkspacePath)).toEqual(beforeWorkspace);
-      expect((await readdir(deliveryRoot, { recursive: true })).sort()).toEqual(beforeDeliveryFiles);
-      expect((await store.readState()).runs["job-1"]?.deliveryBundle).toBeUndefined();
+      expect((await store.readState()).runs["job-1"]?.publish).toBeUndefined();
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("commits manual confirmation only after every target exactly matches", async () => {
+    const harness = await createRuntimeHarness();
+    try {
+      const store = await createLifecycleStore(harness, "READY_TO_PUBLISH");
+      const sourcePath = resolve(harness.projectDir, "sum.js");
+      const reviewedSource = await readFile(sourcePath);
+
+      await expect(new PublishCoordinator(store).publish("job-1")).resolves.toMatchObject({
+        service: { status: "PRECHECK_CONFLICT" },
+        phase: "PAUSED"
+      });
+      await writeFile(sourcePath, "different external merge", "utf8");
+      await requestManualConfirmation(store, "PUBLISH_PRECHECK_CONFLICT");
+
+      await expect(new PublishCoordinator(store).publish("job-1")).resolves.toMatchObject({
+        service: {
+          status: "MANUAL_PUBLISH_REQUIRED",
+          reason: "PUBLISH_TARGET_MISMATCH"
+        },
+        phase: "PAUSED"
+      });
+      expect((await store.readState()).runs["job-1"]).toMatchObject({
+        phase: "PAUSED",
+        pause: { code: "MANUAL_PUBLISH_TARGET_MISMATCH" },
+        recovery: { manualPublishConfirmation: { status: "MISMATCH" } }
+      });
+
+      await writeFile(sourcePath, reviewedSource);
+      const exactOperations = await operationsForRun(store);
+      expect(await observeTargetState(harness.projectDir, exactOperations)).toEqual({
+        matches: true,
+        conflicts: []
+      });
+      await requestManualConfirmation(store, "PUBLISH_PRECHECK_CONFLICT");
+      expect(await readFile(sourcePath)).toEqual(reviewedSource);
+      expect(await observeTargetState(harness.projectDir, exactOperations)).toEqual({
+        matches: true,
+        conflicts: []
+      });
+      const committed = await new PublishCoordinator(store).publish("job-1");
+      if (committed.service.status !== "COMMITTED") {
+        throw new Error(`manual confirmation failed: ${JSON.stringify(committed.service)}`);
+      }
+      expect(committed).toMatchObject({
+        service: { status: "COMMITTED" },
+        phase: "COMPLETED"
+      });
+      expect((await store.readState()).runs["job-1"]).toMatchObject({
+        phase: "COMPLETED",
+        publish: {
+          adapterId: "manual-confirmation-v1",
+          status: "COMMITTED"
+        }
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("does not allow manual confirmation to bypass recovery-blocked attempts", async () => {
+    const harness = await createRuntimeHarness();
+    try {
+      const projectId = `project-${"4".repeat(40)}`;
+      const dataDirectory = resolve(harness.dataDir, "manual-recovery-block");
+      const store = await createLifecycleStore(harness, "PUBLISHING", {}, {
+        dataDirectory: resolve(dataDirectory, "projects", projectId),
+        projectId
+      });
+      const state = await store.readState();
+      const run = state.runs["job-1"];
+      if (run?.publish === undefined) throw new Error("recovery block fixture missing");
+      const updatedAt = new Date().toISOString();
+      await store.writeState({
+        ...state,
+        stateVersion: state.stateVersion + 1,
+        runs: {
+          ...state.runs,
+          "job-1": {
+            ...run,
+            phase: "PAUSED",
+            pause: {
+              code: "PUBLISH_RECOVERY_BLOCKED",
+              resumeActions: ["confirm_manual_publish", "inspect_recovery", "cancel"]
+            },
+            updatedAt
+          }
+        },
+        updatedAt
+      });
+      const before = await store.readState();
+
+      await expect(new ProjectRuntime({ dataDirectory }).handle({
+        id: "manual-recovery-bypass",
+        method: "smartflow_resume",
+        payload: {
+          requestId: "manual-recovery-bypass",
+          projectId,
+          jobId: "job-1",
+          resumeAction: "confirm_manual_publish",
+          expectedRevision: 1,
+          expectedStateVersion: before.stateVersion
+        }
+      })).rejects.toMatchObject({ code: "RESUME_CODE_ACTION_MISMATCH" });
+      expect(await store.readState()).toEqual(before);
     } finally {
       await harness.cleanup();
     }

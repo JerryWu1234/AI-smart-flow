@@ -39,8 +39,7 @@ const READ_ONLY_RESUME_ACTIONS = new Set<ResumeInput["resumeAction"]>([
   "inspect_recovery",
   "inspect_conflict",
   "inspect_repair_diff",
-  "inspect_no_progress",
-  "export_bundle"
+  "inspect_no_progress"
 ]);
 
 interface ResumeOptions {
@@ -130,7 +129,7 @@ function optionDescription(action: string): string {
   const descriptions: Record<string, string> = {
     approve_new_manifest_revision: "Approve the supplied revision and continue the run",
     cancel: "Cancel the run and preserve its current evidence",
-    export_bundle: "Inspect or export the prepared delivery bundle",
+    confirm_manual_publish: "Confirm that the Project already matches the reviewed Candidate",
     inspect_conflict: "Inspect the durable publish conflict evidence",
     inspect_no_progress: "Inspect why automatic repair stopped making progress",
     inspect_processes: "Inspect the unresolved Pi process containment evidence",
@@ -670,6 +669,12 @@ export class HostTurnCoordinator {
           approval: repairDraft.approval
         }
       : undefined;
+    const publishNeedsWorkspace = run.pause?.code.includes("PUBLISH") === true ||
+      run.pause?.code === "PROJECT_PUBLISH_BUSY" ||
+      (run.pause?.code === "RUNTIME_STAGE_FAILED" && run.lastError?.stage === "publish");
+    const worktreePath = publishNeedsWorkspace && run.workspace !== undefined
+      ? resolve(this.dependencies.store(state.projectId).dataDirectory, run.workspace.relativePath)
+      : undefined;
     return reviewTurnOutputSchema.parse({
       kind: "USER_INPUT_REQUIRED",
       projectId: state.projectId,
@@ -682,6 +687,7 @@ export class HostTurnCoordinator {
         message: pauseMessage(run)
       },
       result,
+      ...(worktreePath === undefined ? {} : { worktreePath }),
       ...(review === undefined ? {} : { review }),
       ...(repairDraft === undefined ? {} : { repairDraft }),
       ...(requiresRevisionApproval

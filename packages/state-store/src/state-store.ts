@@ -1,30 +1,24 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { chmod, mkdir, open, readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type { ArtifactRef } from "@smartflow/protocol";
 
-import {
-  atomicWriteFile,
-  durableWriteArtifact,
-  type AtomicWriteHooks
-} from "./atomic-file.js";
-import { bytesHash, canonicalJson } from "./canonical-json.js";
+import { durableWriteArtifact, type AtomicWriteHooks } from "./atomic-file.js";
+import { canonicalJson } from "./canonical-json.js";
 import { StateStoreError } from "./errors.js";
 import { projectStateSchema, type ProjectState } from "./schema.js";
 
-const DATABASE_SCHEMA_VERSION = 3;
+const DATABASE_SCHEMA_VERSION = 4;
 const SQLITE_BUSY_TIMEOUT_MS = 500;
 const MUTATION_LEASE_WAIT_MS = 5_000;
 const MUTATION_LEASE_TTL_MS = 30_000;
 const MUTATION_LEASE_RENEW_MS = 10_000;
 const MUTATION_LEASE_POLL_MS = 25;
-const LEGACY_STATE_TOMBSTONE_KIND = "smartflow.sqlite-state-retired";
-const LEGACY_IMPORT_DIRECTORY = "legacy-imports";
 
 const DATABASE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS project_state (
@@ -38,16 +32,7 @@ CREATE TABLE IF NOT EXISTS project_state (
 CREATE TABLE IF NOT EXISTS audit_events (
   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
   event_json TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  source TEXT NOT NULL CHECK (source IN ('runtime', 'legacy')),
-  source_path TEXT
-) STRICT;
-CREATE TABLE IF NOT EXISTS legacy_imports (
-  source_path TEXT PRIMARY KEY,
-  source_kind TEXT NOT NULL CHECK (source_kind IN ('state', 'events')),
-  source_sha256 TEXT NOT NULL,
-  source_schema_version INTEGER,
-  imported_at TEXT NOT NULL
+  created_at TEXT NOT NULL
 ) STRICT;
 CREATE TABLE IF NOT EXISTS mutation_lease (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -55,7 +40,7 @@ CREATE TABLE IF NOT EXISTS mutation_lease (
   owner_id TEXT NOT NULL,
   owner_pid INTEGER NOT NULL CHECK (owner_pid > 0),
   owner_hostname TEXT NOT NULL,
-  owner_process_start_token TEXT,
+  owner_process_start_token TEXT NOT NULL,
   expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > 0)
 ) STRICT;
 `;
@@ -73,35 +58,12 @@ interface ParsedStateDocument {
   sourceSchemaVersion: number;
 }
 
-interface LegacyStateSource extends ParsedStateDocument {
-  sourceHash: string;
-  kind: "state";
-}
-
-interface LegacyStateTombstone {
-  kind: "tombstone";
-  sourceHash: string;
-  archive: string;
-}
-
-interface LegacyEventsSource {
-  sourceHash: string;
-  lines: string[];
-}
-
-interface DatabaseState {
-  state: ProjectState;
-  sourceSchemaVersion: number;
-  legacyStateHash: string | undefined;
-  legacyEventsHash: string | undefined;
-}
-
 interface MutationLeaseRow {
   owner_token: string;
   owner_id: string;
   owner_pid: number;
   owner_hostname: string;
-  owner_process_start_token: string | null;
+  owner_process_start_token: string;
   expires_at_ms: number;
 }
 
@@ -110,16 +72,6 @@ export interface StateMutationLease {
   assertOwned(): Promise<void>;
   writeState(nextState: ProjectState, hooks?: AtomicWriteHooks): Promise<ProjectState>;
   release(): Promise<void>;
-}
-
-function ensureDatabaseSchema(database: DatabaseSync): void {
-  database.exec(DATABASE_SCHEMA);
-  const leaseColumns = database.prepare("PRAGMA table_info(mutation_lease)").all() as Array<{
-    name?: unknown;
-  }>;
-  if (!leaseColumns.some((column) => column.name === "owner_process_start_token")) {
-    database.exec("ALTER TABLE mutation_lease ADD COLUMN owner_process_start_token TEXT");
-  }
 }
 
 function sqliteError(error: unknown): boolean {
@@ -163,7 +115,7 @@ function parseStateDocument(text: string, source: string): ParsedStateDocument {
     : undefined;
   if (
     typeof sourceSchemaVersion === "number" &&
-    !new Set([4, 5]).has(sourceSchemaVersion)
+    !new Set([4, 5, 6]).has(sourceSchemaVersion)
   ) {
     throw new StateStoreError(
       "STATE_MIGRATION_UNSUPPORTED",
@@ -294,162 +246,6 @@ async function chmodIfPresent(path: string): Promise<void> {
   }
 }
 
-async function optionalFile(path: string): Promise<Uint8Array | undefined> {
-  try {
-    return await readFile(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw new StateStoreError(
-      "STATE_INVALID",
-      `Unable to read legacy state source ${path}: ${error instanceof Error ? error.message : String(error)}`
-    );
-  }
-}
-
-function legacyArchiveName(sourceName: string, sourceHash: string): string {
-  return `${sourceName}.imported-${sourceHash}`;
-}
-
-function legacyArchiveRelativePath(sourceName: string, sourceHash: string): string {
-  return `${LEGACY_IMPORT_DIRECTORY}/${legacyArchiveName(sourceName, sourceHash)}`;
-}
-
-function parseLegacyStateFile(
-  bytes: Uint8Array,
-  path: string
-): LegacyStateSource | LegacyStateTombstone {
-  const text = new TextDecoder().decode(bytes);
-  const value = parseJson(text, path);
-  if (
-    typeof value === "object" &&
-    value !== null &&
-    "kind" in value &&
-    (value as { kind?: unknown }).kind === LEGACY_STATE_TOMBSTONE_KIND
-  ) {
-    const candidate = value as {
-      version?: unknown;
-      database?: unknown;
-      sourceSha256?: unknown;
-      archive?: unknown;
-    };
-    const legacyArchive = typeof candidate.sourceSha256 === "string"
-      ? legacyArchiveName("state.json", candidate.sourceSha256)
-      : undefined;
-    const protectedArchive = typeof candidate.sourceSha256 === "string"
-      ? legacyArchiveRelativePath("state.json", candidate.sourceSha256)
-      : undefined;
-    if (
-      candidate.version !== 1 ||
-      candidate.database !== "state.sqlite" ||
-      typeof candidate.sourceSha256 !== "string" ||
-      !/^[a-f0-9]{64}$/u.test(candidate.sourceSha256) ||
-      typeof candidate.archive !== "string" ||
-      (candidate.archive !== legacyArchive && candidate.archive !== protectedArchive)
-    ) {
-      throw new StateStoreError("STATE_INVALID", `Legacy state tombstone is invalid: ${path}`);
-    }
-    return {
-      kind: "tombstone",
-      sourceHash: candidate.sourceSha256,
-      archive: candidate.archive
-    };
-  }
-  const parsed = parseStateDocument(text, path);
-  return { ...parsed, kind: "state", sourceHash: bytesHash(bytes) };
-}
-
-async function readLegacyState(
-  path: string
-): Promise<LegacyStateSource | LegacyStateTombstone | undefined> {
-  const bytes = await optionalFile(path);
-  return bytes === undefined ? undefined : parseLegacyStateFile(bytes, path);
-}
-
-async function readLegacyEvents(path: string): Promise<LegacyEventsSource | undefined> {
-  const bytes = await optionalFile(path);
-  if (bytes === undefined) return undefined;
-  const text = new TextDecoder().decode(bytes);
-  const lines = text.split("\n");
-  if (lines.at(-1) === "") lines.pop();
-  return {
-    sourceHash: bytesHash(bytes),
-    lines: lines.map((line) => line.endsWith("\r") ? line.slice(0, -1) : line)
-  };
-}
-
-function recordLegacyImport(
-  database: DatabaseSync,
-  input: {
-    sourcePath: string;
-    sourceKind: "state" | "events";
-    sourceHash: string;
-    sourceSchemaVersion?: number;
-    importedAt: string;
-  }
-): void {
-  database.prepare(`
-    INSERT OR IGNORE INTO legacy_imports (
-      source_path,
-      source_kind,
-      source_sha256,
-      source_schema_version,
-      imported_at
-    ) VALUES (?, ?, ?, ?, ?)
-  `).run(
-    input.sourcePath,
-    input.sourceKind,
-    input.sourceHash,
-    input.sourceSchemaVersion ?? null,
-    input.importedAt
-  );
-}
-
-function importLegacyEvents(
-  database: DatabaseSync,
-  sourcePath: string,
-  source: LegacyEventsSource | undefined,
-  importedAt: string
-): void {
-  if (source === undefined) return;
-  const existing = database.prepare(`
-    SELECT source_sha256
-    FROM legacy_imports
-    WHERE source_path = ? AND source_kind = 'events'
-  `).get(sourcePath) as { source_sha256?: unknown } | undefined;
-  if (existing !== undefined) return;
-  const insert = database.prepare(`
-    INSERT INTO audit_events (event_json, created_at, source, source_path)
-    VALUES (?, ?, 'legacy', ?)
-  `);
-  for (const line of source.lines) insert.run(line, importedAt, sourcePath);
-  recordLegacyImport(database, {
-    sourcePath,
-    sourceKind: "events",
-    sourceHash: source.sourceHash,
-    importedAt
-  });
-}
-
-function legacyImportHash(
-  database: DatabaseSync,
-  sourcePath: string,
-  sourceKind: "state" | "events"
-): string | undefined {
-  const row = database.prepare(`
-    SELECT source_sha256
-    FROM legacy_imports
-    WHERE source_path = ? AND source_kind = ?
-  `).get(sourcePath, sourceKind) as { source_sha256?: unknown } | undefined;
-  if (row === undefined) return undefined;
-  if (typeof row.source_sha256 !== "string" || !/^[a-f0-9]{64}$/u.test(row.source_sha256)) {
-    throw new StateStoreError(
-      "STATE_INVALID",
-      `Legacy import marker is malformed for ${sourcePath}`
-    );
-  }
-  return row.source_sha256;
-}
-
 function mutationLeaseRow(database: DatabaseSync): MutationLeaseRow | undefined {
   const row = database.prepare(`
     SELECT owner_token,
@@ -467,8 +263,7 @@ function mutationLeaseRow(database: DatabaseSync): MutationLeaseRow | undefined 
     typeof row.owner_id !== "string" ||
     typeof row.owner_pid !== "number" ||
     typeof row.owner_hostname !== "string" ||
-    (row.owner_process_start_token !== null &&
-      typeof row.owner_process_start_token !== "string") ||
+    typeof row.owner_process_start_token !== "string" ||
     typeof row.expires_at_ms !== "number"
   ) {
     throw new StateStoreError("STATE_INVALID", "SQLite mutation lease is malformed");
@@ -515,10 +310,7 @@ function removeStaleMutationLease(database: DatabaseSync, now: number): void {
     if (processExists(lease.owner_pid)) {
       if (lease.expires_at_ms > now) return;
       const observedStartToken = processStartToken(lease.owner_pid);
-      if (
-        lease.owner_process_start_token !== null &&
-        observedStartToken === lease.owner_process_start_token
-      ) {
+      if (observedStartToken === lease.owner_process_start_token) {
         // A suspended owner can miss renewals while still retaining the right to
         // cross the commit-to-effect handoff. Its process instance remains owner.
         return;
@@ -529,9 +321,7 @@ function removeStaleMutationLease(database: DatabaseSync, now: number): void {
           `Unable to verify expired SQLite mutation owner pid ${String(lease.owner_pid)}`
         );
       }
-      // A different start token proves that the recorded PID was reused. A null
-      // token can only come from the pre-v3 lease schema and is reclaimable once
-      // its old TTL has elapsed.
+      // A different start token proves that the recorded PID was reused.
     }
   } else if (lease.expires_at_ms > now) {
     return;
@@ -544,94 +334,10 @@ function removeStaleMutationLease(database: DatabaseSync, now: number): void {
 
 function databaseState(
   database: DatabaseSync,
-  databasePath: string,
-  legacyStatePath: string,
-  eventsPath: string
-): DatabaseState | undefined {
+  databasePath: string
+): ParsedStateDocument | undefined {
   const row = stateRow(database);
-  if (row === undefined) return undefined;
-  const parsed = parseStateRow(row, databasePath);
-  return {
-    state: parsed.state,
-    sourceSchemaVersion: parsed.sourceSchemaVersion,
-    legacyStateHash: legacyImportHash(database, legacyStatePath, "state"),
-    legacyEventsHash: legacyImportHash(database, eventsPath, "events")
-  };
-}
-
-async function fsyncDirectory(path: string): Promise<void> {
-  const handle = await open(path, "r");
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-
-async function verifyLegacyArchive(
-  archivePath: string,
-  expectedHash: string
-): Promise<void> {
-  const archiveBytes = await optionalFile(archivePath);
-  if (archiveBytes === undefined || bytesHash(archiveBytes) !== expectedHash) {
-    throw new StateStoreError(
-      "STATE_INVALID",
-      `Legacy archive is missing or does not match its SQLite import marker: ${archivePath}`
-    );
-  }
-}
-
-async function ensureLegacyArchive(
-  sourcePath: string,
-  archivePath: string,
-  expectedHash: string
-): Promise<void> {
-  const archiveDirectory = resolve(archivePath, "..");
-  await mkdir(archiveDirectory, { recursive: true, mode: 0o700 });
-  await chmod(archiveDirectory, 0o700);
-
-  const archiveBytes = await optionalFile(archivePath);
-  if (archiveBytes === undefined) {
-    const sourceBytes = await optionalFile(sourcePath);
-    if (sourceBytes !== undefined && bytesHash(sourceBytes) !== expectedHash) {
-      throw new StateStoreError(
-        "STATE_INVALID",
-        `Legacy source changed after SQLite import: ${sourcePath}`
-      );
-    }
-    if (sourceBytes !== undefined) {
-      try {
-        await rename(sourcePath, archivePath);
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code !== "ENOENT" && code !== "EEXIST") throw error;
-      }
-    }
-  }
-
-  // A concurrent reconciler may have completed the rename after either read.
-  // Verification turns ENOENT/EEXIST races into an idempotent success only when
-  // the durable archive contains exactly the bytes recorded in SQLite.
-  await verifyLegacyArchive(archivePath, expectedHash);
-  await chmod(archivePath, 0o600);
-  await Promise.all([...new Set([
-    resolve(sourcePath, ".."),
-    archiveDirectory
-  ])].map((directory) => fsyncDirectory(directory)));
-}
-
-async function removeMatchingLegacySource(
-  sourcePath: string,
-  expectedHash: string
-): Promise<void> {
-  const sourceBytes = await optionalFile(sourcePath);
-  if (sourceBytes === undefined || bytesHash(sourceBytes) !== expectedHash) return;
-  try {
-    await unlink(sourcePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  await fsyncDirectory(resolve(sourcePath, ".."));
+  return row === undefined ? undefined : parseStateRow(row, databasePath);
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -718,30 +424,16 @@ class SqliteMutationLease implements StateMutationLease {
 export class StateStore {
   public readonly dataDirectory: string;
   public readonly databasePath: string;
-  /** Compatibility alias for the current authoritative state storage. */
-  public readonly statePath: string;
-  /** Legacy JSONL import source; audit events are now stored in SQLite. */
-  public readonly eventsPath: string;
   public readonly protectedPaths: readonly string[];
-  private readonly legacyStatePath: string;
-  private readonly legacyImportDirectory: string;
   private readonly mutationLeaseContext = new AsyncLocalStorage<string>();
-  private reconciledLegacyImports: string | undefined;
 
   public constructor(dataDirectory: string) {
     this.dataDirectory = resolve(dataDirectory);
     this.databasePath = resolve(this.dataDirectory, "state.sqlite");
-    this.statePath = this.databasePath;
-    this.legacyStatePath = resolve(this.dataDirectory, "state.json");
-    this.eventsPath = resolve(this.dataDirectory, "events.jsonl");
-    this.legacyImportDirectory = resolve(this.dataDirectory, LEGACY_IMPORT_DIRECTORY);
     this.protectedPaths = Object.freeze([
       this.databasePath,
       `${this.databasePath}-wal`,
-      `${this.databasePath}-shm`,
-      this.legacyStatePath,
-      this.eventsPath,
-      this.legacyImportDirectory
+      `${this.databasePath}-shm`
     ]);
   }
 
@@ -752,41 +444,26 @@ export class StateStore {
       if (!(error instanceof StateStoreError) || error.code !== "STATE_NOT_FOUND") throw error;
     }
     const validated = projectStateSchema.parse(initialState);
-    const legacyEvents = await readLegacyEvents(this.eventsPath);
-    const snapshot = await this.withDatabase((database) => {
+    return this.withDatabase((database) => {
       beginImmediate(database);
       try {
-        const existing = databaseState(
-          database,
-          this.databasePath,
-          this.legacyStatePath,
-          this.eventsPath
-        );
+        const existing = databaseState(database, this.databasePath);
         if (existing !== undefined) {
           commit(database);
-          return existing;
+          return existing.state;
         }
         insertState(database, validated);
-        const importedAt = new Date().toISOString();
-        importLegacyEvents(database, this.eventsPath, legacyEvents, importedAt);
-        const inserted = databaseState(
-          database,
-          this.databasePath,
-          this.legacyStatePath,
-          this.eventsPath
-        );
+        const inserted = databaseState(database, this.databasePath);
         if (inserted === undefined) {
           throw new StateStoreError("STATE_INVALID", "Initialized SQLite state row is missing");
         }
         commit(database);
-        return inserted;
+        return inserted.state;
       } catch (error) {
         rollback(database);
         throw error;
       }
     });
-    await this.reconcileLegacySources(snapshot);
-    return snapshot.state;
   }
 
   public async migrateState(): Promise<ProjectState> {
@@ -813,70 +490,10 @@ export class StateStore {
 
   public async readState(): Promise<ProjectState> {
     const existing = await this.readDatabaseState();
-    if (existing !== undefined) {
-      await this.reconcileLegacySources(existing);
-      return existing.state;
-    }
-
-    const [legacyState, legacyEvents] = await Promise.all([
-      readLegacyState(this.legacyStatePath),
-      readLegacyEvents(this.eventsPath)
-    ]);
-    if (legacyState?.kind === "tombstone") {
-      throw new StateStoreError(
-        "STATE_INVALID",
-        `Legacy state is retired but SQLite state is missing: ${this.databasePath}`
-      );
-    }
-    if (legacyState === undefined) {
-      const raced = await this.readDatabaseState();
-      if (raced !== undefined) {
-        await this.reconcileLegacySources(raced);
-        return raced.state;
-      }
+    if (existing === undefined) {
       throw new StateStoreError("STATE_NOT_FOUND", `State does not exist: ${this.databasePath}`);
     }
-    const snapshot = await this.withDatabase((database) => {
-      beginImmediate(database);
-      try {
-        const row = databaseState(
-          database,
-          this.databasePath,
-          this.legacyStatePath,
-          this.eventsPath
-        );
-        if (row !== undefined) {
-          commit(database);
-          return row;
-        }
-        insertState(database, legacyState.state);
-        const importedAt = new Date().toISOString();
-        recordLegacyImport(database, {
-          sourcePath: this.legacyStatePath,
-          sourceKind: "state",
-          sourceHash: legacyState.sourceHash,
-          sourceSchemaVersion: legacyState.sourceSchemaVersion,
-          importedAt
-        });
-        importLegacyEvents(database, this.eventsPath, legacyEvents, importedAt);
-        const inserted = databaseState(
-          database,
-          this.databasePath,
-          this.legacyStatePath,
-          this.eventsPath
-        );
-        if (inserted === undefined) {
-          throw new StateStoreError("STATE_INVALID", "Imported SQLite state row is missing");
-        }
-        commit(database);
-        return inserted;
-      } catch (error) {
-        rollback(database);
-        throw error;
-      }
-    });
-    await this.reconcileLegacySources(snapshot);
-    return snapshot.state;
+    return existing.state;
   }
 
   public async acquireMutationLease(
@@ -995,8 +612,8 @@ export class StateStore {
       beginImmediate(database);
       try {
         database.prepare(`
-          INSERT INTO audit_events (event_json, created_at, source, source_path)
-          VALUES (?, ?, 'runtime', NULL)
+          INSERT INTO audit_events (event_json, created_at)
+          VALUES (?, ?)
         `).run(eventJson, new Date().toISOString());
         commit(database);
       } catch (error) {
@@ -1006,138 +623,8 @@ export class StateStore {
     });
   }
 
-  private async readDatabaseState(): Promise<DatabaseState | undefined> {
-    return this.withDatabase((database) => databaseState(
-      database,
-      this.databasePath,
-      this.legacyStatePath,
-      this.eventsPath
-    ));
-  }
-
-  private async reconcileLegacySources(snapshot: DatabaseState): Promise<void> {
-    const reconciliationKey = `${snapshot.legacyStateHash ?? "-"}:${snapshot.legacyEventsHash ?? "-"}`;
-    if (this.reconciledLegacyImports === reconciliationKey) {
-      const source = await readLegacyState(this.legacyStatePath);
-      const stateRetirementIsCurrent = snapshot.legacyStateHash === undefined
-        ? source === undefined
-        : source?.kind === "tombstone" &&
-          source.sourceHash === snapshot.legacyStateHash &&
-          source.archive === legacyArchiveRelativePath("state.json", snapshot.legacyStateHash);
-      if (stateRetirementIsCurrent) return;
-      this.reconciledLegacyImports = undefined;
-    }
-    await this.reconcileLegacyState(snapshot.legacyStateHash);
-    await this.reconcileLegacyEvents(snapshot.legacyEventsHash);
-    this.reconciledLegacyImports = reconciliationKey;
-  }
-
-  private async ensureProtectedLegacyArchive(
-    sourcePath: string,
-    sourceName: string,
-    importedHash: string
-  ): Promise<void> {
-    const archiveRelativePath = legacyArchiveRelativePath(sourceName, importedHash);
-    const archivePath = resolve(this.dataDirectory, archiveRelativePath);
-    const previousArchivePath = resolve(
-      this.dataDirectory,
-      legacyArchiveName(sourceName, importedHash)
-    );
-    const archive = await optionalFile(archivePath);
-    if (archive === undefined) {
-      const previousArchive = await optionalFile(previousArchivePath);
-      if (previousArchive !== undefined && bytesHash(previousArchive) !== importedHash) {
-        throw new StateStoreError(
-          "STATE_INVALID",
-          `Legacy archive does not match its SQLite import marker: ${previousArchivePath}`
-        );
-      }
-      await ensureLegacyArchive(
-        previousArchive === undefined ? sourcePath : previousArchivePath,
-        archivePath,
-        importedHash
-      );
-    } else if (bytesHash(archive) !== importedHash) {
-      throw new StateStoreError(
-        "STATE_INVALID",
-        `Legacy archive does not match its SQLite import marker: ${archivePath}`
-      );
-    }
-
-    // Builds created before protected archives were introduced used a sibling
-    // *.imported-<hash> file. Move or remove that exact immutable duplicate.
-    await removeMatchingLegacySource(previousArchivePath, importedHash);
-  }
-
-  private async reconcileLegacyState(importedHash: string | undefined): Promise<void> {
-    const source = await readLegacyState(this.legacyStatePath);
-    if (importedHash === undefined) {
-      if (source !== undefined) {
-        throw new StateStoreError(
-          "STATE_INVALID",
-          `Unregistered legacy state coexists with SQLite authority: ${this.legacyStatePath}`
-        );
-      }
-      return;
-    }
-    const legacyArchive = legacyArchiveName("state.json", importedHash);
-    const protectedArchive = legacyArchiveRelativePath("state.json", importedHash);
-    if (source?.kind === "tombstone") {
-      if (
-        source.sourceHash !== importedHash ||
-        (source.archive !== legacyArchive && source.archive !== protectedArchive)
-      ) {
-        throw new StateStoreError(
-          "STATE_INVALID",
-          `Legacy state tombstone does not match its SQLite import: ${this.legacyStatePath}`
-        );
-      }
-      await this.ensureProtectedLegacyArchive(
-        this.legacyStatePath,
-        "state.json",
-        importedHash
-      );
-      if (source.archive === protectedArchive) return;
-    } else {
-      if (source !== undefined && source.sourceHash !== importedHash) {
-        throw new StateStoreError(
-          "STATE_INVALID",
-          `Legacy state changed after SQLite import: ${this.legacyStatePath}`
-        );
-      }
-      await this.ensureProtectedLegacyArchive(
-        this.legacyStatePath,
-        "state.json",
-        importedHash
-      );
-    }
-    await atomicWriteFile(
-      this.legacyStatePath,
-      Buffer.from(canonicalJson({
-        kind: LEGACY_STATE_TOMBSTONE_KIND,
-        version: 1,
-        database: "state.sqlite",
-        sourceSha256: importedHash,
-        archive: protectedArchive
-      }), "utf8")
-    );
-  }
-
-  private async reconcileLegacyEvents(importedHash: string | undefined): Promise<void> {
-    // events.jsonl is only a one-time bootstrap source. Once SQLite exists, a
-    // later or rewritten file is deliberately ignored and never becomes an
-    // audit or recovery authority.
-    if (importedHash === undefined) return;
-    const source = await optionalFile(this.eventsPath);
-    const sourceMatchesImport = source !== undefined && bytesHash(source) === importedHash;
-    await this.ensureProtectedLegacyArchive(
-      this.eventsPath,
-      "events.jsonl",
-      importedHash
-    );
-    if (sourceMatchesImport) {
-      await removeMatchingLegacySource(this.eventsPath, importedHash);
-    }
+  private async readDatabaseState(): Promise<ParsedStateDocument | undefined> {
+    return this.withDatabase((database) => databaseState(database, this.databasePath));
   }
 
   private async renewMutationLease(ownerToken: string): Promise<void> {
@@ -1261,14 +748,17 @@ export class StateStore {
         user_version?: unknown;
       } | undefined;
       const version = versionRow?.user_version;
-      if (typeof version !== "number" || version > DATABASE_SCHEMA_VERSION) {
+      if (
+        typeof version !== "number" ||
+        (version !== 0 && version !== DATABASE_SCHEMA_VERSION)
+      ) {
         throw new StateStoreError(
           "STATE_MIGRATION_UNSUPPORTED",
           `Unsupported SQLite state schema version: ${String(version)}`
         );
       }
-      ensureDatabaseSchema(database);
-      if (version < DATABASE_SCHEMA_VERSION) {
+      database.exec(DATABASE_SCHEMA);
+      if (version === 0) {
         database.exec(`PRAGMA user_version = ${String(DATABASE_SCHEMA_VERSION)}`);
       }
       return operation(database);

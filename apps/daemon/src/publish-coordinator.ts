@@ -5,16 +5,10 @@ import { dirname, resolve } from "node:path";
 import {
   PublishService,
   FilesystemWorkspaceApplyAdapter,
-  createDeliveryBundle,
-  exportSigningPublicKey,
-  loadOrCreateInstallationSigningKey,
-  parseSerializedDeliveryBundle,
-  requireExternalBundleSignature,
-  serializeDeliveryBundle,
+  observeTargetState,
   operationsHash,
   stableOperationId,
   type ApplyOperation,
-  type DeliveryBundle,
   type PublishAttemptRecord,
   type PublishAttemptStore,
   type PublishResult,
@@ -24,7 +18,6 @@ import {
 import { StateStore, type ProjectState, type RunRecord } from "@smartflow/state-store";
 import { taskManifestSchema } from "@smartflow/task-manifest";
 import {
-  buildGitTreePatch,
   cleanupGitRunTemporaryState,
   getCandidateBaselineHash,
   getCandidateHash,
@@ -33,6 +26,7 @@ import {
   type GitWorkspaceSnapshot
 } from "@smartflow/workspace";
 
+import { gitPublishBlobReader, gitPublishOperations } from "./git-publish-source.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
 import { verifyRunArtifacts } from "./recovery-manager.js";
 
@@ -45,27 +39,6 @@ function canonical(value: unknown): string {
 
 function hash(value: Uint8Array | string): string {
   return createHash("sha256").update(value).digest("hex");
-}
-
-function deliveryBundleBlobReader(bundle: DeliveryBundle): {
-  read(ref: NonNullable<ApplyOperation["blobRef"]>): Promise<Uint8Array>;
-} {
-  const blobsByHash = new Map(bundle.manifest.blobs.map((blob) => {
-    const bytes = bundle.blobs[blob.path];
-    if (bytes === undefined || bytes.byteLength !== blob.size || hash(bytes) !== blob.sha256) {
-      throw new Error(`DELIVERY_BUNDLE_BLOB_INVALID: ${blob.path}`);
-    }
-    return [`${blob.sha256}:${String(blob.size)}`, bytes] as const;
-  }));
-  return {
-    read: (ref): Promise<Uint8Array> => {
-      const bytes = blobsByHash.get(`${ref.sha256.replace(/^sha256:/u, "")}:${String(ref.size)}`);
-      if (bytes === undefined) {
-        return Promise.reject(new Error(`DELIVERY_BUNDLE_BLOB_MISSING: ${ref.relativePath}`));
-      }
-      return Promise.resolve(bytes);
-    }
-  };
 }
 
 function nextState(
@@ -370,8 +343,24 @@ class StateStorePublishAttemptStore implements PublishAttemptStore {
 
 export interface PublishCoordinatorResult {
   service: PublishServiceResult;
-  deliveryBundle: RunRecord["deliveryBundle"];
   phase: RunRecord["phase"];
+}
+
+interface GitPublishSource {
+  candidate: Candidate;
+  resultSnapshot: GitWorkspaceSnapshot;
+  operations: ApplyOperation[];
+  gitDirectory: string;
+}
+
+function manualPublishRequested(run: RunRecord): boolean {
+  const marker = run.recovery?.manualPublishConfirmation;
+  if (typeof marker !== "object" || marker === null || Array.isArray(marker)) return false;
+  const value = marker as Record<string, unknown>;
+  return value.status === "REQUESTED" &&
+    value.revision === run.revision &&
+    new Set(["PUBLISH_ADAPTER_UNAVAILABLE", "PUBLISH_PRECHECK_CONFLICT"])
+      .has(typeof value.pauseCode === "string" ? value.pauseCode : "");
 }
 
 export class PublishCoordinator {
@@ -379,7 +368,6 @@ export class PublishCoordinator {
 
   public constructor(
     private readonly store: StateStore,
-    private readonly signingKeyPath: string,
     private readonly adapter?: WorkspaceApplyAdapter
   ) {
     this.mutations = new ProjectMutationExecutor(store);
@@ -396,7 +384,7 @@ export class PublishCoordinator {
       run.candidate === undefined ||
       run.review === undefined ||
       run.leaderDecision === undefined ||
-      (run.workspace === undefined && run.deliveryBundle === undefined)
+      run.gitWorkspace === undefined
     ) {
       throw new Error("PUBLISH_EVIDENCE_NOT_READY");
     }
@@ -412,9 +400,7 @@ export class PublishCoordinator {
       new TextDecoder().decode(await this.store.readArtifact(run.baseline))
     ) as GitWorkspaceSnapshot;
     const baselineHash = baseline.snapshotHash;
-    const candidate = JSON.parse(
-      new TextDecoder().decode(await this.store.readArtifact(run.candidate))
-    ) as Candidate;
+    const source = await this.gitSource(run);
     const reviewDecision = JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(run.review))
     ) as Record<string, unknown>;
@@ -428,11 +414,11 @@ export class PublishCoordinator {
     const allowedLeaderDecisions = (
       reviewDecision.gate as { allowedLeaderDecisions?: unknown } | undefined
     )?.allowedLeaderDecisions;
-    const candidateHash = getCandidateHash(candidate);
+    const candidateHash = getCandidateHash(source.candidate);
     if (
       manifest.revision !== run.revision ||
-      !verifyCandidate(candidate) ||
-      getCandidateBaselineHash(candidate) !== baselineHash ||
+      !verifyCandidate(source.candidate) ||
+      getCandidateBaselineHash(source.candidate) !== baselineHash ||
       !semanticHash(reviewDecision, "reviewHash") ||
       reviewHistoryEntry?.taskSourceHash !== reviewDecision.taskSourceHash ||
       reviewHistoryEntry?.candidateHash !== candidateHash ||
@@ -446,74 +432,17 @@ export class PublishCoordinator {
     ) {
       throw new Error("PUBLISH_EVIDENCE_BINDING_INVALID");
     }
-    let bundleArtifact = run.deliveryBundle;
-    let durableBundle: DeliveryBundle;
-    if (bundleArtifact === undefined) {
-      if (run.workspace === undefined) throw new Error("PUBLISH_WORKSPACE_MISSING");
-      const workspaceRoot = resolve(this.store.dataDirectory, run.workspace.relativePath);
-      const { operations, blobs } = await this.operations(
-        candidate,
-        workspaceRoot,
-        jobId,
-        run.revision,
-        this.adapter !== undefined
-      );
-      const patch = await this.deliveryPatch(run, baseline);
-      const bundle = createDeliveryBundle({
-        revision: run.revision,
-        taskManifestHash: run.taskManifest.sha256,
-        baselineHash,
+    if (manualPublishRequested(run)) {
+      return this.confirmManualPublish(
+        state,
+        run,
+        identity,
+        source.operations,
         candidateHash,
-        reviewHash,
-        operations,
-        patch,
-        blobs
-      });
-      const signingKey = await loadOrCreateInstallationSigningKey(this.signingKeyPath);
-      const envelope = requireExternalBundleSignature(bundle.canonicalManifestHash, signingKey);
-      const serialized = serializeDeliveryBundle(
-        bundle,
-        envelope,
-        exportSigningPublicKey(signingKey.publicKey)
+        reviewHash
       );
-      const bundleCommit = await this.mutations.mutate(
-        {
-          requestId: `delivery-bundle:${jobId}:r${String(run.revision)}:${bundle.canonicalManifestHash}`,
-          payload: { bundleHash: bundle.canonicalManifestHash, serializedHash: hash(serialized) },
-          expectedJobId: jobId,
-          ...identityGuards(identity),
-          expectedPhases: ["READY_TO_PUBLISH"]
-        },
-        async (current) => {
-          const active = current.runs[jobId];
-          if (active === undefined) throw new Error("PUBLISH_RUN_MISSING");
-          const currentFailure = await verifyRunArtifacts(this.store, active);
-          if (currentFailure !== undefined) {
-            throw new Error(`PUBLISH_ARTIFACT_INTEGRITY_BLOCKED:${currentFailure}`);
-          }
-          const artifact = await this.store.writeArtifact(
-            `runs/${jobId}/revision-${String(run.revision)}/delivery-bundles/${bundle.canonicalManifestHash}/delivery-bundle.json`,
-            serialized
-          );
-          return {
-            nextState: nextState(current, jobId, (latest) => ({
-              ...latest,
-              deliveryBundle: artifact
-            })),
-            response: { bundleHash: bundle.canonicalManifestHash, artifact }
-          };
-        }
-      );
-      bundleArtifact = bundleCommit.response.artifact;
-      durableBundle = parseSerializedDeliveryBundle(
-        await this.store.readArtifact(bundleArtifact)
-      ).bundle;
-    } else {
-      durableBundle = parseSerializedDeliveryBundle(
-        await this.store.readArtifact(bundleArtifact)
-      ).bundle;
     }
-    const publishOperations = durableBundle.manifest.operations;
+
     const attemptStore = new StateStorePublishAttemptStore(
       this.store,
       jobId,
@@ -523,8 +452,7 @@ export class PublishCoordinator {
         jobId,
         run,
         identity,
-        bundleArtifact,
-        publishOperations
+        source.operations
       )
     );
     const service = await new PublishService(attemptStore).publish(
@@ -536,10 +464,13 @@ export class PublishCoordinator {
         candidateHash,
         reviewHash
       },
-      publishOperations,
+      source.operations,
       this.adapter ?? new FilesystemWorkspaceApplyAdapter(
         state.canonicalProjectRoot,
-        deliveryBundleBlobReader(durableBundle),
+        gitPublishBlobReader({
+          dataDirectory: this.store.dataDirectory,
+          gitDirectory: source.gitDirectory
+        }),
         resolve(this.store.dataDirectory, "publish-results")
       )
     );
@@ -550,7 +481,7 @@ export class PublishCoordinator {
         payload: service,
         expectedJobId: jobId,
         ...identityGuards(identity),
-        expectedPhases: service.status === "BUNDLE_READY" ||
+        expectedPhases: service.status === "MANUAL_PUBLISH_REQUIRED" ||
           service.status === "PRECHECK_CONFLICT" ||
           service.status === "PUBLISH_BUSY"
           ? ["READY_TO_PUBLISH"]
@@ -559,6 +490,7 @@ export class PublishCoordinator {
       (latest) => ({
         nextState: nextState(latest, jobId, (current) => {
           const recovery = { ...current.recovery };
+          delete recovery.manualPublishConfirmation;
           if (service.status === "PRECHECK_CONFLICT") {
             recovery.publishPrecheck = {
               conflicts: service.conflicts,
@@ -569,24 +501,14 @@ export class PublishCoordinator {
           } else {
             delete recovery.publishPrecheck;
           }
+          const pause = service.status === "COMMITTED"
+            ? undefined
+            : this.pauseForService(service);
           return {
             ...current,
             phase,
             ...(Object.keys(recovery).length === 0 ? { recovery: undefined } : { recovery }),
-            ...(phase === "PAUSED"
-              ? {
-                  pause: {
-                    code: service.status === "BUNDLE_READY"
-                      ? "PUBLISH_ADAPTER_UNAVAILABLE"
-                      : service.status === "PRECHECK_CONFLICT"
-                        ? "PUBLISH_PRECHECK_CONFLICT"
-                        : service.status === "PUBLISH_BUSY"
-                          ? "PROJECT_PUBLISH_BUSY"
-                          : "PUBLISH_RECOVERY_BLOCKED",
-                    resumeActions: ["retry_publish", "export_bundle", "cancel"]
-                  }
-                }
-              : {})
+            ...(pause === undefined ? {} : { pause })
           };
         }, phase === "COMPLETED"),
         response: { phase, serviceStatus: service.status }
@@ -596,7 +518,7 @@ export class PublishCoordinator {
     if (finalRun?.phase === "COMPLETED") {
       await cleanupGitRunTemporaryState(this.store.dataDirectory, finalRun);
     }
-    return { service, deliveryBundle: bundleArtifact, phase };
+    return { service, phase };
   }
 
   public async recover(
@@ -612,48 +534,194 @@ export class PublishCoordinator {
       run.phase !== "PUBLISHING" ||
       run.publish?.operationId !== operationId ||
       run.publish.operationsHash !== expectedOperationsHash ||
-      run.deliveryBundle === undefined ||
       run.candidate === undefined ||
-      run.review === undefined
+      run.review === undefined ||
+      run.gitWorkspace === undefined
     ) {
       return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
     }
     if (await verifyRunArtifacts(this.store, run) !== undefined) {
       return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
     }
-    const durableBundle = parseSerializedDeliveryBundle(
-      await this.store.readArtifact(run.deliveryBundle)
-    ).bundle;
-    const candidate = JSON.parse(
-      new TextDecoder().decode(await this.store.readArtifact(run.candidate))
-    ) as Candidate;
-    const reviewDecision = JSON.parse(
-      new TextDecoder().decode(await this.store.readArtifact(run.review))
-    ) as Record<string, unknown>;
-    const reviewHash = reviewDecision.reviewHash;
-    const operations = durableBundle.manifest.operations;
-    const operationHash = operationsHash(operations);
-    if (
-      typeof reviewHash !== "string" ||
-      run.publish.revision !== run.revision ||
-      operationHash !== expectedOperationsHash ||
-      stableOperationId({
-        projectId: state.projectId,
-        jobId,
-        revision: run.revision,
-        candidateHash: getCandidateHash(candidate),
-        reviewHash,
-        operationsHash: operationHash
-      }) !== operationId
-    ) {
+    try {
+      const source = await this.gitSource(run);
+      const reviewDecision = JSON.parse(
+        new TextDecoder().decode(await this.store.readArtifact(run.review))
+      ) as Record<string, unknown>;
+      const reviewHash = reviewDecision.reviewHash;
+      const operationHash = operationsHash(source.operations);
+      if (
+        typeof reviewHash !== "string" ||
+        run.publish.revision !== run.revision ||
+        operationHash !== expectedOperationsHash ||
+        stableOperationId({
+          projectId: state.projectId,
+          jobId,
+          revision: run.revision,
+          candidateHash: getCandidateHash(source.candidate),
+          reviewHash,
+          operationsHash: operationHash
+        }) !== operationId
+      ) {
+        return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
+      }
+      const adapter = this.adapter ?? new FilesystemWorkspaceApplyAdapter(
+        state.canonicalProjectRoot,
+        gitPublishBlobReader({
+          dataDirectory: this.store.dataDirectory,
+          gitDirectory: source.gitDirectory
+        }),
+        resolve(this.store.dataDirectory, "publish-results")
+      );
+      return await PublishService.observeRecovery(run.publish, source.operations, adapter);
+    } catch {
       return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
     }
-    const adapter = this.adapter ?? new FilesystemWorkspaceApplyAdapter(
-      state.canonicalProjectRoot,
-      deliveryBundleBlobReader(durableBundle),
-      resolve(this.store.dataDirectory, "publish-results")
+  }
+
+  private async confirmManualPublish(
+    state: ProjectState,
+    run: RunRecord,
+    identity: PublishExecutionIdentity,
+    operations: ApplyOperation[],
+    candidateHash: string,
+    reviewHash: string
+  ): Promise<PublishCoordinatorResult> {
+    if (run.publish !== undefined) throw new Error("MANUAL_PUBLISH_ATTEMPT_ALREADY_EXISTS");
+    const confirmationRequestId = (
+      run.recovery?.manualPublishConfirmation as { requestId?: unknown } | undefined
+    )?.requestId;
+    if (typeof confirmationRequestId !== "string" || confirmationRequestId.length === 0) {
+      throw new Error("MANUAL_PUBLISH_CONFIRMATION_STALE");
+    }
+    const operationHash = operationsHash(operations);
+    const operationId = stableOperationId({
+      projectId: state.projectId,
+      jobId: run.jobId,
+      revision: run.revision,
+      candidateHash,
+      reviewHash,
+      operationsHash: operationHash
+    });
+    const committed = await this.mutations.mutate<{
+      phase: RunRecord["phase"];
+      service: PublishServiceResult;
+    }>(
+      {
+        requestId: `manual-publish-confirm:${run.jobId}:r${String(run.revision)}:${operationId}:${hash(confirmationRequestId)}`,
+        payload: { operationId, operationsHash: operationHash },
+        expectedJobId: run.jobId,
+        ...identityGuards(identity),
+        expectedPhases: ["READY_TO_PUBLISH"]
+      },
+      async (current) => {
+        await this.assertEvidenceBoundary(current, run.jobId, run, identity);
+        const active = current.runs[run.jobId];
+        if (active === undefined || !manualPublishRequested(active) || active.publish !== undefined) {
+          throw new Error("MANUAL_PUBLISH_CONFIRMATION_STALE");
+        }
+        const observation = await observeTargetState(current.canonicalProjectRoot, operations);
+        const recovery = { ...active.recovery };
+        const marker = typeof recovery.manualPublishConfirmation === "object" &&
+          recovery.manualPublishConfirmation !== null &&
+          !Array.isArray(recovery.manualPublishConfirmation)
+          ? recovery.manualPublishConfirmation as Record<string, unknown>
+          : {};
+        if (!observation.matches) {
+          const service: PublishServiceResult = {
+            status: "MANUAL_PUBLISH_REQUIRED",
+            reason: "PUBLISH_TARGET_MISMATCH",
+            conflicts: observation.conflicts
+          };
+          recovery.manualPublishConfirmation = {
+            ...marker,
+            status: "MISMATCH",
+            checkedAt: new Date().toISOString(),
+            conflicts: observation.conflicts
+          };
+          recovery.publishPrecheck = {
+            conflicts: observation.conflicts,
+            publishedCount: 0,
+            totalCount: operations.length,
+            activeWorkspaceChanged: false
+          };
+          return {
+            nextState: nextState(current, run.jobId, (latest) => ({
+              ...latest,
+              phase: "PAUSED",
+              recovery,
+              pause: {
+                code: "MANUAL_PUBLISH_TARGET_MISMATCH",
+                resumeActions: ["confirm_manual_publish", "retry_publish", "cancel"]
+              }
+            })),
+            response: { phase: "PAUSED", service }
+          };
+        }
+        const result: PublishResult = {
+          operationId,
+          operationsHash: operationHash,
+          status: "COMMITTED",
+          paths: operations.map((operation) => ({
+            path: operation.path,
+            status: "COMMITTED",
+            observedHash: operation.newHash,
+            observedMode: operation.newMode
+          }))
+        };
+        const publish: PublishAttemptRecord = {
+          operationId,
+          operationsHash: operationHash,
+          adapterId: "manual-confirmation-v1",
+          revision: run.revision,
+          status: "COMMITTED",
+          result
+        };
+        delete recovery.manualPublishConfirmation;
+        delete recovery.publishPrecheck;
+        const terminal = nextState(current, run.jobId, (latest) => ({
+          ...latest,
+          phase: "COMPLETED",
+          publish,
+          pause: undefined,
+          ...(Object.keys(recovery).length === 0 ? { recovery: undefined } : { recovery })
+        }), true);
+        const service: PublishServiceResult = { status: "COMMITTED", operationId, result };
+        return {
+          nextState: terminal.publishLease?.jobId === run.jobId
+            ? { ...terminal, publishLease: null }
+            : terminal,
+          response: { phase: "COMPLETED", service }
+        };
+      }
     );
-    return PublishService.observeRecovery(run.publish, operations, adapter);
+    const finalRun = committed.state.runs[run.jobId];
+    if (finalRun?.phase === "COMPLETED") {
+      await cleanupGitRunTemporaryState(this.store.dataDirectory, finalRun);
+    }
+    return committed.response;
+  }
+
+  private pauseForService(service: Exclude<PublishServiceResult, { status: "COMMITTED" }>): {
+    code: string;
+    resumeActions: string[];
+  } {
+    if (service.status === "MANUAL_PUBLISH_REQUIRED") {
+      return {
+        code: "PUBLISH_ADAPTER_UNAVAILABLE",
+        resumeActions: ["retry_publish", "confirm_manual_publish", "cancel"]
+      };
+    }
+    if (service.status === "PRECHECK_CONFLICT") {
+      return {
+        code: "PUBLISH_PRECHECK_CONFLICT",
+        resumeActions: ["retry_publish", "confirm_manual_publish", "cancel"]
+      };
+    }
+    if (service.status === "PUBLISH_BUSY") {
+      return { code: "PROJECT_PUBLISH_BUSY", resumeActions: ["retry_publish", "cancel"] };
+    }
+    return { code: "PUBLISH_RECOVERY_BLOCKED", resumeActions: ["inspect_recovery", "cancel"] };
   }
 
   private async assertAdapterApplyBoundary(
@@ -661,102 +729,74 @@ export class PublishCoordinator {
     jobId: string,
     expected: RunRecord,
     identity: PublishExecutionIdentity,
-    deliveryBundle: NonNullable<RunRecord["deliveryBundle"]>,
     operations: ApplyOperation[]
   ): Promise<void> {
     const active = state.runs[jobId];
     if (
       active === undefined ||
-      !identityMatches(state, jobId, identity) ||
       active.phase !== "PUBLISHING" ||
       !new Set(["PREPARED", "SUBMITTED"]).has(active.publish?.status ?? "")
     ) throw new Error("PUBLISH_APPLY_BOUNDARY_STALE");
+    await this.assertEvidenceBoundary(state, jobId, expected, identity);
+    if (active.publish?.operationsHash !== operationsHash(operations)) {
+      throw new Error("PUBLISH_APPLY_BOUNDARY_STALE");
+    }
+  }
+
+  private async assertEvidenceBoundary(
+    state: ProjectState,
+    jobId: string,
+    expected: RunRecord,
+    identity: PublishExecutionIdentity
+  ): Promise<void> {
+    const active = state.runs[jobId];
+    if (active === undefined || !identityMatches(state, jobId, identity)) {
+      throw new Error("PUBLISH_APPLY_BOUNDARY_STALE");
+    }
     const artifactFailure = await verifyRunArtifacts(this.store, active);
     if (artifactFailure !== undefined) {
       throw new Error(`PUBLISH_ARTIFACT_INTEGRITY_BLOCKED:${artifactFailure}`);
     }
     const approvedPath = active.approvedTasks?.path;
     const approvedHash = active.approvedTasks?.sourceHash;
+    const activeResult = active.gitWorkspace?.revisions[String(active.revision)]?.resultSnapshot;
+    const expectedResult = expected.gitWorkspace?.revisions[String(expected.revision)]?.resultSnapshot;
     if (
       typeof approvedPath !== "string" ||
       typeof approvedHash !== "string" ||
       hash(await readFile(approvedPath)) !== approvedHash.replace(/^sha256:/u, "") ||
       active.taskManifest.sha256 !== expected.taskManifest.sha256 ||
+      active.baseline?.sha256 !== expected.baseline?.sha256 ||
       active.candidate?.sha256 !== expected.candidate?.sha256 ||
       active.review?.sha256 !== expected.review?.sha256 ||
       active.leaderDecision?.sha256 !== expected.leaderDecision?.sha256 ||
-      active.deliveryBundle?.sha256 !== deliveryBundle.sha256 ||
-      active.publish?.operationsHash !== operationsHash(operations)
+      active.gitWorkspace?.objectDirectory !== expected.gitWorkspace?.objectDirectory ||
+      activeResult?.sha256 !== expectedResult?.sha256
     ) {
       throw new Error("PUBLISH_APPLY_BOUNDARY_STALE");
     }
   }
 
-  private async operations(
-    candidate: Candidate,
-    workspaceRoot: string,
-    jobId: string,
-    revision: number,
-    materializeBlobs: boolean
-  ): Promise<{ operations: ApplyOperation[]; blobs: Record<string, Uint8Array> }> {
-    const blobs: Record<string, Uint8Array> = {};
-    const operations: ApplyOperation[] = [];
-    for (const operation of candidate.operations) {
-      const oldEntry = "oldEntry" in operation ? operation.oldEntry : undefined;
-      const newEntry = "newEntry" in operation ? operation.newEntry : undefined;
-      if (oldEntry?.kind === "SYMLINK" || newEntry?.kind === "SYMLINK") {
-        throw new Error(`PUBLISH_SYMLINK_OPERATION_UNSUPPORTED: ${operation.path}`);
-      }
-      let blobRef: ApplyOperation["blobRef"] = null;
-      if (newEntry !== undefined) {
-        const bytes = await readFile(resolve(workspaceRoot, operation.path));
-        if (hash(bytes) !== newEntry.sha256) throw new Error("PUBLISH_CANDIDATE_BLOB_DRIFT");
-        blobs[operation.path] = bytes;
-        blobRef = materializeBlobs
-          ? await this.store.writeArtifact(
-              `runs/${jobId}/revision-${String(revision)}/publish-blobs/${newEntry.sha256}`,
-              bytes
-            )
-          : {
-              relativePath: `delivery-bundle/blobs/${newEntry.sha256}`,
-              sha256: newEntry.sha256,
-              size: bytes.byteLength
-            };
-      }
-      operations.push({
-        path: operation.path,
-        type: operation.kind,
-        expectedOldKind: oldEntry === undefined ? "ABSENT" : "FILE",
-        expectedOldHash: oldEntry?.sha256 ?? null,
-        expectedOldMode: oldEntry?.mode ?? null,
-        newHash: newEntry?.sha256 ?? null,
-        newMode: newEntry?.mode ?? null,
-        blobRef
-      });
-    }
-    return { operations, blobs };
-  }
-
-  private async deliveryPatch(
-    run: RunRecord,
-    baseline: GitWorkspaceSnapshot
-  ): Promise<string> {
+  private async gitSource(run: RunRecord): Promise<GitPublishSource> {
     const revisionWorkspace = run.gitWorkspace?.revisions[String(run.revision)];
-    if (revisionWorkspace?.cumulativePatch !== undefined) {
-      return new TextDecoder().decode(
-        await this.store.readArtifact(revisionWorkspace.cumulativePatch)
-      );
+    if (
+      run.candidate === undefined ||
+      run.gitWorkspace === undefined ||
+      revisionWorkspace?.resultSnapshot === undefined
+    ) {
+      throw new Error("PUBLISH_GIT_SOURCE_MISSING");
     }
-    if (run.gitWorkspace === undefined || revisionWorkspace?.resultSnapshot === undefined) {
-      throw new Error("PUBLISH_GIT_PATCH_INPUT_MISSING");
-    }
-    const result = JSON.parse(
+    const candidate = JSON.parse(
+      new TextDecoder().decode(await this.store.readArtifact(run.candidate))
+    ) as Candidate;
+    const resultSnapshot = JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(revisionWorkspace.resultSnapshot))
     ) as GitWorkspaceSnapshot;
-    return new TextDecoder().decode(await buildGitTreePatch({
-      runGitDirectory: dirname(resolve(this.store.dataDirectory, run.gitWorkspace.objectDirectory)),
-      baseTreeId: baseline.treeId,
-      resultTreeId: result.treeId
-    }));
+    return {
+      candidate,
+      resultSnapshot,
+      operations: gitPublishOperations(candidate, resultSnapshot),
+      gitDirectory: dirname(resolve(this.store.dataDirectory, run.gitWorkspace.objectDirectory))
+    };
   }
 }

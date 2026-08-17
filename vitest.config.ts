@@ -11,7 +11,7 @@ export default defineConfig({
       },
       {
         find: "@smartflow/host-skill",
-        replacement: resolve(import.meta.dirname, "apps/host-skill/src/index.ts")
+        replacement: resolve(import.meta.dirname, "packages/host-skill/src/index.ts")
       },
       {
         find: "@smartflow/mcp-server",
@@ -24,7 +24,7 @@ export default defineConfig({
     ]
   },
   test: {
-    include: ["packages/**/*.test.ts", "apps/**/*.test.ts", "tests/**/*.test.ts"],
+    include: ["tests/**/*.test.ts"],
     testTimeout: 30_000,
     hookTimeout: 30_000,
     restoreMocks: true

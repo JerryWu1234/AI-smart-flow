@@ -53,10 +53,12 @@ Relative, absolute, and symlink aliases that identify the same file resolve to t
 
 ## Publish serialization
 
-1. A mechanically accepted Run obtains the Project Publish lease before preflight.
-2. Preflight snapshots the current original project and checks only cumulative Candidate paths against immutable Run Baseline.
-3. Strict atomic batch CAS commits all paths or none. Local preflight batch guarantees zero writes for detected conflicts but may return PARTIAL/UNKNOWN after writes begin.
-4. The lease is released only after Publish is durably reconciled.
+1. A mechanically accepted Run reconstructs sorted `ApplyOperation[]` only from its bound Candidate, the same Revision's immutable `REVISION_RESULT`, and that Run's Git object store. Automatic Publish and recovery never read bytes from the mutable worktree.
+2. `PublishService` binds a stable operation ID to project, job, Revision, Candidate, Review, and operations hashes, probes adapter capability, obtains the Project Publish lease, and preflights every cumulative Candidate path against immutable Run Baseline expectations.
+3. Adapter unavailability and `PRECHECK_CONFLICT` pause before a `PREPARED` attempt or project write. Only the owning Host's publish `USER_INPUT_REQUIRED` may disclose the reviewed Candidate `worktreePath` and offer `confirm_manual_publish`; status, result, other Hosts, and non-publish pauses do not receive it.
+4. After the user externally applies the reviewed result, manual confirmation performs a read-only observation of every target. Only an exact kind/hash/mode match records a durable `manual-confirmation-v1` `COMMITTED` result; a mismatch remains `MANUAL_PUBLISH_TARGET_MISMATCH`.
+5. Strict atomic batch CAS commits all paths or none. Apply creates durable `PREPARED`/`SUBMITTED`/per-path/result evidence, and the lease is released only after Publish is durably reconciled.
+6. Recovery reconstructs the same Git-derived operations and queries the same stable identity. `PARTIAL`, `UNKNOWN`, identity mismatch, or an unqueryable in-flight result remains `PUBLISH_RECOVERY_BLOCKED`; manual confirmation and ordinary retry cannot bypass it.
 
 Overlapping Candidate paths make the later Run return `PRECHECK_CONFLICT` with zero writes. Non-overlapping Candidates may publish sequentially.
 

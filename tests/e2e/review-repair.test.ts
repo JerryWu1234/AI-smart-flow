@@ -10,7 +10,7 @@ import {
   compileTaskManifest,
   type TaskManifest
 } from "@smartflow/task-manifest";
-import { createTasksSource } from "../../packages/task-manifest/src/test-fixture.js";
+import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
 
 const baseOptions = {
   projectId: "project-1",

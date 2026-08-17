@@ -19,7 +19,7 @@ import type {
   RunPhase
 } from "@smartflow/protocol";
 import { StateStore } from "@smartflow/state-store";
-import { createTasksSource } from "../../packages/task-manifest/src/test-fixture.js";
+import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
 import { createLifecycleStore } from "../crash/recovery-test-fixture.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 
@@ -864,7 +864,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       phase: "PAUSED" as const,
       pause: {
         code: "PUBLISH_ADAPTER_UNAVAILABLE",
-        resumeActions: ["retry_publish", "export_bundle", "cancel"]
+        resumeActions: ["retry_publish", "confirm_manual_publish", "cancel"]
       }
     };
     delete corrupted.candidate;

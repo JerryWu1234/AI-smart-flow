@@ -29,7 +29,7 @@ export const DATA_DETAILS = Object.freeze({
       field("approvedAt", "ISO datetime", true, "2026-08-12T09:42:00Z", "记录用户批准发生的审计时间。")
     ],
     sources: [
-      "apps/host-skill/src/approval.ts#readStableApprovedTasks",
+      "packages/host-skill/src/approval.ts#readStableApprovedTasks",
       "apps/daemon/src/approved-source.ts#observeApprovedSource"
     ]
   }),
@@ -61,7 +61,7 @@ export const DATA_DETAILS = Object.freeze({
     category: "durable-state",
     producer: "Daemon domain coordinators",
     consumer: "StateStore / recovery / status / result",
-    summary: "schema v5 的持久化运行真相，记录 phase、revision、attempt、review、repair 与 publish。",
+    summary: "schema v6 的持久化运行真相，记录 phase、revision、attempt、review、repair 与 publish。",
     purpose: "进程重启后不依赖内存猜测，所有推进都以 CAS 与 fence 为边界。",
     transformation: "domain mutation → expected stateVersion/fence 校验 → 原子替换 RunRecord",
     lifecycle: "从 PREPARING 创建，直到 COMPLETED、CANCELED 或 schema 定义的 FAILED 终态后仍保留证据。",
@@ -84,12 +84,12 @@ export const DATA_DETAILS = Object.freeze({
     category: "artifact",
     producer: "Workspace package / WorkerRunner",
     consumer: "Worker, Candidate builder, PublishCoordinator",
-    summary: "原项目基线或上一 Revision 结果的内容寻址快照，以及其私有可写物化目录。",
-    purpose: "让 Worker 只修改隔离副本，同时让每轮输入和最终累计差异可验证。",
-    transformation: "受控 Git 树 → snapshot Artifact → Daemon 私有 worktree",
-    lifecycle: "快照作为 Artifact 保留；runtime worktree 可在终态后清理。",
+    summary: "原项目基线或某一 Revision 的不可变输入/结果快照，以及其私有可写物化目录。",
+    purpose: "让 Worker 只修改隔离副本，并让 Publish 绑定当前 revision 的 immutable REVISION_RESULT snapshot。",
+    transformation: "受控 Git 树与 object store → snapshot Artifact → Daemon 私有 worktree 或 Publish source",
+    lifecycle: "快照作为 Artifact 保留；runtime worktree 与 run Git object store 可在终态后清理。",
     fields: [
-      field("snapshotKind", "enum", true, "RUN_BASELINE", "区分初始基线和 Revision 结果。"),
+      field("snapshotKind", "enum", true, "REVISION_RESULT", "区分 RUN_BASELINE、REVISION_INPUT 与 Publish 必须绑定的 REVISION_RESULT。"),
       field("treeId", "git object id", true, "18a4…", "目录树内容身份。"),
       field("snapshotHash", "sha256", true, "sha256:81c0…", "绑定规范化快照元数据。"),
       field("workspace.relativePath", "relative path", true, "workspaces/r2", "Daemon 数据目录下的私有工作区。"),
@@ -125,27 +125,28 @@ export const DATA_DETAILS = Object.freeze({
     ]
   }),
 
-  "data.candidate.bundle": detail("data.candidate.bundle", {
+  "data.candidate.artifact": detail("data.candidate.artifact", {
     objectName: "GitCandidateV3",
     category: "artifact",
     producer: "WorkerRunner.captureCandidate",
     consumer: "Reviewer / ReviewCoordinator / PublishCoordinator",
-    summary: "从 Run 初始基线到当前 Revision 结果的精简、累计、不可变交付候选。",
-    purpose: "确保复审与发布看到完整最终结果，同时不重复保存 snapshot 已有的 tree/blob/mode 证据。",
+    summary: "从 Run 初始基线到当前 Revision 结果的精简、累计、不可变候选。",
+    purpose: "确保复审与发布看到同一完整结果，并以 resultSnapshotHash 绑定当前 revision 的不可变结果快照。",
     transformation: "baseline/input/result snapshot hashes + cumulative operations → candidateHash",
-    lifecycle: "每个 Revision 冻结新 Candidate；patch 在 Publish 时按需生成，不作为 Worker Artifact 保存。",
+    lifecycle: "每个 Revision 冻结新 Candidate；Publish 直接校验并转换其操作，当前证据链由 Candidate、snapshot 与 Git objects 构成。",
     fields: [
       field("schemaVersion", "literal 3", true, "3", "当前最小 Candidate 格式；读取仍兼容旧 v2。"),
-      field("revision", "positive integer", true, "2", "Candidate 所属 Revision。"),
+      field("revision", "positive integer", true, "2", "Candidate 所属 Revision，必须等于 REVISION_RESULT revision。"),
       field("runBaselineSnapshotHash", "sha256", true, "sha256:81c0…", "绑定 Run 初始基线。"),
       field("inputSnapshotHash", "sha256", true, "sha256:18b2…", "绑定本 Revision 的输入。"),
-      field("resultSnapshotHash", "sha256", true, "sha256:53ad…", "绑定 Worker 冻结结果。"),
+      field("resultSnapshotHash", "sha256", true, "sha256:53ad…", "必须精确匹配 immutable REVISION_RESULT snapshotHash。"),
       field("operations[]", "path operation[]", true, "MODIFY src/app.ts", "从 baseline 到 result 的累计内容哈希与 mode 操作。"),
       field("candidateHash", "sha256", true, "sha256:92af…", "以上规范化字段的内容身份。")
     ],
     sources: [
       "apps/daemon/src/worker-runner.ts#WorkerRunner.captureCandidate",
-      "packages/workspace/src/candidate-builder.ts#buildGitCandidate"
+      "packages/workspace/src/candidate-builder.ts#buildGitCandidate",
+      "apps/daemon/src/git-publish-source.ts#gitPublishOperations"
     ]
   }),
 
@@ -266,67 +267,123 @@ export const DATA_DETAILS = Object.freeze({
     category: "durable-state",
     producer: "Daemon boundary coordinators",
     consumer: "Host / smartflow_review_turn / smartflow_resume",
-    summary: "无法安全自动推进时的明确原因、证据和允许动作。",
-    purpose: "未知、冲突、越界或额度耗尽永远不会被猜成成功。",
-    transformation: "typed failure → PAUSED + code + resumeActions + optional HostTurn",
-    lifecycle: "用户选择合法恢复动作、取消，或恢复条件被证明后清除。",
+    summary: "无法安全自动推进时的明确原因、证据、允许动作，以及发布暂停所需的受控 Candidate worktree 路径。",
+    purpose: "未知、冲突、越界或额度耗尽不会被猜成成功；人工发布也只能在 owning Host 的合法 continuation 中确认。",
+    transformation: "typed failure → PAUSED + code + resumeActions + optional HostTurn/worktreePath",
+    lifecycle: "用户选择合法恢复动作、取消，或恢复条件被证明后清除；检查动作只读。",
     fields: [
-      field("code", "pause code", true, "AUTOMATIC_REPAIR_LIMIT", "机器可判定的暂停原因。"),
-      field("message", "string", true, "15 automatic repairs consumed", "供用户理解的具体上下文。"),
-      field("resumeActions[]", "action[]", true, "['resume_review_decision', 'cancel']", "当前状态唯一允许的可变动作。"),
+      field("code", "pause code", true, "PUBLISH_PRECHECK_CONFLICT", "机器可判定的暂停原因。"),
+      field("message", "string", true, "Publishing requires user attention", "供用户理解的具体上下文。"),
+      field("resumeActions[]", "action[]", true, "['retry_publish', 'confirm_manual_publish', 'cancel']", "当前状态唯一允许的可变动作。"),
+      field("worktreePath", "absolute path", false, "/daemon-data/.../workspaces/r2", "仅发布相关 USER_INPUT_REQUIRED 可向 owning Host 披露的已审核 Candidate worktree；不是原项目或 StateStore 路径。"),
       field("hostTurn.stage", "AWAITING_USER_INPUT", false, "AWAITING_USER_INPUT", "composite review turn 拥有该暂停时的 continuation。"),
-      field("lastError.artifacts[]", "ArtifactRef[]", false, "[publish-result.json]", "检查和恢复所需的证据引用。")
+      field("result.publishPrecheck", "precheck projection", false, "{ publishedCount: 0, conflicts: [...] }", "让 Host 检查零写入冲突或人工确认不匹配事实。")
     ],
     sources: [
-      "packages/state-store/src/schema.ts#pauseRecordSchema",
-      "apps/daemon/src/host-turn-coordinator.ts#HostTurnCoordinator.requireUserInput"
+      "apps/daemon/src/host-turn-coordinator.ts#HostTurnCoordinator.userInputRequired",
+      "apps/daemon/src/project-runtime.ts#ProjectRuntime.result",
+      "packages/state-store/src/schema.ts#pauseRecordSchema"
     ]
   }),
 
-  "data.publish.bundle": detail("data.publish.bundle", {
-    objectName: "DeliveryBundle / ApplyOperation[] / PublishAttempt",
-    category: "artifact-and-state",
-    producer: "PublishCoordinator",
-    consumer: "PublishService / workspace apply adapter",
-    summary: "把已接受 Candidate 转换为唯一自包含的签名交付包和带 expected-old 条件的操作。",
-    purpose: "任何路径冲突都在第一笔写入前发现；Bundle 同时为默认 apply 与崩溃恢复提供冻结内容。",
-    transformation: "accepted Candidate + bound Git trees + Review → on-demand patch + operations + blobs → signed Bundle",
-    lifecycle: "Bundle 在 Publish 前持久化并在终态保留；默认 adapter 不再创建平行 publish-blobs Artifact。",
+  "data.publish.operations-attempt": detail("data.publish.operations-attempt", {
+    objectName: "ApplyOperation[] / PublishAttemptRecord",
+    category: "derived-and-durable-state",
+    producer: "gitPublishOperations + PublishService",
+    consumer: "WorkspaceApplyAdapter / Publish recovery",
+    summary: "由绑定 Candidate、immutable REVISION_RESULT snapshot 与 Run Git object store 确定性派生的发布操作和持久化尝试身份。",
+    purpose: "用 expected-old CAS 保护每条路径，并让正常发布与恢复重建完全相同的操作、operationId 和 blob 内容。",
+    transformation: "Candidate + REVISION_RESULT entries + Git blobs → ApplyOperation[] → operationsHash + stable operationId → PublishAttemptRecord",
+    lifecycle: "操作可由不可变证据重建；PREPARED/SUBMITTED/结果 journal 持久化，Git blobRef 在终态清理前保持可读。",
     fields: [
-      field("operationId", "identifier", true, "publish-f14c", "重试与恢复对账使用的稳定身份。"),
+      field("operations[].expectedOldKind", "ABSENT | FILE", true, "FILE", "区分创建与替换/删除的 CAS 前置状态。"),
+      field("operations[].expectedOldHash", "sha256 | null", true, "sha256:old…", "全路径 preflight 的旧内容条件。"),
+      field("operations[].expectedOldMode", "file mode | null", true, "420", "同时保护可执行位等 mode；数值 420 对应 0644。"),
+      field("operations[].newHash", "sha256 | null", true, "sha256:new…", "目标内容；删除操作为 null。"),
+      field("operations[].newMode", "file mode | null", true, "420", "目标 mode；删除操作为 null。"),
+      field("operations[].blobRef", "ArtifactRef | null", true, "git-object-store/blobs/<blobId>", "新增/修改内容指向 Run Git object store，并在读取时校验 path、hash 与 size。"),
       field("operationsHash", "sha256", true, "sha256:770e…", "绑定完整有序操作集合。"),
-      field("operations[].expectedOldHash", "sha256 | null", true, "sha256:old…", "全路径 preflight 的 CAS 前置内容。"),
-      field("operations[].expectedOldMode", "file mode | null", true, "100644", "同时保护权限位。"),
-      field("bundle.patchHash", "sha256", true, "sha256:4c1d…", "绑定从 baseline/result trees 临时生成的累计 patch。"),
-      field("bundle.blobs[]", "content-addressed bytes", true, "src/app.ts → sha256:new…", "默认 adapter 与恢复直接读取的最终文件内容。"),
-      field("status", "publish status", true, "PREPARED", "当前 durable 发布阶段。")
+      field("operationId", "identifier", true, "publish-f14c", "由 project/job/revision/Candidate/Review/operationsHash 稳定派生，连接 lease、apply、journal 与 recovery。"),
+      field("status", "PREPARED | SUBMITTED | COMMITTED | CONFLICT | UNKNOWN", true, "PREPARED", "当前 durable 发布尝试状态。")
     ],
     sources: [
+      "apps/daemon/src/git-publish-source.ts#gitPublishOperations",
+      "apps/daemon/src/git-publish-source.ts#gitPublishBlobReader",
+      "packages/publish/src/publish-service.ts#PublishService.publish",
+      "apps/daemon/src/publish-coordinator.ts#StateStorePublishAttemptStore"
+    ]
+  }),
+
+  "data.publish.precheck": detail("data.publish.precheck", {
+    objectName: "PublishServiceResult.PRECHECK_CONFLICT / publishPrecheck",
+    category: "derived-state",
+    producer: "PublishService + PublishCoordinator",
+    consumer: "Host / ProjectRuntime.result",
+    summary: "第一笔 SmartFlow 写入前对全部 Candidate target paths 的冲突观察。",
+    purpose: "证明冲突分支保持零写入，并给用户明确的路径事实用于重试或人工合并。",
+    transformation: "ApplyOperation[] + original project observation → conflicts[] + 0/N projection",
+    lifecycle: "PUBLISH_PRECHECK_CONFLICT 时写入 recovery.publishPrecheck；重试、成功或新的非冲突结果会清除。",
+    fields: [
+      field("status", "literal PRECHECK_CONFLICT", true, "PRECHECK_CONFLICT", "区分 apply 后的 PublishResult。"),
+      field("conflicts[]", "PreflightConflict[]", true, "[{ path: 'src/app.ts', reason: 'HASH_MISMATCH' }]", "列出未满足 expected-old kind/hash/mode 的所有路径。"),
+      field("publishedCount", "literal 0", true, "0", "确认没有 Candidate operation 被 SmartFlow 应用。"),
+      field("totalCount", "non-negative integer", true, "7", "本次派生操作总数。"),
+      field("activeWorkspaceChanged", "literal false", true, "false", "明确原项目未被该 SmartFlow publish 尝试改变。")
+    ],
+    sources: [
+      "packages/publish/src/publish-service.ts#PublishService.publish",
       "apps/daemon/src/publish-coordinator.ts#PublishCoordinator.publish",
-      "packages/publish/src/preflight.ts#preflightOperations",
-      "packages/publish/src/publish-service.ts#PublishService.publish"
+      "apps/daemon/src/project-runtime.ts#ProjectRuntime.result"
     ]
   }),
 
   "data.publish.result": detail("data.publish.result", {
-    objectName: "PublishResult",
+    objectName: "PublishResult / publishOutcome",
     category: "side-effect-receipt",
-    producer: "Workspace apply adapter",
-    consumer: "PublishService / RecoveryManager",
-    summary: "逐路径写入或对账的最终回执。",
-    purpose: "只有全部路径的 hash 与 mode 可证明匹配，Run 才能进入 COMPLETED。",
-    transformation: "operationId + path receipts → COMMITTED | CONFLICT | PARTIAL | UNKNOWN",
-    lifecycle: "COMMITTED 进入终态；CONFLICT/PARTIAL/UNKNOWN 进入 PAUSED 或 recovery reconcile。",
+    producer: "Workspace apply adapter or manual target observation",
+    consumer: "PublishService / PublishCoordinator / Host",
+    summary: "与稳定操作身份绑定的逐路径最终观察回执。",
+    purpose: "只有路径集合、status、hash 与 mode 全部精确匹配派生操作，Run 才能进入 COMPLETED。",
+    transformation: "operationId + operationsHash + path receipts → COMMITTED | CONFLICT | PARTIAL | UNKNOWN",
+    lifecycle: "完整 COMMITTED 进入终态；CONFLICT/PARTIAL/UNKNOWN 或无法查询的结果保持 PUBLISH_RECOVERY_BLOCKED。",
     fields: [
-      field("status", "publish result status", true, "COMMITTED", "发布是否已被完全证明。"),
-      field("operationId", "identifier", true, "publish-f14c", "必须与 durable Attempt 一致。"),
-      field("publishedCount", "non-negative integer", true, "7", "成功验证的路径数；precheck conflict 必须为 0。"),
-      field("paths[]", "path receipt[]", true, "[{ path: 'src/app.ts', status: 'APPLIED' }]", "逐路径最终 hash 与 mode 证据。"),
-      field("conflicts[]", "conflict[]", false, "[]", "old hash/mode/absence 不匹配的路径。")
+      field("operationId", "identifier", true, "publish-f14c", "必须与 durable Attempt 和 adapter journal 一致。"),
+      field("operationsHash", "sha256", true, "sha256:770e…", "必须与本次 ApplyOperation[] 一致。"),
+      field("status", "COMMITTED | CONFLICT | PARTIAL | UNKNOWN", true, "COMMITTED", "adapter 的批次结果；只有完整 COMMITTED 可成功。"),
+      field("paths[]", "path receipt[]", true, "[{ path: 'src/app.ts', status: 'COMMITTED', observedHash: 'sha256:new…', observedMode: 420 }]", "每个 expected operation 恰好一个回执，不得重复或缺失。"),
+      field("paths[].status", "COMMITTED | CONFLICT | UNRESOLVED", true, "COMMITTED", "单路径是否可证明达到目标。"),
+      field("paths[].observedHash", "sha256 | null", true, "sha256:new…", "必须等于 operation.newHash。"),
+      field("paths[].observedMode", "file mode | null", true, "420", "必须等于 operation.newMode。")
     ],
     sources: [
       "packages/publish/src/publish-service.ts#PublishService.finish",
-      "apps/daemon/src/recovery-manager.ts#RecoveryManager.recoverPublish"
+      "packages/publish/src/publish-service.ts#PublishService.observeRecovery",
+      "apps/daemon/src/publish-coordinator.ts#PublishCoordinator.confirmManualPublish"
+    ]
+  }),
+
+  "data.publish.manual-confirmation": detail("data.publish.manual-confirmation", {
+    objectName: "ManualPublishConfirmation / target-state observation",
+    category: "message-and-durable-state",
+    producer: "Owning Host + ProjectRuntime.resume",
+    consumer: "PublishCoordinator.confirmManualPublish",
+    summary: "用户从已审核 worktree 人工合并到原项目后，请求 SmartFlow 只读确认所有 Candidate target operations。",
+    purpose: "在 adapter 不可用或零写入 precheck conflict 后允许人工落地，但绝不把用户声明当作成功证据。",
+    transformation: "USER_INPUT_REQUIRED worktreePath + external merge + confirm_manual_publish → observeTargetState → synthetic COMMITTED receipt or mismatch pause",
+    lifecycle: "REQUESTED marker 绑定 revision 与原 pauseCode；匹配后清除并写 manual-confirmation-v1 result，不匹配则保存 MISMATCH/conflicts 后继续 PAUSED。",
+    fields: [
+      field("worktreePath", "absolute path", true, "/daemon-data/.../workspaces/r2", "owning Host 用于读取已审核 Candidate 的受控路径。"),
+      field("action", "literal confirm_manual_publish", true, "confirm_manual_publish", "请求观察目标，不授权 SmartFlow 写入。"),
+      field("marker.status", "REQUESTED | MISMATCH", true, "REQUESTED", "确认请求及最近一次不匹配结论。"),
+      field("marker.revision", "positive integer", true, "2", "阻止旧 revision 的确认作用于新 Candidate。"),
+      field("marker.pauseCode", "PUBLISH_ADAPTER_UNAVAILABLE | PUBLISH_PRECHECK_CONFLICT", true, "PUBLISH_PRECHECK_CONFLICT", "保留人工流程的合法来源，即使上一轮已是 target mismatch。"),
+      field("observation.matches", "boolean", true, "true", "只有全部 target path 的 kind/hash/mode 精确匹配才为 true。"),
+      field("publish.adapterId", "literal manual-confirmation-v1", false, "manual-confirmation-v1", "精确匹配后合成的 committed attempt 来源。")
+    ],
+    sources: [
+      "apps/daemon/src/host-turn-coordinator.ts#HostTurnCoordinator.userInputRequired",
+      "apps/daemon/src/project-runtime.ts#ProjectRuntime.resume",
+      "apps/daemon/src/publish-coordinator.ts#PublishCoordinator.confirmManualPublish"
     ]
   }),
 
@@ -379,16 +436,18 @@ export const DATA_DETAILS = Object.freeze({
     category: "message",
     producer: "ProjectRuntime.result / HostTurnCoordinator.advance",
     consumer: "Host",
-    summary: "终态 Run 的规范化结果，以及 review_turn 的 DONE 包装。",
-    purpose: "区分 durable phase=COMPLETED 与协议 output.kind=DONE，避免把输出误画成新 RunPhase。",
-    transformation: "terminal RunRecord + artifacts → canonical ResultOutput → { kind: DONE, result }",
-    lifecycle: "可重复读取；不会再推进状态。",
+    summary: "Run 的规范化结果投影，以及终态时 review_turn 的 DONE 包装。",
+    purpose: "区分 durable phase、公开 publishOutcome/publishPrecheck 与协议 output.kind=DONE，避免把暂停或不确定结果误画成成功。",
+    transformation: "RunRecord + referenced artifacts + publish state → canonical ResultOutput → terminal { kind: DONE, result }",
+    lifecycle: "可重复只读；PAUSED 时携带 nextActions，只有终态才由 review_turn 包装为 DONE。",
     fields: [
-      field("kind", "literal DONE", true, "DONE", "review_turn 的终态输出类型，不是 RunPhase。"),
-      field("result.phase", "terminal RunPhase", true, "COMPLETED", "真正持久化的终态。"),
-      field("result.revision", "positive integer", true, "2", "最终交付 Revision。"),
-      field("result.artifacts[]", "ArtifactRef[]", true, "[candidate, review, publish]", "可审计的执行证据。"),
-      field("result.nextActions[]", "action[]", true, "[]", "终态通常没有可变推进动作。")
+      field("kind", "literal DONE", false, "DONE", "仅终态 review_turn 输出具备；不是 RunPhase。"),
+      field("result.phase", "RunPhase", true, "COMPLETED", "真正持久化的阶段。"),
+      field("result.status", "result status", true, "COMMITTED", "区分 RUNNING、PRECHECK_CONFLICT、MANUAL_PUBLISH_REQUIRED、PUBLISH_RECOVERY_BLOCKED 与终态。"),
+      field("result.artifacts[]", "ArtifactRef[]", true, "[taskSource, candidate, review]", "Run 实际引用的可审计 Artifact；publish attempt 是状态投影而非伪造 ArtifactRef。"),
+      field("result.publishOutcome", "PublishAttemptRecord", false, "{ operationId, status: 'COMMITTED', result }", "公开 durable publish attempt 与逐路径回执。"),
+      field("result.publishPrecheck", "precheck projection", false, "{ conflicts, publishedCount: 0, totalCount, activeWorkspaceChanged: false }", "公开零写入冲突或人工确认不匹配事实。"),
+      field("result.nextActions[]", "action[]", true, "['confirm_manual_publish', 'retry_publish', 'cancel']", "暂停状态当前允许的动作；终态通常为空。")
     ],
     sources: [
       "apps/daemon/src/project-runtime.ts#ProjectRuntime.result",

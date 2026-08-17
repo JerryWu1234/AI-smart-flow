@@ -16,7 +16,7 @@ import type {
 } from "@smartflow/provider-core";
 import { StateStore, runArtifactInventory, type ProjectState } from "@smartflow/state-store";
 import { compileTaskManifest } from "@smartflow/task-manifest";
-import { createTasksSource } from "../../packages/task-manifest/src/test-fixture.js";
+import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 
 const harnesses: RuntimeHarness[] = [];
@@ -135,7 +135,7 @@ async function initializedStore(harness: RuntimeHarness): Promise<{
   const taskManifest = await store.writeArtifact("runs/job-1/task-manifest.json", compiled.artifactBytes);
   const taskSource = await store.writeArtifact("runs/job-1/revision-1/task-source.md", Buffer.from(source, "utf8"));
   const state: ProjectState = {
-    schemaVersion: 5,
+    schemaVersion: 6,
     projectId: "project-1",
     canonicalProjectRoot: harness.projectDir,
     stateVersion: 0,

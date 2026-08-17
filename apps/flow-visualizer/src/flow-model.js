@@ -42,7 +42,7 @@ export const ACTORS = Object.freeze([
   { id: "worker", code: "PI", name: "Pi Worker", role: "隔离代码执行" },
   { id: "workspace", code: "GIT", name: "Run Worktree", role: "快照、Candidate 与发布操作" },
   { id: "reviewer", code: "REV", name: "Independent Reviewer", role: "只读逐项复核" },
-  { id: "project", code: "SRC", name: "Original Project", role: "Publish 前保持只读" }
+  { id: "project", code: "SRC", name: "Original Project", role: "SmartFlow Publish 前只读；发布暂停后可由用户人工合并" }
 ]);
 
 const STAGE_LIST = [
@@ -62,7 +62,7 @@ const STAGE_LIST = [
     after: { run: "不存在", taskBytes: "approvedSourceHash 已绑定", projectWrite: "LOCKED" },
     outputs: ["ApprovedTasksSnapshot", "approvedSourceHash"],
     sources: [
-      source("apps/host-skill/src/approval.ts", "readStableApprovedTasks"),
+      source("packages/host-skill/src/approval.ts", "readStableApprovedTasks"),
       source("apps/daemon/src/approved-source.ts", "observeApprovedSource")
     ]
   }),
@@ -79,7 +79,7 @@ const STAGE_LIST = [
     summary: "原子创建 Run 或接收自动修复生成的 Revision N+1。",
     plainLanguage: "这里是每一轮执行的统一入口：第一轮登记新 Run；修复轮登记新 Revision。任何 repair 都必须明确回到这里。",
     before: { phase: "NO_RUN 或 FIXING", revision: "— 或 N", stateVersion: "vN" },
-    after: { phase: "PREPARING", revision: "1 或 N+1", schemaVersion: "5" },
+    after: { phase: "PREPARING", revision: "1 或 N+1", schemaVersion: "6" },
     outputs: ["RunRecord", "TaskManifest", "TaskSource Artifact", "active task binding"],
     sources: [
       source("apps/daemon/src/project-runtime.ts", "ProjectRuntime.execute"),
@@ -137,7 +137,7 @@ const STAGE_LIST = [
     layout: { row: 1, column: 5 },
     actorIds: ["worker", "workspace", "daemon", "ledger"],
     summary: "把当前结果冻结为从 Run baseline 到最终结果的精简累计 Candidate。",
-    plainLanguage: "Reviewer 和发布都检查同一份完整候选；这里只保存快照引用哈希和累计操作，patch 到发布时才从 Git trees 临时生成。",
+    plainLanguage: "Reviewer 和 Publish 检查同一份完整候选；Candidate 只保存快照绑定与累计操作，Publish 会直接校验当前 revision 的 immutable REVISION_RESULT。",
     before: { phase: "RUNNING", resultSnapshot: "mutable workspace", candidate: "—" },
     after: { phase: "RUNNING", resultSnapshot: "frozen", candidate: "v3 hash-bound" },
     outputs: ["Candidate v3", "result snapshot"],
@@ -199,7 +199,7 @@ const STAGE_LIST = [
     after: { phase: "REVIEWING", reviewer: "bound reviewerSessionId", result: "every Task scored" },
     outputs: ["ReviewSubmission", "reviewerSessionId", "findings"],
     sources: [
-      source("apps/host-skill/src/reviewer.ts", "reviewer integration"),
+      source("packages/host-skill/src/reviewer.ts", "reviewer integration"),
       source("apps/daemon/src/review-coordinator.ts", "assertReviewerContext")
     ]
   }),
@@ -234,7 +234,7 @@ const STAGE_LIST = [
     layout: { row: 2, column: 3 },
     actorIds: ["daemon", "ledger", "workspace"],
     summary: "Candidate、Review 与 accept Decision 的哈希绑定已验证。",
-    plainLanguage: "评审通过不等于已经写入项目；这里只是允许 Daemon 准备发布包，原项目仍然锁定。",
+    plainLanguage: "评审通过不等于已经写入项目；这里只允许 Daemon 从已绑定证据派生发布操作，原项目仍由 Publish 边界保护。",
     before: { phase: "REVIEWING", decision: "accept", projectWrite: "LOCKED" },
     after: { phase: "READY_TO_PUBLISH", decision: "accept", projectWrite: "LOCKED" },
     outputs: ["accepted evidence chain", "publish schedule"],
@@ -243,21 +243,22 @@ const STAGE_LIST = [
   stage({
     id: "stage.publish.preflight",
     badge: "11",
-    title: "全路径 Publish Preflight",
-    shortTitle: "PUBLISHING",
+    title: "派生操作并全路径预检",
+    shortTitle: "READY_TO_PUBLISH",
     kind: "activity",
-    phase: "PUBLISHING",
+    phase: "READY_TO_PUBLISH",
     tone: "green",
     layout: { row: 2, column: 2 },
     actorIds: ["daemon", "ledger", "workspace", "project"],
-    summary: "按需生成累计 Git patch，并冻结带 blobs 的签名 Bundle 后执行全路径 expected-old 检查。",
-    plainLanguage: "先把最终 patch、操作和文件内容封进唯一自包含 Bundle，再一次性检查所有路径；默认 adapter 直接读 Bundle，不另存 publish blobs。",
+    summary: "从 Candidate、immutable REVISION_RESULT 与 Run Git object store 派生 ApplyOperation 和 blobRef，再探测 adapter、获取 lease 并预检。",
+    plainLanguage: "每个新文件必须与结果快照的 hash、size、mode 一致，内容直接引用 Run Git object store；能力、lease 或任一路径不满足时不会创建 PREPARED attempt。",
     before: { phase: "READY_TO_PUBLISH", publishAttempt: "—", projectWrite: "LOCKED" },
-    after: { phase: "PUBLISHING", publishAttempt: "PREPARED", preflight: "all paths match 或 conflict" },
-    outputs: ["DeliveryBundle", "ApplyOperation[]", "PublishAttempt"],
+    after: { phase: "READY_TO_PUBLISH", publishAttempt: "—", preflight: "MATCH / conflict / unavailable / busy" },
+    outputs: ["ApplyOperation[]", "Git blob ArtifactRef[]", "stable operationId", "preflight outcome"],
     sources: [
       source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.publish"),
-      source("packages/publish/src/preflight.ts", "preflightOperations")
+      source("apps/daemon/src/git-publish-source.ts", "gitPublishOperations"),
+      source("packages/publish/src/publish-service.ts", "PublishService.publish")
     ]
   }),
   stage({
@@ -270,14 +271,14 @@ const STAGE_LIST = [
     tone: "green",
     layout: { row: 2, column: 1 },
     actorIds: ["daemon", "ledger", "project"],
-    summary: "以稳定 operationId 应用预检通过的操作，并逐路径确认结果。",
-    plainLanguage: "写入响应丢失时不会盲目重放；Daemon 会先查询相同 operationId，只有全部路径可证明提交才算成功。",
-    before: { phase: "PUBLISHING", attempt: "PREPARED", projectWrite: "LOCKED" },
+    summary: "预检通过后持久化 PREPARED/SUBMITTED，以稳定 operationId 应用操作并逐路径对账。",
+    plainLanguage: "提交状态和结果 journal 先保护外部副作用边界；响应丢失时查询相同 operationId，只有每条路径的目标 hash 与 mode 都可证明才成功。",
+    before: { phase: "PUBLISHING", attempt: "PREPARED", projectWrite: "0 paths applied" },
     after: { phase: "PUBLISHING 或 COMPLETED/PAUSED", attempt: "SUBMITTED / reconciled" },
-    outputs: ["PublishResult", "path receipts", "operation reconciliation"],
+    outputs: ["PublishAttemptRecord", "PublishResult", "path receipts", "result journal"],
     sources: [
       source("packages/publish/src/publish-service.ts", "PublishService.publish"),
-      source("apps/daemon/src/recovery-manager.ts", "RecoveryManager.recoverPublish")
+      source("apps/daemon/src/publish-coordinator.ts", "StateStorePublishAttemptStore.markSubmittedAndApply")
     ]
   }),
   stage({
@@ -290,12 +291,36 @@ const STAGE_LIST = [
     tone: "green",
     layout: { row: 3, column: 1 },
     actorIds: ["daemon", "ledger", "project"],
-    summary: "全部发布路径已证明 COMMITTED，Run 进入持久化终态。",
-    plainLanguage: "完成后清理 worktree 和 Git object store；签名 DeliveryBundle 保留为唯一自包含最终内容副本，不再旁挂 patch/evidence/publish-blob 副本。",
-    before: { phase: "PUBLISHING", publishResult: "pending" },
-    after: { phase: "COMPLETED", publishResult: "COMMITTED", projectWrite: "APPLIED" },
-    outputs: ["terminal RunRecord", "committed PublishResult", "signed DeliveryBundle"],
-    sources: [source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator")]
+    summary: "全部 Candidate target operations 已由 adapter 回执或人工目标观察证明为 COMMITTED。",
+    plainLanguage: "COMPLETED 只保留绑定 evidence、PublishAttemptRecord 和逐路径结果事实；终态可清理 worktree 与 Run Git object store，不存在额外交付包副本。",
+    before: { phase: "PUBLISHING 或 READY_TO_PUBLISH", publishResult: "pending or manually observed" },
+    after: { phase: "COMPLETED", publishResult: "COMMITTED", originalProject: "exact Candidate targets" },
+    outputs: ["terminal RunRecord", "committed PublishAttemptRecord", "committed PublishResult"],
+    sources: [
+      source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.publish"),
+      source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.confirmManualPublish")
+    ]
+  }),
+  stage({
+    id: "stage.publish.manual-confirm",
+    badge: "MAN",
+    title: "人工合并后精确确认",
+    shortTitle: "CONFIRM TARGET",
+    kind: "activity",
+    phase: "READY_TO_PUBLISH",
+    tone: "amber",
+    layout: { row: 3, column: 3 },
+    actorIds: ["host", "daemon", "ledger", "workspace", "project"],
+    summary: "用户从 USER_INPUT_REQUIRED 的已审核 worktree 人工合并，Daemon 随后只读观察原项目。",
+    plainLanguage: "confirm_manual_publish 不是绕过 CAS 的成功按钮：它不写原项目，只有所有 Candidate target operations 的 kind、hash 与 mode 精确匹配才合成 COMMITTED；否则继续 PAUSED。",
+    before: { phase: "PAUSED", projectChange: "external manual merge", publishAttempt: "—" },
+    after: { phase: "COMPLETED 或 PAUSED", observation: "exact match 或 conflicts", publishAttempt: "manual-confirmation-v1 或 —" },
+    outputs: ["ManualPublishConfirmation", "target observation", "synthetic committed receipt or mismatch evidence"],
+    sources: [
+      source("apps/daemon/src/host-turn-coordinator.ts", "HostTurnCoordinator.userInputRequired"),
+      source("apps/daemon/src/project-runtime.ts", "ProjectRuntime.resume"),
+      source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.confirmManualPublish")
+    ]
   }),
   stage({
     id: "stage.output.done",
@@ -418,10 +443,10 @@ const STAGE_LIST = [
     layout: { row: 4, column: 4 },
     actorIds: ["daemon", "ledger", "host", "mcp"],
     summary: "额度、范围、源漂移、Provider、Review 或 Publish 证据不足时停止自动推进。",
-    plainLanguage: "暂停不是失败被吞掉，而是把原因、证据和唯一允许动作明确交给用户。",
+    plainLanguage: "暂停不是失败被吞掉，而是把原因、证据和唯一允许动作交给用户；发布相关 owning Host 还会得到已审核 worktreePath 以便人工合并。",
     before: { phase: "任一非终态", safetyProof: "insufficient" },
     after: { phase: "PAUSED", pauseCode: "typed", resumeActions: "explicit" },
-    outputs: ["PauseRecord", "USER_INPUT_REQUIRED", "inspection + resume options"],
+    outputs: ["PauseRecord", "USER_INPUT_REQUIRED", "publish worktreePath when applicable", "inspection + resume options"],
     sources: [
       source("packages/state-store/src/schema.ts", "pauseRecordSchema"),
       source("apps/daemon/src/host-turn-coordinator.ts", "HostTurnCoordinator.requireUserInput")
@@ -454,7 +479,7 @@ const MAIN = [
     id: "tr.execute.create-run", fromStageId: "stage.external.approval", toStageId: "stage.run.preparing",
     label: "批准一致，创建 Durable Run", graphLabel: "创建 Run", lane: "main", tone: "cyan",
     condition: "Daemon 复算任务字节哈希、路径与 active task binding 均有效。",
-    explanation: "一次 CAS mutation 创建 schema v5 Run、Revision 1 Manifest、TaskSource Artifact 和路径占用。",
+    explanation: "一次 CAS mutation 创建 schema v6 Run、Revision 1 Manifest、TaskSource Artifact 和路径占用。",
     before: { phase: "NO_RUN", revision: "—" }, after: { phase: "PREPARING", revision: "1" },
     actorIds: ["host", "mcp", "daemon", "ledger"], dataDetailIds: ["data.approval.snapshot", "data.execute.input", "data.run.record"],
     payloadExample: "{ tasksPath, approvedSourceHash, requestId } → { jobId, revision: 1 }",
@@ -489,7 +514,7 @@ const MAIN = [
     condition: "Worker 终态与进程树已核销，workspace 可安全快照。",
     explanation: "捕获 result snapshot，并从最初 Run baseline 构建累计 Candidate。",
     before: { phase: "RUNNING", workspace: "mutable" }, after: { phase: "RUNNING", resultSnapshot: "frozen" },
-    actorIds: ["worker", "workspace", "daemon", "ledger"], dataDetailIds: ["data.worker.attempt", "data.candidate.bundle"],
+    actorIds: ["worker", "workspace", "daemon", "ledger"], dataDetailIds: ["data.worker.attempt", "data.candidate.artifact"],
     payloadExample: "private worktree → resultSnapshot + cumulative operations",
     changes: ["attempt.status: RUNNING → COMPLETED", "resultSnapshot: — → ArtifactRef", "candidate: — → hash-bound"],
     sources: [source("apps/daemon/src/worker-runner.ts", "WorkerRunner.captureCandidate")]
@@ -500,7 +525,7 @@ const MAIN = [
     condition: "Candidate 非空，或 manifest 明确允许 no-change。",
     explanation: "Run 进入 REVIEW_PENDING；首轮 action 使用 CREATE，已有唯一历史 Reviewer 时使用 RESUME。",
     before: { phase: "RUNNING", pendingAction: "—" }, after: { phase: "REVIEW_PENDING", pendingAction: "ReviewHostAction" },
-    actorIds: ["workspace", "daemon", "ledger", "host"], dataDetailIds: ["data.candidate.bundle", "data.review.host-action"],
+    actorIds: ["workspace", "daemon", "ledger", "host"], dataDetailIds: ["data.candidate.artifact", "data.review.host-action"],
     payloadExample: "{ candidateHash, changedPaths, reviewerSession: CREATE|RESUME }",
     changes: ["phase: RUNNING → REVIEW_PENDING", "pendingAction: — → ReviewHostAction"],
     sources: [source("apps/daemon/src/worker-runner.ts", "WorkerRunner.captureCandidate")]
@@ -568,38 +593,44 @@ const MAIN = [
   }),
   transition({
     id: "tr.publish.start", fromStageId: "stage.publish.ready", toStageId: "stage.publish.preflight",
-    label: "重验绑定并准备发布操作", graphLabel: "准备 Publish", lane: "main", tone: "green",
-    condition: "Candidate、Review、Decision、revision 与 source binding 全部有效。",
-    explanation: "从 baseline/result trees 按需生成累计 patch，把操作和最终 blobs 冻结为签名 DeliveryBundle，再生成稳定 operationId。",
-    before: { phase: "READY_TO_PUBLISH", publishAttempt: "—" }, after: { phase: "PUBLISHING", publishAttempt: "PREPARED" },
-    actorIds: ["daemon", "ledger", "workspace"], dataDetailIds: ["data.candidate.bundle", "data.review.decision", "data.publish.bundle"],
-    payloadExample: "DeliveryBundle { operationId, operationsHash, operations[] }",
-    changes: ["phase: READY_TO_PUBLISH → PUBLISHING", "PublishAttempt: — → PREPARED"],
-    sources: [source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.publish")]
+    label: "重验绑定并确定性派生操作", graphLabel: "派生 Publish", lane: "main", tone: "green",
+    condition: "Candidate、Review、Decision、revision、REVISION_RESULT 与 approved source binding 全部有效。",
+    explanation: "gitPublishOperations 校验 Candidate 与 immutable REVISION_RESULT，并把每个新增/修改内容绑定到 Run Git object store 的 blobRef；随后计算 operationsHash 与稳定 operationId。",
+    before: { phase: "READY_TO_PUBLISH", publishAttempt: "—" }, after: { phase: "READY_TO_PUBLISH", publishAttempt: "—", operations: "derived" },
+    actorIds: ["daemon", "ledger", "workspace"], dataDetailIds: ["data.candidate.artifact", "data.workspace.snapshot", "data.review.decision", "data.publish.operations-attempt"],
+    payloadExample: "ApplyOperation { path, expectedOldHash, expectedOldMode, newHash, newMode, blobRef: 'git-object-store/blobs/<id>' }",
+    changes: ["phase remains READY_TO_PUBLISH", "ApplyOperation[] + operationsHash + operationId: deterministically derived"],
+    sources: [
+      source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.gitSource"),
+      source("apps/daemon/src/git-publish-source.ts", "gitPublishOperations")
+    ]
   }),
   transition({
     id: "tr.publish.preflight-ok", fromStageId: "stage.publish.preflight", toStageId: "stage.publish.apply",
-    label: "所有 touched path 通过预检", graphLabel: "全路径匹配", lane: "main", tone: "green",
-    condition: "每条路径的 old hash、mode 或 absence 与当前原项目一致。",
-    explanation: "只有 all-path preflight 全部通过，Adapter 才能开始第一笔写入。",
-    before: { phase: "PUBLISHING", projectWrites: "0", preflight: "pending" }, after: { phase: "PUBLISHING", projectWrites: "allowed", preflight: "MATCH" },
-    actorIds: ["daemon", "project", "ledger"], dataDetailIds: ["data.publish.bundle"],
-    payloadExample: "7 ApplyOperation[] → ALL PATHS MATCH",
-    changes: ["preflight: pending → MATCH", "publishedCount remains 0 until apply"],
-    sources: [source("packages/publish/src/preflight.ts", "preflightOperations")]
+    label: "能力、lease 与所有 touched path 通过", graphLabel: "全路径匹配", lane: "main", tone: "green",
+    condition: "Adapter 支持 CAS/batch/stable ID/query，项目 publish lease 已获取，且每条路径的 old kind/hash/mode 匹配。",
+    explanation: "所有检查通过后才原子写入 PublishAttemptRecord=PREPARED 并进入 PUBLISHING；这仍发生在 adapter 第一笔文件写入之前。",
+    before: { phase: "READY_TO_PUBLISH", projectWrites: "0", publishAttempt: "—" }, after: { phase: "PUBLISHING", projectWrites: "0", publishAttempt: "PREPARED" },
+    actorIds: ["daemon", "project", "ledger"], dataDetailIds: ["data.publish.operations-attempt"],
+    payloadExample: "probe=SUPPORTED + lease=ACQUIRED + ApplyOperation[] preflight=MATCH",
+    changes: ["phase: READY_TO_PUBLISH → PUBLISHING", "PublishAttempt: — → PREPARED", "publishedCount remains 0 until apply"],
+    sources: [
+      source("packages/publish/src/publish-service.ts", "PublishService.publish"),
+      source("apps/daemon/src/publish-coordinator.ts", "StateStorePublishAttemptStore.prepare")
+    ]
   }),
   transition({
     id: "tr.publish.commit", fromStageId: "stage.publish.apply", toStageId: "stage.terminal.completed",
     label: "全部路径对账为 COMMITTED", graphLabel: "COMMITTED", lane: "main", tone: "green",
-    condition: "operationId、operationsHash、path hash 与 mode 回执全部有效。",
-    explanation: "只有可证明的完整提交才把 Run 从 PUBLISHING 推进到 COMPLETED。",
+    condition: "operationId、operationsHash、路径集合、每条 status/hash/mode 回执全部精确有效。",
+    explanation: "只有可证明的完整提交才把 Run 从 PUBLISHING 推进到 COMPLETED；任一缺失、重复、PARTIAL 或 UNKNOWN 都走阻塞分支。",
     before: { phase: "PUBLISHING", result: "SUBMITTED" }, after: { phase: "COMPLETED", result: "COMMITTED" },
-    actorIds: ["project", "daemon", "ledger"], dataDetailIds: ["data.publish.bundle", "data.publish.result", "data.run.record"],
-    payloadExample: "PublishResult { status: COMMITTED, publishedCount: 7 }",
-    changes: ["phase: PUBLISHING → COMPLETED", "projectWrite: LOCKED → APPLIED", "active task binding: released"],
+    actorIds: ["project", "daemon", "ledger"], dataDetailIds: ["data.publish.operations-attempt", "data.publish.result", "data.run.record"],
+    payloadExample: "PublishResult { operationId, operationsHash, status: 'COMMITTED', paths: [{ path, status: 'COMMITTED', observedHash, observedMode }] }",
+    changes: ["phase: PUBLISHING → COMPLETED", "original project: exact Candidate targets", "active task binding: released"],
     sources: [
       source("packages/publish/src/publish-service.ts", "PublishService.finish"),
-      source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator")
+      source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.publish")
     ]
   }),
   transition({
@@ -686,7 +717,7 @@ const BRANCHES = [
     condition: "Worker completed、无 changed Candidate 且 Manifest 不允许 no-change。",
     explanation: "写入 WORKER_CANDIDATE_EMPTY finding，并复用同一受限 repair machinery。",
     before: { phase: "RUNNING", candidate: "empty" }, after: { phase: "FIXING", lastError: "WORKER_CANDIDATE_EMPTY" },
-    actorIds: ["worker", "daemon", "ledger"], dataDetailIds: ["data.worker.attempt", "data.candidate.bundle", "data.repair.round"],
+    actorIds: ["worker", "daemon", "ledger"], dataDetailIds: ["data.worker.attempt", "data.candidate.artifact", "data.repair.round"],
     payloadExample: "empty Candidate evidence → synthetic blocking finding",
     changes: ["phase: RUNNING → FIXING", "lastError.code: — → WORKER_CANDIDATE_EMPTY"],
     sources: [
@@ -829,30 +860,99 @@ const BRANCHES = [
   }),
   transition({
     id: "tr.publish.precheck-conflict", fromStageId: "stage.publish.preflight", toStageId: "stage.pause.awaiting-user",
-    label: "任一路径 old hash / mode 不匹配", graphLabel: "0 写入冲突", lane: "pause", tone: "red", bend: -58,
-    condition: "全路径 preflight 发现至少一个并发修改。",
-    explanation: "在 apply 前停止，publishedCount 固定为 0；durable pause 暴露 retry/export/cancel。",
-    before: { phase: "PUBLISHING", projectWrites: "0", preflight: "checking" }, after: { phase: "PAUSED", pauseCode: "PUBLISH_CONFLICT", projectWrites: "0" },
-    actorIds: ["daemon", "project", "ledger", "host"], dataDetailIds: ["data.publish.bundle", "data.publish.result", "data.pause.record"],
-    payloadExample: "PublishResult { status: PRECHECK_CONFLICT, publishedCount: 0 }",
-    changes: ["phase: PUBLISHING → PAUSED", "publishedCount remains 0", "conflicts[]: + paths"],
+    label: "任一路径 old kind / hash / mode 不匹配", graphLabel: "0 写入冲突", lane: "pause", tone: "red", bend: -58,
+    condition: "全路径 preflight 发现至少一个 Candidate target path 已漂移。",
+    explanation: "在创建 PREPARED attempt 和第一笔写入前停止，publishedCount 固定为 0；owning Host 的 USER_INPUT_REQUIRED 提供已审核 worktreePath，以及 retry_publish、confirm_manual_publish、cancel。",
+    before: { phase: "READY_TO_PUBLISH", projectWrites: "0", publishAttempt: "—" }, after: { phase: "PAUSED", pauseCode: "PUBLISH_PRECHECK_CONFLICT", projectWrites: "0" },
+    actorIds: ["daemon", "project", "ledger", "host"], dataDetailIds: ["data.publish.operations-attempt", "data.publish.precheck", "data.pause.record"],
+    payloadExample: "PublishServiceResult { status: 'PRECHECK_CONFLICT', conflicts, publishedCount: 0, totalCount, activeWorkspaceChanged: false }",
+    changes: ["phase: READY_TO_PUBLISH → PAUSED", "PublishAttempt remains absent", "publishPrecheck + worktreePath exposed"],
     sources: [
-      source("packages/publish/src/preflight.ts", "preflightOperations"),
-      source("packages/publish/src/publish-service.ts", "PublishService.publish")
+      source("packages/publish/src/publish-service.ts", "PublishService.publish"),
+      source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.publish"),
+      source("apps/daemon/src/host-turn-coordinator.ts", "HostTurnCoordinator.userInputRequired")
+    ]
+  }),
+  transition({
+    id: "tr.publish.adapter-unavailable", fromStageId: "stage.publish.preflight", toStageId: "stage.pause.awaiting-user",
+    label: "Adapter 缺失或原子 CAS 能力不足", graphLabel: "MANUAL REQUIRED", lane: "pause", tone: "red", bend: -82,
+    condition: "Adapter 不存在，或 expected-old CAS、batch、stable operation ID、queryResult 任一能力未证明。",
+    explanation: "SmartFlow 不写原项目并暂停为 PUBLISH_ADAPTER_UNAVAILABLE；owning Host 收到已审核 worktreePath，可重试、人工合并后确认或取消。",
+    before: { phase: "READY_TO_PUBLISH", publishAttempt: "—", projectWrites: "0" }, after: { phase: "PAUSED", pauseCode: "PUBLISH_ADAPTER_UNAVAILABLE", projectWrites: "0" },
+    actorIds: ["daemon", "ledger", "host", "workspace"], dataDetailIds: ["data.publish.operations-attempt", "data.pause.record"],
+    payloadExample: "USER_INPUT_REQUIRED { worktreePath, options: ['retry_publish', 'confirm_manual_publish', 'cancel'] }",
+    changes: ["phase: READY_TO_PUBLISH → PAUSED", "PublishAttempt remains absent", "original project remains unchanged by SmartFlow"],
+    sources: [
+      source("packages/publish/src/publish-service.ts", "PublishService.publish"),
+      source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.pauseForService"),
+      source("apps/daemon/src/host-turn-coordinator.ts", "HostTurnCoordinator.userInputRequired")
+    ]
+  }),
+  transition({
+    id: "tr.publish.busy", fromStageId: "stage.publish.preflight", toStageId: "stage.pause.awaiting-user",
+    label: "项目 Publish lease 被其他 Run 占用", graphLabel: "PUBLISH BUSY", lane: "pause", tone: "red", bend: -36,
+    condition: "ProjectState.publishLease 已属于其他 job/operationId。",
+    explanation: "本 Run 不创建 attempt、不执行 preflight 写入，暂停为 PROJECT_PUBLISH_BUSY，只允许 retry_publish 或 cancel。",
+    before: { phase: "READY_TO_PUBLISH", lease: "owned elsewhere" }, after: { phase: "PAUSED", pauseCode: "PROJECT_PUBLISH_BUSY" },
+    actorIds: ["daemon", "ledger", "host"], dataDetailIds: ["data.publish.operations-attempt", "data.pause.record"],
+    payloadExample: "PublishServiceResult { status: 'PUBLISH_BUSY' }",
+    changes: ["phase: READY_TO_PUBLISH → PAUSED", "project publish lease remains with current owner", "PublishAttempt remains absent"],
+    sources: [
+      source("packages/publish/src/publish-service.ts", "PublishService.publish"),
+      source("apps/daemon/src/publish-coordinator.ts", "StateStorePublishAttemptStore.acquireLease")
     ]
   }),
   transition({
     id: "tr.publish.recovery-blocked", fromStageId: "stage.publish.apply", toStageId: "stage.pause.awaiting-user",
     label: "Publish 返回 PARTIAL / UNKNOWN", graphLabel: "Publish 未知", lane: "pause", tone: "red", bend: -76,
-    condition: "Adapter 结果无法证明完整 COMMITTED 或安全 CONFLICT。",
-    explanation: "以稳定 operationId 保存证据并暂停；UNKNOWN 永远不会被标为 COMPLETED。",
-    before: { phase: "PUBLISHING", result: "PARTIAL / UNKNOWN" }, after: { phase: "PAUSED", pauseCode: "PUBLISH_RECOVERY_BLOCKED" },
-    actorIds: ["daemon", "project", "ledger", "host"], dataDetailIds: ["data.publish.bundle", "data.publish.result", "data.pause.record"],
-    payloadExample: "resumeActions: ['inspect_recovery', 'retry_publish', 'cancel']",
-    changes: ["phase: PUBLISHING → PAUSED", "operationId retained for reconcile"],
+    condition: "Adapter 结果无法证明完整 COMMITTED，或 apply/query 结果仍不确定。",
+    explanation: "以稳定 operationId 和 result journal 保存证据并暂停；PARTIAL、UNKNOWN 与 PUBLISH_RECOVERY_BLOCKED 都不能通过人工确认分支绕过。",
+    before: { phase: "PUBLISHING", result: "PARTIAL / UNKNOWN / unqueryable" }, after: { phase: "PAUSED", pauseCode: "PUBLISH_RECOVERY_BLOCKED" },
+    actorIds: ["daemon", "project", "ledger", "host"], dataDetailIds: ["data.publish.operations-attempt", "data.publish.result", "data.pause.record"],
+    payloadExample: "USER_INPUT_REQUIRED { options: ['cancel'], inspectionOptions: ['inspect_recovery'] }",
+    changes: ["phase: PUBLISHING → PAUSED", "operationId and journal retained", "COMPLETED remains forbidden"],
     sources: [
       source("packages/publish/src/publish-service.ts", "PublishService.recover"),
-      source("apps/daemon/src/recovery-manager.ts", "RecoveryManager.recoverPublish")
+      source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.pauseForService")
+    ]
+  }),
+  transition({
+    id: "tr.publish.manual-request", fromStageId: "stage.pause.awaiting-user", toStageId: "stage.publish.manual-confirm",
+    label: "人工合并已审核结果并请求确认", graphLabel: "CONFIRM MANUAL", lane: "recovery", tone: "amber", bend: 52,
+    condition: "pause 为 PUBLISH_ADAPTER_UNAVAILABLE、PUBLISH_PRECHECK_CONFLICT 或先前 MANUAL_PUBLISH_TARGET_MISMATCH，且用户已从 worktreePath 人工合并。",
+    explanation: "owning Host 回答 confirm_manual_publish；ProjectRuntime 绑定 revision 与原 pauseCode 写 REQUESTED marker，回到 READY_TO_PUBLISH 调度只读目标观察。",
+    before: { phase: "PAUSED", manualMarker: "— or MISMATCH", projectChange: "external" }, after: { phase: "READY_TO_PUBLISH", manualMarker: "REQUESTED" },
+    actorIds: ["host", "mcp", "daemon", "ledger", "workspace", "project"], dataDetailIds: ["data.pause.record", "data.publish.manual-confirmation", "data.publish.operations-attempt"],
+    payloadExample: "answer: 'confirm_manual_publish' → { status: 'REQUESTED', revision, pauseCode, requestId }",
+    changes: ["phase: PAUSED → READY_TO_PUBLISH", "manualPublishConfirmation: —/MISMATCH → REQUESTED", "SmartFlow project writes remain 0"],
+    sources: [
+      source("apps/daemon/src/host-turn-coordinator.ts", "HostTurnCoordinator.userInputRequired"),
+      source("apps/daemon/src/project-runtime.ts", "ProjectRuntime.resume")
+    ]
+  }),
+  transition({
+    id: "tr.publish.manual-match", fromStageId: "stage.publish.manual-confirm", toStageId: "stage.terminal.completed",
+    label: "全部 Candidate target operations 精确匹配", graphLabel: "EXACT MATCH", lane: "main", tone: "green", bend: 44,
+    condition: "observeTargetState 对每个 target path 的 kind、newHash 与 newMode 均匹配，且没有额外/缺失 operation receipt。",
+    explanation: "Daemon 不写文件，只合成 adapterId=manual-confirmation-v1 的 COMMITTED attempt/result 并进入 COMPLETED。",
+    before: { phase: "READY_TO_PUBLISH", manualMarker: "REQUESTED" }, after: { phase: "COMPLETED", publishStatus: "COMMITTED" },
+    actorIds: ["daemon", "ledger", "project"], dataDetailIds: ["data.publish.manual-confirmation", "data.publish.operations-attempt", "data.publish.result", "data.run.record"],
+    payloadExample: "PublishAttemptRecord { adapterId: 'manual-confirmation-v1', status: 'COMMITTED', result: { paths: all COMMITTED } }",
+    changes: ["phase: READY_TO_PUBLISH → COMPLETED", "publish: — → synthetic COMMITTED receipt", "manual marker/precheck cleared"],
+    sources: [source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.confirmManualPublish")]
+  }),
+  transition({
+    id: "tr.publish.manual-mismatch", fromStageId: "stage.publish.manual-confirm", toStageId: "stage.pause.awaiting-user",
+    label: "任一 Candidate target operation 不匹配", graphLabel: "TARGET MISMATCH", lane: "pause", tone: "red", bend: 30,
+    condition: "observeTargetState 发现任一路径 kind、hash 或 mode 未达到派生 operation 的目标。",
+    explanation: "Run 继续 PAUSED 为 MANUAL_PUBLISH_TARGET_MISMATCH，保存 conflicts/publishPrecheck 并再次提供 confirm_manual_publish、retry_publish、cancel；不会产生 publish attempt。",
+    before: { phase: "READY_TO_PUBLISH", manualMarker: "REQUESTED" }, after: { phase: "PAUSED", pauseCode: "MANUAL_PUBLISH_TARGET_MISMATCH" },
+    actorIds: ["daemon", "ledger", "project", "host"], dataDetailIds: ["data.publish.manual-confirmation", "data.publish.precheck", "data.pause.record"],
+    payloadExample: "USER_INPUT_REQUIRED { pause.code: 'MANUAL_PUBLISH_TARGET_MISMATCH', publishPrecheck: { conflicts, publishedCount: 0 } }",
+    changes: ["phase: READY_TO_PUBLISH → PAUSED", "manual marker: REQUESTED → MISMATCH", "PublishAttempt remains absent"],
+    sources: [
+      source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.confirmManualPublish"),
+      source("apps/daemon/src/host-turn-coordinator.ts", "HostTurnCoordinator.userInputRequired")
     ]
   }),
   transition({
@@ -966,35 +1066,44 @@ const RECOVERY = [
   transition({
     id: "tr.recovery.enter-publish", fromStageId: "stage.publish.apply", toStageId: "stage.recovery.reconcile",
     label: "Publish 响应丢失后重启", graphLabel: "reconcile Publish", lane: "recovery", tone: "violet", bend: 70,
-    condition: "persisted phase=PUBLISHING 且存在稳定 operationId。",
-    explanation: "先查询 Adapter 对相同 operationId 的真实结果，绝不盲目重放操作。",
+    condition: "persisted phase=PUBLISHING 且存在稳定 operationId/operationsHash。",
+    explanation: "从 Candidate + immutable REVISION_RESULT + Run Git object store 重建相同操作，校验稳定 identity 后查询 Adapter；绝不盲目重放。",
     before: { phase: "PUBLISHING", result: "response lost" }, after: { phase: "PUBLISHING", result: "queried" },
-    actorIds: ["daemon", "ledger", "project"], dataDetailIds: ["data.publish.bundle", "data.recovery.epoch"],
-    payloadExample: "reconcile(operationId: 'publish-f14c')",
-    changes: ["projectFence: n → n+1", "publish result: UNKNOWN → reconciled"],
-    sources: [source("apps/daemon/src/recovery-manager.ts", "RecoveryManager.recoverPublish")]
+    actorIds: ["daemon", "ledger", "project"], dataDetailIds: ["data.publish.operations-attempt", "data.recovery.epoch"],
+    payloadExample: "observeRecovery({ operationId, operationsHash, adapterId }, derivedOperations)",
+    changes: ["projectFence: n → n+1", "publish result: UNKNOWN → observed or blocked"],
+    sources: [
+      source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.recover"),
+      source("packages/publish/src/publish-service.ts", "PublishService.observeRecovery")
+    ]
   }),
   transition({
     id: "tr.recovery.publish-committed", fromStageId: "stage.recovery.reconcile", toStageId: "stage.terminal.completed",
     label: "对账确认 Publish 已 COMMITTED", graphLabel: "COMMITTED", lane: "recovery", tone: "violet", bend: 96,
-    condition: "Adapter 返回与 operationId/operationsHash 一致的完整 COMMITTED 结果。",
-    explanation: "即使原响应丢失，只要全部路径可证明提交，恢复流程可以安全进入 COMPLETED。",
+    condition: "Adapter 返回与 operationId/operationsHash 及全部派生 path targets 一致的完整 COMMITTED 结果。",
+    explanation: "即使原响应丢失，只要每条路径的 status、hash 与 mode 可证明提交，恢复流程才可安全进入 COMPLETED。",
     before: { phase: "PUBLISHING", result: "unknown" }, after: { phase: "COMPLETED", result: "COMMITTED" },
-    actorIds: ["daemon", "ledger", "project"], dataDetailIds: ["data.publish.result", "data.recovery.epoch", "data.run.record"],
-    payloadExample: "reconciled PublishResult { status: COMMITTED }",
+    actorIds: ["daemon", "ledger", "project"], dataDetailIds: ["data.publish.operations-attempt", "data.publish.result", "data.recovery.epoch", "data.run.record"],
+    payloadExample: "PublishResult { operationId, operationsHash, status: 'COMMITTED', paths: all exact }",
     changes: ["phase: PUBLISHING → COMPLETED", "publish result: unknown → COMMITTED"],
-    sources: [source("apps/daemon/src/recovery-manager.ts", "RecoveryManager.recoverPublish")]
+    sources: [
+      source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.recover"),
+      source("packages/publish/src/publish-service.ts", "PublishService.observeRecovery")
+    ]
   }),
   transition({
     id: "tr.recovery.publish-conflict", fromStageId: "stage.recovery.reconcile", toStageId: "stage.pause.awaiting-user",
-    label: "对账确认 Conflict / 不完整结果", graphLabel: "CONFLICT → PAUSE", lane: "recovery", tone: "violet", bend: 28,
-    condition: "Adapter 对账为有效 CONFLICT，或仍不能证明完整提交。",
-    explanation: "写入 PUBLISH_CONFLICT / PUBLISH_RECOVERY_BLOCKED pause，交由用户检查、重试、导出或取消。",
-    before: { phase: "PUBLISHING", result: "unknown" }, after: { phase: "PAUSED", pauseCode: "PUBLISH_CONFLICT" },
-    actorIds: ["daemon", "ledger", "project", "host"], dataDetailIds: ["data.publish.result", "data.recovery.epoch", "data.pause.record"],
-    payloadExample: "USER_INPUT_REQUIRED { pause.code: 'PUBLISH_CONFLICT' }",
-    changes: ["phase: PUBLISHING → PAUSED", "conflict/recovery evidence retained"],
-    sources: [source("apps/daemon/src/recovery-manager.ts", "RecoveryManager.recoverPublish")]
+    label: "对账仍不能证明完整提交", graphLabel: "BLOCKED → PAUSE", lane: "recovery", tone: "violet", bend: 28,
+    condition: "Adapter 返回 conflict/不完整回执、PENDING/UNKNOWN，或 identity/capability 校验失败。",
+    explanation: "统一进入 PUBLISH_RECOVERY_BLOCKED；用户只能检查恢复证据或取消，不能通过人工确认、重试声明或其他路径把 PARTIAL/UNKNOWN 变成成功。",
+    before: { phase: "PUBLISHING", result: "unknown" }, after: { phase: "PAUSED", pauseCode: "PUBLISH_RECOVERY_BLOCKED" },
+    actorIds: ["daemon", "ledger", "project", "host"], dataDetailIds: ["data.publish.operations-attempt", "data.publish.result", "data.recovery.epoch", "data.pause.record"],
+    payloadExample: "USER_INPUT_REQUIRED { pause.code: 'PUBLISH_RECOVERY_BLOCKED', inspectionOptions: ['inspect_recovery'], options: ['cancel'] }",
+    changes: ["phase: PUBLISHING → PAUSED", "operationId/result journal retained", "COMPLETED remains forbidden"],
+    sources: [
+      source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.recover"),
+      source("packages/publish/src/publish-service.ts", "PublishService.observeRecovery")
+    ]
   })
 ];
 
@@ -1114,11 +1223,40 @@ export const SCENARIOS = Object.freeze({
   }),
   publishConflict: scenario({
     id: "publishConflict", category: "Publish 分支", name: "全路径预检冲突", shortName: "0 WRITE CONFLICT",
-    description: "Review 后原项目变化，第一笔 SmartFlow 写入前以 publishedCount=0 暂停。",
+    description: "Review 后原项目变化，PREPARED attempt 与第一笔 SmartFlow 写入前以 publishedCount=0 暂停并提供已审核 worktreePath。",
     outcome: "PAUSED · 0 FILES CHANGED → CANCELED", tone: "red", repairRounds: 0,
     transitionPath: [
       ...TO_DECISION_CREATE, "tr.review.accept", "tr.publish.start",
       "tr.publish.precheck-conflict", ...CANCEL
+    ]
+  }),
+  manualPublishConfirmed: scenario({
+    id: "manualPublishConfirmed", category: "Publish 分支", name: "Adapter 不可用后人工合并并确认", shortName: "MANUAL COMMIT",
+    description: "owning Host 从 USER_INPUT_REQUIRED 的已审核 worktree 人工合并；目标精确匹配后只读确认生成 COMMITTED receipt。",
+    outcome: "PAUSED → EXACT MATCH → COMPLETED", tone: "amber", repairRounds: 0,
+    transitionPath: [
+      ...TO_DECISION_CREATE, "tr.review.accept", "tr.publish.start",
+      "tr.publish.adapter-unavailable", "tr.publish.manual-request",
+      "tr.publish.manual-match", "tr.turn.done"
+    ]
+  }),
+  manualPublishMismatch: scenario({
+    id: "manualPublishMismatch", category: "Publish 分支", name: "人工合并后目标仍不匹配", shortName: "MANUAL MISMATCH",
+    description: "confirm_manual_publish 发现任一 Candidate target 的 kind/hash/mode 不符，继续 PAUSED 而不是接受用户声明。",
+    outcome: "PAUSED → MISMATCH → PAUSED → CANCELED", tone: "red", repairRounds: 0,
+    transitionPath: [
+      ...TO_DECISION_CREATE, "tr.review.accept", "tr.publish.start",
+      "tr.publish.precheck-conflict", "tr.publish.manual-request",
+      "tr.publish.manual-mismatch", ...CANCEL
+    ]
+  }),
+  publishBusy: scenario({
+    id: "publishBusy", category: "Publish 分支", name: "项目 Publish lease 忙", shortName: "PUBLISH BUSY",
+    description: "另一 Run 拥有项目级 publish lease，本 Run 不创建 attempt、不写入并暂停。",
+    outcome: "PAUSED → CANCELED", tone: "red", repairRounds: 0,
+    transitionPath: [
+      ...TO_DECISION_CREATE, "tr.review.accept", "tr.publish.start",
+      "tr.publish.busy", ...CANCEL
     ]
   }),
   publishBlocked: scenario({
@@ -1195,29 +1333,33 @@ export const SCENARIOS = Object.freeze({
 
 export const PUBLIC_TOOLS = Object.freeze([
   { id: "execute", name: "smartflow_execute", role: "创建 Run", direction: "Host → Daemon", description: "验证批准源并原子创建 Revision 1。" },
-  { id: "review-turn", name: "smartflow_review_turn*", role: "唯一评审主循环", direction: "Host ↔ Daemon", description: "返回 NOT_READY、REVIEW_REQUIRED、USER_INPUT_REQUIRED 或 DONE。" },
+  { id: "review-turn", name: "smartflow_review_turn*", role: "唯一评审主循环", direction: "Host ↔ Daemon", description: "返回 NOT_READY、REVIEW_REQUIRED、USER_INPUT_REQUIRED 或 DONE；发布暂停可携带 worktreePath 与 confirm_manual_publish。" },
   { id: "status", name: "smartflow_status", role: "只读状态", direction: "Host ← Daemon", description: "读取 phase、revision 与进度，不推进状态。" },
-  { id: "resume", name: "smartflow_resume", role: "独立恢复", direction: "Host → Daemon", description: "恢复没有活动 composite HostTurn 的 PAUSED Run。" },
+  { id: "resume", name: "smartflow_resume", role: "独立恢复", direction: "Host → Daemon", description: "恢复没有活动 composite HostTurn 的 PAUSED Run，包括合法 retry/confirm action。" },
   { id: "cancel", name: "smartflow_cancel", role: "取消", direction: "Host → Daemon", description: "进入 CANCELING 并核销活动身份。" },
-  { id: "result", name: "smartflow_result", role: "只读结果", direction: "Host ← Daemon", description: "投影 durable artifacts、结果和 next actions。" }
+  { id: "result", name: "smartflow_result", role: "只读结果", direction: "Host ← Daemon", description: "投影 durable artifacts、publishOutcome、publishPrecheck 与 nextActions。" }
 ]);
 
 export const OWNERSHIP = Object.freeze([
   { object: "Approved task bytes", owner: "Host → TaskSource Artifact", rule: "SHA-256 绑定用户真正批准的字节" },
-  { object: "Run state", owner: "Daemon / StateStore", rule: "schema v5 · CAS · fence · request receipts" },
+  { object: "Run state", owner: "Daemon / StateStore", rule: "schema v6 · CAS · fence · request receipts" },
   { object: "Worker workspace", owner: "Daemon", rule: "Pi 只能写当前 Run 的私有 sandbox" },
-  { object: "Candidate", owner: "StateStore Artifacts", rule: "始终是 Run baseline → 当前 result 的累计差异" },
+  { object: "Candidate", owner: "StateStore Artifacts", rule: "始终是 Run baseline → 当前 result 的累计差异，并绑定 REVISION_RESULT" },
   { object: "Reviewer session", owner: "Host", rule: "首轮 CREATE；修复轮 RESUME 唯一绑定" },
-  { object: "Original project writes", owner: "Publish Adapter", rule: "全路径 preflight 后按 operationId 应用和对账" }
+  { object: "Publish source", owner: "Daemon / Run Git object store", rule: "Candidate + immutable REVISION_RESULT 确定性派生 ApplyOperation 与 blobRef" },
+  { object: "SmartFlow-managed original-project writes", owner: "Publish Adapter", rule: "能力、lease 与全路径 preflight 后按 stable operationId 应用和对账" },
+  { object: "Manual merge", owner: "用户 / owning Host", rule: "仅在发布暂停后外部执行；confirm_manual_publish 只观察精确 target state" }
 ]);
 
 export const INVARIANTS = Object.freeze([
-  "当前 durable 主线是 PREPARING → RUNNING → REVIEW_PENDING → REVIEWING → READY_TO_PUBLISH → PUBLISHING → COMPLETED。",
+  "自动 Publish 的 durable 主线是 PREPARING → RUNNING → REVIEW_PENDING → REVIEWING → READY_TO_PUBLISH → PUBLISHING → COMPLETED。",
   "Review finalize 在一次 mutation 中直接进入发布、FIXING 或 PAUSED；CLAIMING 与 LEADER_DECISION 不是现行主干 checkpoint。",
   "自动 repair 的回边固定指向 PREPARING(revision N+1)；安全 repair 不经过 REPAIR_TASKS_READY pause。",
   "每个 Revision 使用新的 Worker Attempt；修复轮必须 RESUME 同一个 Reviewer session。",
   "autoRepairRounds 与 noProgressCount 都有 15 的安全边界，但含义不同。",
-  "任何 Publish PARTIAL/UNKNOWN 都不是成功；只有完整 COMMITTED 证据才能进入 COMPLETED。",
+  "Publish 输入只能由绑定 Candidate + immutable REVISION_RESULT + Run Git object store 确定性派生；当前产物是操作、attempt 与结果 journal。",
+  "能力失败或 PRECHECK_CONFLICT 仍无 PublishAttempt；owning Host 可用 worktreePath 人工合并，但 confirm_manual_publish 只有精确 target match 才能 COMMITTED。",
+  "任何 Publish PARTIAL、UNKNOWN 或 PUBLISH_RECOVERY_BLOCKED 都不是成功，也不能通过人工确认或其他恢复动作绕过。",
   "DONE 是 ReviewTurnOutput.kind，不是 RunPhase；FAILED 虽在 schema 中定义，但当前普通 production 路径未定位主动 producer。"
 ]);
 

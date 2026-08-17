@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -7,16 +7,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   PublishService,
-  createDeliveryBundle,
-  signDeliveryManifest,
-  signingKeyId,
   type ApplyOperation,
   type PublishAttemptRecord,
   type PublishAttemptStore,
   type PublishResult,
   type WorkspaceApplyAdapter
 } from "@smartflow/publish";
-import { verifyBundleForCli } from "../../apps/cli/src/bundle-verify.js";
 
 function hash(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -199,33 +195,15 @@ describe("publish safety outcomes", () => {
     expect(conflictApplyCalls).toBe(0);
     expect(await readFile(resolve(conflictRoot, "new.txt"), "utf8")).toBe("user change");
 
-    const bundleRoot = await mkdtemp(resolve(tmpdir(), "smartflow-bundle-"));
+    const manualRoot = await mkdtemp(resolve(tmpdir(), "smartflow-manual-publish-"));
     expect(
-      await new PublishService(new Store()).publish(bundleRoot, bindings, [addOperation()], undefined)
-    ).toEqual({ status: "BUNDLE_READY", reason: "PUBLISH_ADAPTER_UNAVAILABLE" });
-    const bundle = createDeliveryBundle({
-      revision: 1,
-      taskManifestHash: "1".repeat(64),
-      baselineHash: "2".repeat(64),
-      candidateHash: bindings.candidateHash,
-      reviewHash: bindings.reviewHash,
-      operations: [addOperation()],
-      patch: "+new",
-      blobs: { "new.txt": Buffer.from("new") }
+      await new PublishService(new Store()).publish(manualRoot, bindings, [addOperation()], undefined)
+    ).toEqual({
+      status: "MANUAL_PUBLISH_REQUIRED",
+      reason: "PUBLISH_ADAPTER_UNAVAILABLE"
     });
-    expect(bundle.canonicalManifestHash).toMatch(/^[a-f0-9]{64}$/u);
-    const signer = generateKeyPairSync("ed25519");
-    const keyId = signingKeyId(signer.publicKey);
-    const envelope = signDeliveryManifest(bundle.canonicalManifestHash, {
-      privateKey: signer.privateKey,
-      publicKey: signer.publicKey,
-      keyId
-    });
-    expect(verifyBundleForCli(bundle, envelope, new Map([[keyId, signer.publicKey]])).valid).toBe(true);
-    expect(
-      verifyBundleForCli({ ...bundle, patch: "tampered" }, envelope, new Map([[keyId, signer.publicKey]])).valid
-    ).toBe(false);
-    await expect(readFile(resolve(bundleRoot, "new.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(resolve(manualRoot, "new.txt"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
 
     const partialRoot = await mkdtemp(resolve(tmpdir(), "smartflow-partial-"));
     const partialAdapter: WorkspaceApplyAdapter = {

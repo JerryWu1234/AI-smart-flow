@@ -391,10 +391,6 @@ describe("installed SmartFlow package", () => {
       expect(repairMarker).toMatch(/^\/\/ SMARTFLOW_DYNAMIC_REPAIR_[0-9a-f]{20}$/u);
 
       const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
-      const deliveryBundle = artifacts
-        .map((artifact) => asRecord(artifact, "result artifact"))
-        .find((artifact) => String(artifact.relativePath).endsWith("/delivery-bundle.json"));
-      if (deliveryBundle === undefined) throw new Error("Installed result omitted DeliveryBundle");
       const taskSourceArtifact = artifacts
         .map((artifact) => asRecord(artifact, "result artifact"))
         .find((artifact) =>
@@ -411,39 +407,13 @@ describe("installed SmartFlow package", () => {
         "revision-1",
         "task-source.md"
       ), "utf8")).toBe(tasksSource);
-      const bundleArtifactPath = resolve(
-        daemonRoot,
-        "projects",
-        String(scope.projectId),
-        String(deliveryBundle.relativePath)
-      );
-      const exportedBundle = resolve(root, "exported-bundle");
-      lifecycleStage = "bundle-export";
-      const exported = await executeJson(
-        entry,
-        ["bundle", "export", "--artifact", bundleArtifactPath, "--output", exportedBundle],
-        { cwd: projectRoot, env: environment, timeout: 30_000, maxBuffer: 20_000_000 }
-      );
-      expect(exported.result).toMatchObject({ exported: true });
-      lifecycleStage = "bundle-verify";
-      const verified = await executeJson(
-        entry,
-        [
-          "bundle",
-          "verify",
-          exportedBundle,
-          "--trusted-key",
-          resolve(exportedBundle, "public-key.pem")
-        ],
-        { cwd: projectRoot, env: environment, timeout: 30_000, maxBuffer: 20_000_000 }
-      );
-      expect(verified.result).toEqual({ localIntegrity: true, trustedSignature: true, valid: true });
+      lifecycleStage = "published-result";
       const publishedSource = await readFile(resolve(projectRoot, "sum.js"), "utf8");
       expect(publishedSource).not.toBe(sourceBefore);
       expect(publishedSource).toContain("subtract");
       expect(publishedSource).toContain(repairMarker);
       expect(`${lifecycleProcess.stdout}\n${lifecycleProcess.stderr}`).not.toContain("never-log-this");
-      expect(JSON.stringify({ lifecycle, exported, verified })).not.toContain("never-log-this");
+      expect(JSON.stringify({ lifecycle, result })).not.toContain("never-log-this");
     } catch (error) {
       throw new Error(
         `Installed MCP lifecycle failed at ${lifecycleStage}`,

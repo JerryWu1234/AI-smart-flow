@@ -11,16 +11,13 @@ import {
   type SmartFlowConfig
 } from "@smartflow/daemon";
 import { PiProvider } from "@smartflow/provider-pi";
-import {
-  FilesystemWorkspaceApplyAdapter,
-  loadOrCreateInstallationSigningKey
-} from "@smartflow/publish";
+import { FilesystemWorkspaceApplyAdapter } from "@smartflow/publish";
 import { ExecutionSandboxAdapter } from "@smartflow/workspace";
 
 export type CapabilityStatus = "ready" | "optional-unavailable" | "blocking-unavailable";
 
 export interface DoctorCapability {
-  id: "config" | "data-dir" | "sandbox" | "provider" | "apply-adapter" | "signing-key";
+  id: "config" | "data-dir" | "sandbox" | "provider" | "apply-adapter";
   required: boolean;
   status: CapabilityStatus;
   summary: string;
@@ -152,17 +149,9 @@ function defaultProbes(
           available,
           summary: available
             ? "Host adapter can publish after checking all Candidate paths"
-            : "No behavior-verified publish adapter; reviewed results will use DeliveryBundle",
+            : "No behavior-verified publish adapter; manual publish confirmation will be required",
           details: { ...capabilities }
         };
-      }
-    },
-    {
-      id: "signing-key",
-      required: true,
-      async run(): Promise<DoctorProbeObservation> {
-        const key = await loadOrCreateInstallationSigningKey(resolve(dataDirectory, "keys", "daemon-ed25519.pem"));
-        return { available: true, summary: "Installation Ed25519 signing key is ready", details: { keyId: key.keyId } };
       }
     }
   ];

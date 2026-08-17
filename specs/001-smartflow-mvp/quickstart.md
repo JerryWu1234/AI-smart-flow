@@ -56,7 +56,7 @@ This walkthrough validates the Pi migration, removal of Broker/OpenCode, daemon-
 6. Inspect state writes to prove the Daemon used one atomic Review-begin mutation and one Review-plus-decision finalization; no claim/renew or independent Leader-decision bridge exists.
 7. Confirm the registered public MCP surface is exactly `smartflow_execute`, `smartflow_review_turn`, `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`.
 8. Confirm the old `smartflow_wait`, claim/renew, submit-review, and submit-leader symbols, schemas, handlers, registrations, and aliases do not exist.
-9. Confirm `HostActionLoop` and `apps/host-skill/src/action-loop.ts` are absent; the Host workflow has no alternate Review orchestration branch.
+9. Confirm `HostActionLoop` and `packages/host-skill/src/action-loop.ts` are absent; the Host workflow has no alternate Review orchestration branch.
 
 ## 7. Validate independent Run management APIs
 
@@ -92,16 +92,17 @@ This walkthrough validates the Pi migration, removal of Broker/OpenCode, daemon-
 1. Record Baseline `A`; produce Revision 1 `A → B`, then repair Revision 2 `B → C`.
 2. Confirm formal Candidate is `A → C`, repair evidence is `B → C`, and old evidence is immutable.
 3. Confirm the same Reviewer examines the latest full result and cumulative changed paths.
-4. On automatic accept, acquire Project Publish lease and publish a non-conflicting Candidate; expect `N/N` before COMPLETED.
-5. For overlapping Runs, publish first then expect second `PRECHECK_CONFLICT`, full paths, `0/N`, and DeliveryBundle.
-6. Disable batch capability; confirm bundle only. Simulate PARTIAL/UNKNOWN; confirm `PUBLISH_RECOVERY_BLOCKED`, never false `DONE`.
+4. On automatic accept, confirm Publish derives `ApplyOperation[]` from the bound Candidate plus immutable `REVISION_RESULT`, reads blobs from the Run Git object store with hash/size checks, acquires the Project Publish lease, and publishes a non-conflicting Candidate; expect `N/N` before COMPLETED.
+5. For overlapping Runs, publish the first and expect the second to return `PRECHECK_CONFLICT`, full paths, `0/N`, `activeWorkspaceChanged=false`, no PublishAttempt, and an owning-Host `USER_INPUT_REQUIRED` containing the reviewed Candidate `worktreePath` plus `retry_publish | confirm_manual_publish | cancel`.
+6. Submit `confirm_manual_publish` before the original project matches the Candidate; expect `MANUAL_PUBLISH_TARGET_MISMATCH` and no completion. Manually merge the reviewed result into the original project, submit confirmation again, and require every target kind/hash/mode to match before `manual-confirmation-v1` becomes COMMITTED.
+7. Disable required adapter batch/CAS/query capability and expect `MANUAL_PUBLISH_REQUIRED` with zero writes and no attempt. Separately simulate PARTIAL/UNKNOWN or an operation-identity mismatch; confirm `PUBLISH_RECOVERY_BLOCKED`, no `confirm_manual_publish` option, and never a false `DONE`.
 
 ## 11. Verify legacy removal and evidence boundary
 
 1. Confirm packages/dependencies contain no OpenCode, Claude Provider placeholder, or execution-broker runtime.
 2. Confirm protocol/state contain no Broker session, effects, managed-process ledger, Worker block, or `smartflow_submit_tool_decision`.
 3. Confirm runtime/help contains none of `SMARTFLOW_WORKER`, `SMARTFLOW_MODEL_*`, `SMARTFLOW_PI_PROVIDER`, or `SMARTFLOW_PI_CREDENTIAL_ENV`.
-4. Reconcile a terminal Run; confirm temporary Workspace/runtime/index/object store are deleted while audit Artifacts remain.
+4. Reconcile a terminal Run; confirm temporary Workspace/runtime/index/object store are deleted while Task/Snapshot/Candidate/Review references, PublishAttempt/PublishResult, precheck/recovery facts, and audit records remain. Confirm no transfer package, signature key, or bundle CLI surface is created.
 5. Run the local protocol, contract, integration, security, E2E, build, typecheck, lint, and diff checks listed by the repository.
 6. Treat the covered production-composition two-tool success as scenario evidence only.
 7. Confirm T204 coverage rejects cross-Host continuations, persists atomic Review begin/finalize transitions, reconstructs a lost response from durable `AWAITING_REVIEW`, and recovers the single deadline before general Run recovery.

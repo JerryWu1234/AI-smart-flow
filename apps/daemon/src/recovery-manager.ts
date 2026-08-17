@@ -9,9 +9,7 @@ import {
 } from "@smartflow/protocol";
 import {
   operationsHash,
-  parseSerializedDeliveryBundle,
-  verifyDeliverySignature,
-  verifyLocalDeliveryBundle,
+  stableOperationId,
   type ApplyOperation
 } from "@smartflow/publish";
 import {
@@ -30,10 +28,10 @@ import {
   verifyCandidateSnapshotBindings,
   verifyGitWorkspaceSnapshot,
   type Candidate,
-  type CandidateOperation,
   type GitWorkspaceSnapshot
 } from "@smartflow/workspace";
 
+import { gitPublishOperations } from "./git-publish-source.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
 
 const terminalPhases = new Set<RunPhase>(["COMPLETED", "CANCELED", "FAILED"]);
@@ -122,6 +120,7 @@ function requiresPublishApproval(run: RunRecord): boolean {
   if (run.phase !== "PAUSED") return false;
   const code = run.pause?.code;
   return code?.startsWith("PUBLISH_") === true ||
+    code === "MANUAL_PUBLISH_TARGET_MISMATCH" ||
     code === "PROJECT_PUBLISH_BUSY" ||
     (code === "RUNTIME_STAGE_FAILED" && run.lastError?.stage === "publish");
 }
@@ -138,34 +137,6 @@ function publishResultMatchesOperations(
     if (pathResult.status !== "COMMITTED") return result.status !== "COMMITTED";
     return pathResult.observedHash === operation.newHash &&
       pathResult.observedMode === operation.newMode;
-  });
-}
-
-function publishOperationsMatchCandidate(
-  candidateOperations: readonly CandidateOperation[],
-  publishOperations: readonly ApplyOperation[]
-): boolean {
-  if (candidateOperations.length !== publishOperations.length) return false;
-  const byPath = new Map(publishOperations.map((operation) => [operation.path, operation]));
-  return candidateOperations.every((candidateOperation) => {
-    const operation = byPath.get(candidateOperation.path);
-    const oldEntry = "oldEntry" in candidateOperation ? candidateOperation.oldEntry : undefined;
-    const newEntry = "newEntry" in candidateOperation ? candidateOperation.newEntry : undefined;
-    if (
-      operation === undefined ||
-      oldEntry?.kind === "SYMLINK" ||
-      newEntry?.kind === "SYMLINK" ||
-      operation.type !== candidateOperation.kind ||
-      operation.expectedOldKind !== (oldEntry === undefined ? "ABSENT" : "FILE") ||
-      operation.expectedOldHash !== (oldEntry?.sha256 ?? null) ||
-      operation.expectedOldMode !== (oldEntry?.mode ?? null) ||
-      operation.newHash !== (newEntry?.sha256 ?? null) ||
-      operation.newMode !== (newEntry?.mode ?? null)
-    ) return false;
-    if (newEntry === undefined) return operation.blobRef === null;
-    return operation.blobRef !== null &&
-      operation.blobRef.sha256.replace(/^sha256:/u, "") === newEntry.sha256 &&
-      operation.blobRef.size === newEntry.size;
   });
 }
 
@@ -224,6 +195,7 @@ export async function verifyRunArtifacts(
 
     const candidateBytes = bytesByName.get("candidate");
     let candidate: Candidate | undefined;
+    let resultSnapshot: GitWorkspaceSnapshot | undefined;
     if (candidateBytes !== undefined) {
       candidate = json(candidateBytes) as Candidate;
       if (!verifyCandidate(candidate)) return "ARTIFACT_SEMANTIC_MISMATCH:candidate";
@@ -252,14 +224,14 @@ export async function verifyRunArtifacts(
         ) return "ARTIFACT_SEMANTIC_MISMATCH:candidateSnapshots";
         const runBaseline = json(runBaselineBytes) as GitWorkspaceSnapshot;
         const revisionInput = json(inputBytes) as GitWorkspaceSnapshot;
-        const revisionResult = json(resultBytes) as GitWorkspaceSnapshot;
+        resultSnapshot = json(resultBytes) as GitWorkspaceSnapshot;
         if (
           baselineSnapshot.snapshotHash !== runBaseline.snapshotHash ||
           !verifyCandidateSnapshotBindings({
             candidate,
             runBaseline,
             revisionInput,
-            revisionResult
+            revisionResult: resultSnapshot
           })
         ) return "ARTIFACT_SEMANTIC_MISMATCH:candidateSnapshots";
       }
@@ -308,30 +280,35 @@ export async function verifyRunArtifacts(
       if (!leaderAccepted) return "ARTIFACT_SEMANTIC_MISMATCH:leaderDecision";
     }
 
-    const deliveryBytes = bytesByName.get("deliveryBundle");
-    if (deliveryBytes !== undefined) {
-      const parsed = parseSerializedDeliveryBundle(deliveryBytes);
-      const operations = parsed.bundle.manifest.operations;
+    const publishSourceMigration = run.recovery?.publishSourceMigration;
+    const hasLegacyOperationIdentity = typeof publishSourceMigration === "object" &&
+      publishSourceMigration !== null &&
+      !Array.isArray(publishSourceMigration) &&
+      (publishSourceMigration as Record<string, unknown>).sourceSchemaVersion === 5 &&
+      (publishSourceMigration as Record<string, unknown>).legacyOperationIdentity === true;
+    const publishNeedsReconciliation = run.publish?.status === "PREPARED" ||
+      run.publish?.status === "SUBMITTED" ||
+      run.pause?.code === "PUBLISH_RECOVERY_BLOCKED";
+    if (run.publish !== undefined && !publishNeedsReconciliation && !hasLegacyOperationIdentity) {
+      if (candidate === undefined || resultSnapshot === undefined || reviewHash === undefined) {
+        return "ARTIFACT_SEMANTIC_MISMATCH:publish";
+      }
+      const operations = gitPublishOperations(candidate, resultSnapshot);
+      const expectedOperationsHash = operationsHash(operations);
       if (
-        !verifyLocalDeliveryBundle(parsed.bundle) ||
-        !verifyDeliverySignature(
-          parsed.envelope,
-          new Map([[parsed.envelope.keyId, parsed.signerPublicKey]])
-        ) ||
-        parsed.bundle.manifest.revision !== run.revision ||
-        parsed.bundle.manifest.taskManifestHash !== digest(run.taskManifest.sha256) ||
-        baselineSnapshot === undefined ||
-        parsed.bundle.manifest.baselineHash !== baselineSnapshot.snapshotHash ||
-        candidate === undefined ||
-        parsed.bundle.manifest.candidateHash !== getCandidateHash(candidate) ||
-        parsed.bundle.manifest.reviewHash !== reviewHash ||
-        !publishOperationsMatchCandidate(candidate.operations, operations) ||
-        (run.publish !== undefined &&
-          (run.publish.revision !== run.revision ||
-            run.publish.operationsHash !== operationsHash(operations))) ||
-        (run.publish?.result !== undefined &&
+        run.publish.revision !== run.revision ||
+        run.publish.operationsHash !== expectedOperationsHash ||
+        run.publish.operationId !== stableOperationId({
+          projectId: state.projectId,
+          jobId: run.jobId,
+          revision: run.revision,
+          candidateHash: getCandidateHash(candidate),
+          reviewHash,
+          operationsHash: expectedOperationsHash
+        }) ||
+        (run.publish.result !== undefined &&
           !publishResultMatchesOperations(run.publish.result, operations))
-      ) return "ARTIFACT_SEMANTIC_MISMATCH:deliveryBundle";
+      ) return "ARTIFACT_SEMANTIC_MISMATCH:publish";
     }
   } catch {
     return "ARTIFACT_SEMANTIC_VALIDATION_FAILED";

@@ -127,7 +127,6 @@ export const runRecordSchema = z
     noProgressCount: z.number().int().nonnegative(),
     autoRepairRounds: z.number().int().nonnegative().optional(),
     publish: publishAttemptSchema.optional(),
-    deliveryBundle: artifactRefSchema.optional(),
     cancellation: canonicalRecordSchema.optional(),
     recovery: canonicalRecordSchema.optional(),
     pause: z
@@ -297,17 +296,77 @@ function migrateV4Run(value: unknown): unknown {
   };
 }
 
+function migratePublishActions(value: unknown, pauseCode: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  const canConfirm = pauseCode === "PUBLISH_ADAPTER_UNAVAILABLE" ||
+    pauseCode === "PUBLISH_PRECHECK_CONFLICT";
+  const migrated: unknown[] = [];
+  for (const action of value as unknown[]) {
+    if (action === "export_bundle") {
+      if (canConfirm) migrated.push("confirm_manual_publish");
+    } else {
+      migrated.push(action);
+    }
+  }
+  return [...new Set(migrated)];
+}
+
+function migrateV5Run(value: unknown): unknown {
+  const run = plainRecord(value);
+  if (run === undefined) return value;
+  const migrated = { ...run };
+  const hadLegacyPublishSource = Object.hasOwn(migrated, "deliveryBundle");
+  delete migrated.deliveryBundle;
+
+  const pause = plainRecord(migrated.pause);
+  if (pause !== undefined) {
+    migrated.pause = {
+      ...pause,
+      resumeActions: migratePublishActions(pause.resumeActions, pause.code)
+    };
+  }
+  const lastError = plainRecord(migrated.lastError);
+  if (lastError !== undefined) {
+    migrated.lastError = {
+      ...lastError,
+      nextActions: migratePublishActions(lastError.nextActions, pause?.code)
+    };
+  }
+  if (hadLegacyPublishSource && plainRecord(migrated.publish) !== undefined) {
+    migrated.recovery = {
+      ...(plainRecord(migrated.recovery) ?? {}),
+      publishSourceMigration: {
+        sourceSchemaVersion: 5,
+        legacyOperationIdentity: true
+      }
+    };
+  }
+  return migrated;
+}
+
 function migrateProjectStateInput(value: unknown): unknown {
-  const state = plainRecord(value);
-  if (state?.schemaVersion !== 4) return value;
+  let state = plainRecord(value);
+  if (state?.schemaVersion === 4) {
+    const runs = plainRecord(state.runs);
+    state = {
+      ...state,
+      schemaVersion: 5,
+      runs: runs === undefined
+        ? state.runs
+        : Object.fromEntries(
+            Object.entries(runs).map(([jobId, run]) => [jobId, migrateV4Run(run)])
+          )
+    };
+  }
+  if (state?.schemaVersion !== 5) return state ?? value;
   const runs = plainRecord(state.runs);
   return {
     ...state,
-    schemaVersion: 5,
+    schemaVersion: 6,
     runs: runs === undefined
       ? state.runs
       : Object.fromEntries(
-          Object.entries(runs).map(([jobId, run]) => [jobId, migrateV4Run(run)])
+          Object.entries(runs).map(([jobId, run]) => [jobId, migrateV5Run(run)])
         )
   };
 }
@@ -315,7 +374,7 @@ function migrateProjectStateInput(value: unknown): unknown {
 export const projectStateSchema = z.preprocess(
   migrateProjectStateInput,
   z.object({
-    schemaVersion: z.literal(5),
+    schemaVersion: z.literal(6),
     projectId: z.string().min(1),
     canonicalProjectRoot: z.string().min(1),
     stateVersion: z.number().int().nonnegative(),
@@ -400,7 +459,6 @@ export interface RunArtifactBinding {
     | "CANDIDATE"
     | "REVIEW"
     | "LEADER_DECISION"
-    | "DELIVERY_BUNDLE"
     | "REPAIR_SOURCE"
     | "PI_SESSION"
     | "ERROR_EVIDENCE";
@@ -469,14 +527,17 @@ export function runArtifactInventory(run: RunRecord): RunArtifactInventory {
     "FIXING", "REVIEW_PENDING", "REVIEWING", "LEADER_DECISION",
     "READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"
   ]).has(run.phase);
-  const publishPaused = run.phase === "PAUSED" && (run.pause?.code.startsWith("PUBLISH_") ?? false);
+  const publishPaused = run.phase === "PAUSED" && (
+    (run.pause?.code.startsWith("PUBLISH_") ?? false) ||
+    run.pause?.code === "MANUAL_PUBLISH_TARGET_MISMATCH" ||
+    run.pause?.code === "PROJECT_PUBLISH_BUSY"
+  );
   const reviewPaused = run.phase === "PAUSED" && run.pause?.code === "HOST_REVIEW_UNAVAILABLE";
   const repairPaused = run.phase === "PAUSED" && (run.pause?.code.startsWith("REPAIR_") ?? false);
   const candidate = add("candidate", run.candidate, run.revision, "CANDIDATE", requiresCandidate || publishPaused || reviewPaused || repairPaused);
   add("baseline", run.baseline, 1, "BASELINE", requiresBaseline || publishPaused || reviewPaused || repairPaused);
   add("review", run.review, run.revision, "REVIEW", new Set(["LEADER_DECISION", "READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase) || publishPaused);
   add("leaderDecision", run.leaderDecision, run.revision, "LEADER_DECISION", new Set(["READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase) || publishPaused);
-  add("deliveryBundle", run.deliveryBundle, run.revision, "DELIVERY_BUNDLE", run.phase === "PUBLISHING" || run.phase === "COMPLETED" || publishPaused);
 
   const recovery = record(run.recovery);
   const repairDraft = record(recovery?.repairDraft);

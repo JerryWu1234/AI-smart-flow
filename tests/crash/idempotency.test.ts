@@ -9,7 +9,7 @@ import {
   type AtomicWriteHooks,
   type ProjectState
 } from "@smartflow/state-store";
-import { createProjectState } from "../../packages/state-store/src/test-fixture.js";
+import { createProjectState } from "../fixtures/state-store/test-fixture.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 
 class FaultingStateStore extends StateStore {

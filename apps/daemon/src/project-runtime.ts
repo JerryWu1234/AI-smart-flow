@@ -202,7 +202,10 @@ function resultStatus(run: RunRecord): ResultOutput["status"] {
     return run.publish?.status === "COMMITTED" ? "COMMITTED" : "FAILED";
   }
   if (run.phase === "PAUSED") {
-    if (run.pause?.code === "PUBLISH_ADAPTER_UNAVAILABLE") return "BUNDLE_READY";
+    if (
+      run.pause?.code === "PUBLISH_ADAPTER_UNAVAILABLE" ||
+      run.pause?.code === "MANUAL_PUBLISH_TARGET_MISMATCH"
+    ) return "MANUAL_PUBLISH_REQUIRED";
     if (run.pause?.code === "PUBLISH_PRECHECK_CONFLICT") return "PRECHECK_CONFLICT";
     if (run.pause?.code === "PUBLISH_RECOVERY_BLOCKED") return "PUBLISH_RECOVERY_BLOCKED";
     return "PAUSED";
@@ -218,7 +221,6 @@ const readOnlyResumeActions = new Set<ResumeInput["resumeAction"]>([
   "inspect_conflict",
   "inspect_repair_diff",
   "inspect_no_progress",
-  "export_bundle",
   "leader_append_repair_tasks"
 ]);
 
@@ -243,6 +245,14 @@ function closedResumeRoute(
       ]).has(code ?? "") || (
         code === "RUNTIME_STAGE_FAILED" && run.lastError?.stage === "publish"
       ))
+        ? { phase: "READY_TO_PUBLISH", schedule: "publish" }
+        : undefined;
+    case "confirm_manual_publish":
+      return run.publish === undefined && new Set([
+        "PUBLISH_ADAPTER_UNAVAILABLE",
+        "PUBLISH_PRECHECK_CONFLICT",
+        "MANUAL_PUBLISH_TARGET_MISMATCH"
+      ]).has(code ?? "")
         ? { phase: "READY_TO_PUBLISH", schedule: "publish" }
         : undefined;
     case "retry_cancel":
@@ -287,7 +297,6 @@ function closedResumeRoute(
     case "inspect_conflict":
     case "inspect_repair_diff":
     case "inspect_no_progress":
-    case "export_bundle":
       return undefined;
   }
 }
@@ -308,6 +317,7 @@ function resumeSchedule(
           ? "none"
           : "recover";
     case "retry_publish":
+    case "confirm_manual_publish":
       return "publish";
     case "retry_cancel":
     case "cancel":
@@ -330,7 +340,6 @@ function resumeSchedule(
     case "inspect_conflict":
     case "inspect_repair_diff":
     case "inspect_no_progress":
-    case "export_bundle":
       return "none";
   }
 }
@@ -495,7 +504,7 @@ export class ProjectRuntime {
     const projectId = projectIdForRoot(canonicalRoot);
     const store = this.store(projectId);
     await store.initialize({
-      schemaVersion: 5,
+      schemaVersion: 6,
       projectId,
       canonicalProjectRoot: canonicalRoot,
       stateVersion: 0,
@@ -805,6 +814,28 @@ export class ProjectRuntime {
         const resumedRecovery = input.resumeAction === "restore_approved_tasks"
           ? clearApprovedSourceDrift(run.recovery)
           : run.recovery;
+        const previousManualConfirmation = run.recovery?.manualPublishConfirmation;
+        const previousManualRecord = typeof previousManualConfirmation === "object" &&
+          previousManualConfirmation !== null &&
+          !Array.isArray(previousManualConfirmation)
+          ? previousManualConfirmation as Record<string, unknown>
+          : undefined;
+        const manualSourcePauseCode = run.pause.code === "MANUAL_PUBLISH_TARGET_MISMATCH" &&
+          typeof previousManualRecord?.pauseCode === "string"
+          ? previousManualRecord.pauseCode
+          : run.pause.code;
+        const nextRecovery = input.resumeAction === "confirm_manual_publish"
+          ? {
+              ...resumedRecovery,
+              manualPublishConfirmation: {
+                status: "REQUESTED",
+                revision: run.revision,
+                pauseCode: manualSourcePauseCode,
+                requestId: input.requestId,
+                requestedAt: now()
+              }
+            }
+          : resumedRecovery;
         return {
           nextState: {
             ...state,
@@ -824,8 +855,9 @@ export class ProjectRuntime {
                       }
                     }
                   : {}),
-                ...(input.resumeAction === "restore_approved_tasks"
-                    ? { recovery: resumedRecovery }
+                ...(input.resumeAction === "restore_approved_tasks" ||
+                  input.resumeAction === "confirm_manual_publish"
+                    ? { recovery: nextRecovery }
                     : {}),
                 ...(retriedReviewAction?.type === "REVIEW"
                   ? {
@@ -910,9 +942,7 @@ export class ProjectRuntime {
       phase: run.phase,
       status,
       artifacts: artifactList(run),
-      nextActions: run.pause?.resumeActions ?? (
-        status === "BUNDLE_READY" ? ["bundle_export", "bundle_verify"] : []
-      ),
+      nextActions: run.pause?.resumeActions ?? [],
       ...(publicRepairDraft(run) === undefined ? {} : { repairDraft: publicRepairDraft(run) }),
       ...(publicPublishOutcome(run) === undefined ? {} : { publishOutcome: publicPublishOutcome(run) }),
       ...(publicPublishPrecheck(run) === undefined

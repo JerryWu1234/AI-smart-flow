@@ -10,9 +10,11 @@ import {
   type RecoveryAction,
   type RecoveryRuntime
 } from "@smartflow/daemon";
-import { parseSerializedDeliveryBundle, type PublishServiceResult } from "@smartflow/publish";
+import type { PublishServiceResult } from "@smartflow/publish";
 import type { RunPhase } from "@smartflow/protocol";
 import { canonicalHash } from "@smartflow/state-store";
+import type { Candidate, GitWorkspaceSnapshot } from "@smartflow/workspace";
+import { gitPublishOperations } from "../../apps/daemon/src/git-publish-source.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 import { createLifecycleStore } from "./recovery-test-fixture.js";
 
@@ -100,9 +102,9 @@ describe("phase-complete crash recovery", () => {
     const revision = run?.gitWorkspace?.revisions["1"];
     if (
       run?.publish === undefined ||
-      run.deliveryBundle === undefined ||
+      run.candidate === undefined ||
       run.gitWorkspace === undefined ||
-      revision === undefined
+      revision?.resultSnapshot === undefined
     ) throw new Error("publish cleanup fixture missing");
     const publish = { ...run.publish, adapterId: "filesystem-preflight-batch-v1" };
     const setupAt = new Date().toISOString();
@@ -121,9 +123,13 @@ describe("phase-complete crash recovery", () => {
       updatedAt: setupAt
     });
     const beforeRecovery = await store.readState();
-    const bundle = parseSerializedDeliveryBundle(
-      await store.readArtifact(run.deliveryBundle)
-    ).bundle;
+    const candidate = JSON.parse(
+      new TextDecoder().decode(await store.readArtifact(run.candidate))
+    ) as Candidate;
+    const resultSnapshot = JSON.parse(
+      new TextDecoder().decode(await store.readArtifact(revision.resultSnapshot))
+    ) as GitWorkspaceSnapshot;
+    const operations = gitPublishOperations(candidate, resultSnapshot);
     const workspacePath = resolve(store.dataDirectory, revision.workspacePath);
     const indexPath = resolve(store.dataDirectory, revision.indexPath);
     const gitDirectory = dirname(resolve(store.dataDirectory, run.gitWorkspace.objectDirectory));
@@ -136,7 +142,7 @@ describe("phase-complete crash recovery", () => {
       operationId: publish.operationId,
       operationsHash: publish.operationsHash,
       status: "COMMITTED" as const,
-      paths: bundle.manifest.operations.map((operation) => ({
+      paths: operations.map((operation) => ({
         path: operation.path,
         status: "COMMITTED" as const,
         observedHash: operation.newHash,
@@ -150,10 +156,7 @@ describe("phase-complete crash recovery", () => {
       JSON.stringify(publishResult),
       "utf8"
     );
-    const coordinator = new PublishCoordinator(
-      store,
-      resolve(store.dataDirectory, "unused-recovery-signing-key.pem")
-    );
+    const coordinator = new PublishCoordinator(store);
     const committedRuntime: RecoveryRuntime = {
       ...runtime,
       reconcilePublish: async (operationId, operationHash) => publishObservation(
@@ -179,7 +182,7 @@ describe("phase-complete crash recovery", () => {
     await expect(access(workspacePath)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(access(indexPath)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(access(gitDirectory)).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(store.readArtifact(run.deliveryBundle)).resolves.toBeInstanceOf(Uint8Array);
+    await expect(store.readArtifact(revision.resultSnapshot)).resolves.toBeInstanceOf(Uint8Array);
 
     await expect(new RecoveryManager(store, committedRuntime).recover(run.jobId))
       .resolves.toMatchObject({ phase: "COMPLETED", action: "NONE" });

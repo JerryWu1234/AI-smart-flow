@@ -65,10 +65,11 @@ The Host opens that worktree, rereads the synchronized Task and current files, e
 
 ### `USER_INPUT_REQUIRED`
 
-Returns a durable pause with `turnToken`, `pause.code`, `pause.message`, legal mutable `options`, separate read-only `inspectionOptions`, the canonical paused `result`, and, when needed, `requiredInput`. Revision approval uses `mode: "COLLECT"` with a non-submit-ready `inputForm` when user values are missing, or `mode: "CONFIRM"` with a complete schema-valid `answer` when all values are available. It may include current Review or repair draft evidence, but never the Review worktree path.
+Returns a durable pause with `turnToken`, `pause.code`, `pause.message`, legal mutable `options`, separate read-only `inspectionOptions`, the canonical paused `result`, and, when needed, `requiredInput`. Revision approval uses `mode: "COLLECT"` with a non-submit-ready `inputForm` when user values are missing, or `mode: "CONFIRM"` with a complete schema-valid `answer` when all values are available. It may include current Review or repair draft evidence. An optional `worktreePath` is allowed only for an owning Host's publish-related pause; non-publish pauses never disclose one.
 
 - `AUTOMATIC_REPAIR_LIMIT` may offer `resume_review_decision`; the owning Host submits that answer through `smartflow_review_turn` with the active `turnToken`. HostTurnCoordinator atomically re-evaluates the stored Review with a reset allowance and proceeds directly to repair or another real pause.
 - `INVALID_REVIEW` offers only `cancel`; incomplete Review without actionable blocking findings is never converted into guessed repair work.
+- `PUBLISH_ADAPTER_UNAVAILABLE`, `PUBLISH_PRECHECK_CONFLICT`, and a follow-up `MANUAL_PUBLISH_TARGET_MISMATCH` expose the reviewed Candidate `worktreePath` only to the owning Host. The first two may offer `confirm_manual_publish`; the Host obtains user confirmation after an external merge, and the Daemon completes only if every Candidate target kind/hash/mode already matches. `PUBLISH_RECOVERY_BLOCKED` never offers this action.
 - Other pause codes expose only actions already allowed by the Run's durable `resumeActions`.
 
 Only the Host communicates these choices to the user and submits an answer through `smartflow_review_turn`. Option names such as `resume_review_decision` and `cancel` are typed ReviewTurn answer values; submitting them does not invoke the separate public `smartflow_resume` or `smartflow_cancel` APIs. Those APIs remain independent Run-management operations rather than Review continuations. In particular, public `smartflow_resume` cannot answer an active `hostTurn` checkpoint or bypass its owner/token checks.
@@ -79,7 +80,7 @@ Returned only when the Run is in `COMPLETED`, `CANCELED`, or `FAILED`. It direct
 
 ## Durable Host-turn checkpoint
 
-Project state uses schema version 5. Schema-v4 state is migrated once at startup: safe active claim states become `AWAITING_REVIEW`, while ambiguous `REVIEWING` state is paused as `HOST_REVIEW_UNAVAILABLE`. Each Run may persist:
+Project state uses schema version 6. Startup migration is explicit and idempotent: schema-v4 state first receives the historical v4→v5 Review conversion (safe active claim states become `AWAITING_REVIEW`, while ambiguous `REVIEWING` state pauses as `HOST_REVIEW_UNAVAILABLE`), then schema-v5 state is upgraded with current Publish precheck, attempt, and manual-confirmation evidence. Removed bundle references and `export_bundle` pause actions are disconnected during v5→v6 migration without deleting legacy files from disk. Each Run may persist:
 
 ```ts
 type HostTurn =
@@ -129,10 +130,10 @@ Exactly six tools are registered:
 
 ## Implementation and tests
 
-- Protocol: `packages/protocol/src/schema/mcp-tools.ts`, `packages/protocol/src/schema/protocol.test.ts`
+- Protocol: `packages/protocol/src/schema/mcp-tools.ts`, `tests/unit/packages/protocol/schema/protocol.test.ts`
 - MCP registry/handler: `apps/mcp-server/src/tools/index.ts`, `apps/mcp-server/src/tools/review-turn.ts`, `tests/contract/mcp-v5.test.ts`
-- Coordinator/recovery: `apps/daemon/src/host-turn-coordinator.ts`, `apps/daemon/src/project-runtime.ts`, `apps/daemon/src/host-turn-coordinator.test.ts`
-- State checkpoint: `packages/state-store/src/schema.ts`, `packages/state-store/src/schema.test.ts`
-- Mechanical policy: `packages/review/src/review-decision.ts`, `packages/review/src/review-decision.test.ts`
-- Host two-tool loop: `apps/host-skill/src/workflow.ts`, `apps/host-skill/src/workflow.test.ts`
+- Coordinator/recovery: `apps/daemon/src/host-turn-coordinator.ts`, `apps/daemon/src/project-runtime.ts`, `tests/unit/apps/daemon/host-turn-coordinator.test.ts`
+- State checkpoint: `packages/state-store/src/schema.ts`, `tests/unit/packages/state-store/schema.test.ts`
+- Mechanical policy: `packages/review/src/review-decision.ts`, `tests/unit/packages/review/review-decision.test.ts`
+- Host two-tool loop: `packages/host-skill/src/workflow.ts`, `tests/unit/packages/host-skill/workflow.test.ts`
 - Production composition: `tests/e2e/production-repair-loop.test.ts`

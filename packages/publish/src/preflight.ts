@@ -82,6 +82,20 @@ export function stableOperationId(bindings: {
 
 
 
+async function pathContainsSymlink(root: string, path: string): Promise<boolean> {
+  let current = root;
+  for (const part of path.split("/")) {
+    current = resolve(current, part);
+    try {
+      if ((await lstat(current)).isSymbolicLink()) return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  }
+  return false;
+}
+
 export async function preflightOperations(
   activeWorkspace: string,
   operations: readonly ApplyOperation[]
@@ -89,21 +103,7 @@ export async function preflightOperations(
   const conflicts: PreflightConflict[] = [];
   const root = await realpath(activeWorkspace);
   for (const operation of canonicalOperations(operations)) {
-    let current = root;
-    let unsafe = false;
-    for (const part of operation.path.split("/")) {
-      current = resolve(current, part);
-      try {
-        if ((await lstat(current)).isSymbolicLink()) {
-          unsafe = true;
-          break;
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
-        throw error;
-      }
-    }
-    if (unsafe) {
+    if (await pathContainsSymlink(root, operation.path)) {
       conflicts.push({ path: operation.path, reason: "UNSAFE_PATH" });
       continue;
     }
@@ -122,4 +122,36 @@ export async function preflightOperations(
     }
   }
   return conflicts;
+}
+
+export interface TargetStateObservation {
+  matches: boolean;
+  conflicts: PreflightConflict[];
+}
+
+export async function observeTargetState(
+  activeWorkspace: string,
+  operations: readonly ApplyOperation[]
+): Promise<TargetStateObservation> {
+  const conflicts: PreflightConflict[] = [];
+  const root = await realpath(activeWorkspace);
+  for (const operation of canonicalOperations(operations)) {
+    if (await pathContainsSymlink(root, operation.path)) {
+      conflicts.push({ path: operation.path, reason: "UNSAFE_PATH" });
+      continue;
+    }
+    const observed = await observedFile(resolve(root, operation.path));
+    if (operation.type === "DELETE") {
+      if (observed !== "ABSENT") conflicts.push({ path: operation.path, reason: "EXPECTED_ABSENT" });
+      continue;
+    }
+    if (observed === "ABSENT" || observed === "OTHER") {
+      conflicts.push({ path: operation.path, reason: "EXPECTED_FILE" });
+    } else if (observed.hash !== operation.newHash) {
+      conflicts.push({ path: operation.path, reason: "HASH_MISMATCH" });
+    } else if (observed.mode !== operation.newMode) {
+      conflicts.push({ path: operation.path, reason: "MODE_MISMATCH" });
+    }
+  }
+  return { matches: conflicts.length === 0, conflicts };
 }

@@ -10,7 +10,7 @@ import {
   piRuntimeConfigHash,
   type PiRuntimeConfiguration
 } from "@smartflow/provider-pi";
-import { createTasksSource } from "../../packages/task-manifest/src/test-fixture.js";
+import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 
 const harnesses: RuntimeHarness[] = [];

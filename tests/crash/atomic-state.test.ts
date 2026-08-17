@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -15,7 +14,7 @@ import {
   type AtomicWriteCheckpoint,
   type ProjectState
 } from "@smartflow/state-store";
-import { createProjectState } from "../../packages/state-store/src/test-fixture.js";
+import { createProjectState } from "../fixtures/state-store/test-fixture.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 
 const activeHarnesses: RuntimeHarness[] = [];
@@ -84,12 +83,18 @@ setInterval(() => undefined, 10_000);
 `;
 
 const SQLITE_RECEIPT_WINNER_SCRIPT = `
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 const [databasePath, requestId, requestHash, responseHash] = process.argv.slice(1);
 const database = new DatabaseSync(databasePath);
 const ownerToken = randomUUID();
+const startedAt = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(process.pid)], {
+  encoding: "utf8",
+  shell: false
+}).stdout.trim();
+if (startedAt.length === 0) throw new Error("process start token unavailable");
 database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; BEGIN IMMEDIATE");
 database.prepare(\`
   INSERT INTO mutation_lease (
@@ -98,9 +103,16 @@ database.prepare(\`
     owner_id,
     owner_pid,
     owner_hostname,
+    owner_process_start_token,
     expires_at_ms
-  ) VALUES (1, ?, 'child-winner', ?, ?, ?)
-\`).run(ownerToken, process.pid, hostname(), Date.now() + 60_000);
+  ) VALUES (1, ?, 'child-winner', ?, ?, ?, ?)
+\`).run(
+  ownerToken,
+  process.pid,
+  hostname(),
+  \`\${String(process.pid)}:\${startedAt}\`,
+  Date.now() + 60_000
+);
 database.exec("COMMIT");
 process.stdout.write("LEASED\\n");
 process.stdin.setEncoding("utf8");
@@ -378,119 +390,4 @@ describe("atomic state replacement crash points", () => {
     }
   });
 
-  it("concurrently retires imported legacy files and rejects later dual authority", async () => {
-    const harness = await createRuntimeHarness();
-    activeHarnesses.push(harness);
-    const dataDirectory = resolve(harness.dataDir, "legacy-retirement");
-    await mkdir(dataDirectory, { recursive: true });
-    const legacyState = createProjectState({
-      stateVersion: 7,
-      projectFence: 4,
-      updatedAt: "2026-08-15T13:02:00.000Z"
-    });
-    const legacyBytes = Buffer.from(JSON.stringify(legacyState), "utf8");
-    const sourceHash = createHash("sha256").update(legacyBytes).digest("hex");
-    const legacyEventBytes = Buffer.from("{\"event\":\"legacy\"}\n", "utf8");
-    const eventHash = createHash("sha256").update(legacyEventBytes).digest("hex");
-    await writeFile(resolve(dataDirectory, "state.json"), legacyBytes);
-    await writeFile(resolve(dataDirectory, "events.jsonl"), legacyEventBytes);
-
-    const stores = Array.from({ length: 50 }, () => new StateStore(dataDirectory));
-    const observed = await Promise.all(stores.map((store) => store.readState()));
-    expect(observed).toEqual(Array.from({ length: 50 }, () => legacyState));
-
-    const store = stores[0];
-    expect(store).toBeDefined();
-    const tombstone = JSON.parse(await readFile(resolve(dataDirectory, "state.json"), "utf8")) as {
-      kind?: unknown;
-      sourceSha256?: unknown;
-      archive?: unknown;
-    };
-    expect(tombstone).toMatchObject({
-      kind: "smartflow.sqlite-state-retired",
-      sourceSha256: sourceHash,
-      archive: `legacy-imports/state.json.imported-${sourceHash}`
-    });
-    expect(await readFile(resolve(
-      dataDirectory,
-      `legacy-imports/state.json.imported-${sourceHash}`
-    ))).toEqual(legacyBytes);
-    expect(await readFile(resolve(
-      dataDirectory,
-      `legacy-imports/events.jsonl.imported-${eventHash}`
-    ))).toEqual(legacyEventBytes);
-    expect(store?.protectedPaths).toContain(resolve(dataDirectory, "legacy-imports"));
-
-    await writeFile(resolve(dataDirectory, "state.json"), JSON.stringify({
-      ...legacyState,
-      stateVersion: legacyState.stateVersion + 1
-    }), "utf8");
-    await expect(store?.readState()).rejects.toMatchObject({
-      code: "STATE_INVALID"
-    } satisfies Partial<StateStoreError>);
-  });
-
-  it("finishes legacy retirement after a SQLite-commit-before-rename crash window", async () => {
-    const harness = await createRuntimeHarness();
-    activeHarnesses.push(harness);
-    const dataDirectory = resolve(harness.dataDir, "legacy-retirement-recovery");
-    const store = new StateStore(dataDirectory);
-    const state = await store.initialize(createProjectState());
-    const legacyBytes = Buffer.from(JSON.stringify(state), "utf8");
-    const sourceHash = createHash("sha256").update(legacyBytes).digest("hex");
-    await writeFile(resolve(dataDirectory, "state.json"), legacyBytes);
-    const database = new DatabaseSync(store.databasePath);
-    try {
-      database.prepare(`
-        INSERT INTO legacy_imports (
-          source_path,
-          source_kind,
-          source_sha256,
-          source_schema_version,
-          imported_at
-        ) VALUES (?, 'state', ?, ?, ?)
-      `).run(
-        resolve(dataDirectory, "state.json"),
-        sourceHash,
-        state.schemaVersion,
-        "2026-08-15T13:03:00.000Z"
-      );
-    } finally {
-      database.close();
-    }
-
-    await expect(store.readState()).resolves.toEqual(state);
-    expect(JSON.parse(await readFile(resolve(dataDirectory, "state.json"), "utf8")))
-      .toMatchObject({ kind: "smartflow.sqlite-state-retired", sourceSha256: sourceHash });
-  });
-
-  it("fails closed when an unregistered state.json appears beside SQLite", async () => {
-    const harness = await createRuntimeHarness();
-    activeHarnesses.push(harness);
-    const dataDirectory = resolve(harness.dataDir, "legacy-dual-authority");
-    const store = new StateStore(dataDirectory);
-    const state = await store.initialize(createProjectState());
-    await writeFile(resolve(dataDirectory, "state.json"), JSON.stringify({
-      ...state,
-      stateVersion: state.stateVersion + 7
-    }), "utf8");
-    await expect(store.migrateState()).rejects.toMatchObject({
-      code: "STATE_INVALID"
-    } satisfies Partial<StateStoreError>);
-  });
-
-  it("fails explicitly instead of migrating active Broker state", async () => {
-    const harness = await createRuntimeHarness();
-    activeHarnesses.push(harness);
-    const dataDirectory = resolve(harness.dataDir, "legacy-state");
-    await mkdir(dataDirectory, { recursive: true });
-    await writeFile(resolve(dataDirectory, "state.json"), JSON.stringify({
-      schemaVersion: 2,
-      runs: { "job-1": { phase: "RUNNING", brokerSession: { status: "ACTIVE" } } }
-    }), "utf8");
-    const store = new StateStore(dataDirectory);
-    await expect(store.readState()).rejects.toMatchObject({
-      code: "STATE_MIGRATION_UNSUPPORTED"
-    } satisfies Partial<StateStoreError>);
-  });
 });

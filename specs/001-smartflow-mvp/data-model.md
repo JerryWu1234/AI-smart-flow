@@ -1,6 +1,6 @@
 # SmartFlow Data Model
 
-These are design-level entities. Runtime implementation maps them to Zod schemas, `ArtifactRef`, and the Project's schema-v5 `state.sqlite`.
+These are design-level entities. Runtime implementation maps them to Zod schemas, `ArtifactRef`, and the Project's schema-v6 `state.sqlite`.
 
 ## ProjectRunIndex
 
@@ -155,7 +155,7 @@ interface GitCandidateV3 {
 }
 ```
 
-The formal Candidate compares the Run Baseline to the current Result Snapshot. Snapshot Artifacts already carry Git tree, blob, and mode evidence, so Candidate v3 binds their hashes rather than copying those values into another Artifact. `.smartflow-runtime/` and session temporaries are excluded before Result capture. Patch bytes are generated from the bound Git trees only when Publish prepares the DeliveryBundle; Worker does not persist incremental or cumulative patches. Verification remains backward-compatible with unversioned and v2 Candidate Artifacts.
+The formal Candidate compares the Run Baseline to the current Result Snapshot. Snapshot Artifacts already carry Git tree, blob, and mode evidence, so Candidate v3 binds their hashes rather than copying those values into another Artifact. `.smartflow-runtime/` and session temporaries are excluded before Result capture. Publish derives `ApplyOperation[]` directly from the bound Candidate and immutable `REVISION_RESULT`; final file bytes remain in the Run Git object store and are hash/size checked when read. Worker does not persist incremental or cumulative patches. Verification remains backward-compatible with unversioned and v2 Candidate Artifacts.
 
 ## Review entities and durable Host turn
 
@@ -194,7 +194,7 @@ type HostTurn =
     });
 ```
 
-`AWAITING_REVIEW` proves that Review context, Host ownership, and the 30-minute deadline committed atomically with the `REVIEWING` phase; it is the only stage from which the public Review protocol discloses `worktreePath`. `AWAITING_USER_INPUT` persists a nonterminal typed pause. ReviewerBinding survives repair Revisions; HostTurn does not replace it.
+`AWAITING_REVIEW` proves that Review context, Host ownership, and the 30-minute deadline committed atomically with the `REVIEWING` phase; it is the only stage from which the public Review protocol discloses the Reviewer worktree. `AWAITING_USER_INPUT` persists a nonterminal typed pause. For a publish-related pause, only the owning Host's `USER_INPUT_REQUIRED` may additionally receive the same reviewed Candidate `worktreePath`; ordinary status/result, non-publish pauses, stale continuations, and terminal outputs remain path-free. ReviewerBinding survives repair Revisions; HostTurn does not replace it.
 
 `smartflow_execute → smartflow_review_turn*` is the sole public Review orchestration path. The public MCP surface contains exactly six tools: `smartflow_execute`, `smartflow_review_turn`, `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`. Status, resume, cancel, and result are separate Run-management APIs, not Review continuations or a second Review orchestration path. Public `smartflow_resume` is for independent paused-Run recovery and cannot answer or bypass an active `hostTurn`. The old wait/claim/renew/submission/Leader primitive symbols, schemas, handlers, registrations, and aliases do not exist; Review begin and finalization are atomic Daemon domain operations.
 
@@ -249,6 +249,7 @@ type ReviewTurnOutput =
       stateVersion: number;
       turnToken: string;
       pause: { code: string; message: string };
+      worktreePath?: string;
       review?: ReviewSubmission;
       repairDraft?: RepairDraft;
       requiredInput?: RequiredRevisionInput;
@@ -301,17 +302,18 @@ interface PublishConflictResult {
   totalCount: number;
   activeWorkspaceChanged: false;
   conflicts: GitPublishConflict[];
-  deliveryArtifact: ArtifactRef;
 }
 ```
 
 Any touched-path conflict returns before the batch starts. PARTIAL or UNKNOWN persists as `PUBLISH_RECOVERY_BLOCKED` and never becomes `COMPLETED`.
 
-Publish creates one signed, self-contained `DeliveryBundle` containing the canonical operations, on-demand cumulative Git patch, and final file blobs. The default filesystem adapter reads those embedded blobs directly and does not persist a parallel `publish-blobs/` tree. Custom adapters retain materialized blob Artifacts for compatibility with the existing `ArtifactRef` reader contract. A `PUBLISHING` recovery reconstructs its exact operations and default blob reader from the durable Bundle, not from the temporary worktree.
+Publish deterministically derives canonical `ApplyOperation[]` from the accepted Candidate and its bound immutable `REVISION_RESULT`. Each non-delete operation references a Git blob by object ID plus SHA-256 and size; the default filesystem adapter reads it with `git cat-file blob` from the retained Run object store and verifies both integrity values. No parallel publish-blob tree, patch package, signature, or transfer artifact is created. A `PUBLISHING` recovery reconstructs the same operations and blob reader from the Candidate, Result Snapshot, and object store; an old or mismatched operation identity remains `PUBLISH_RECOVERY_BLOCKED`.
 
-## RunRecord schema-v5 additions
+When capability probing cannot prove the required batch/CAS/query guarantees, or preflight finds a conflict, Publish performs no write and creates no attempt. The owning Host receives the reviewed Candidate `worktreePath` and may retry, cancel, or ask the user to merge externally and submit `confirm_manual_publish`. Confirmation only observes the original project's target paths; every expected kind/hash/mode must match before a `manual-confirmation-v1` COMMITTED result is persisted. A mismatch returns to `MANUAL_PUBLISH_TARGET_MISMATCH`, and recovery-blocked attempts never expose this bypass.
 
-The Project state schema is version 5. Startup migration accepts schema-v4 records, removes claim/lease fields, converts safe active Review checkpoints to `AWAITING_REVIEW`, and pauses ambiguous `REVIEWING` records. `RunRecord` retains Task, Revision chain, snapshots, Candidate, Review, publish, receipts, and cleanup, and includes:
+## RunRecord schema-v6 additions
+
+The Project state schema is version 6. Startup migration accepts schema-v4 and schema-v5 records: it preserves the v4 Review conversion, removes obsolete delivery references/actions from v5, records legacy Publish identity compatibility without deleting old files, and safely blocks an in-flight operation whose old hash cannot be reconstructed from the Git source. `RunRecord` retains Task, Revision chain, snapshots, Candidate, Review, publish, receipts, and cleanup, and includes:
 
 ```ts
 interface RunRecordReviewTurnFields {
@@ -327,7 +329,6 @@ It stores `workerAttempts: PiWorkerAttempt[]` and no longer stores Broker sessio
 - Active Run: retain every Revision workspace/snapshot, Attempt/session Artifact, Review history, Host turn, and repair count; forbid Git `gc`/`prune`.
 - Attempt terminal: persist terminal state and session Artifact, reconcile process tree, then clean Run-local Pi runtime files.
 - Review turn: atomically persist `REVIEWING` plus `AWAITING_REVIEW` before path disclosure; clear or replace the checkpoint only through a current CAS-bound transition.
-- Reconciled terminal Run: retain task/snapshot/Candidate/Review/automatic-decision/Publish audit Artifacts and the signed, self-contained DeliveryBundle; delete temporary workspaces, indexes, runtime directories, object store, and any derivable standalone patch/evidence/blob copies.
-- Recovery: `state.sqlite` references exact task binding, Revision, Attempt, Host turn, and Publish operation; it never infers state from mutable files, timers, queues, session files, or legacy `events.jsonl`.
+- Reconciled terminal Run: retain task/snapshot/Candidate/Review/automatic-decision Artifact references plus durable PublishAttempt/PublishResult and audit facts; delete temporary workspaces, indexes, runtime directories, object store, and derivable patch/evidence/blob copies.
+- Recovery: `state.sqlite` references exact task binding, Revision, Attempt, Host turn, and Publish operation; it never infers state from mutable files, timers, queues, or session files.
 - Audit: `audit_events` in the same SQLite database is the only runtime audit sink and is not a second recovery authority.
-- Legacy import: pre-SQLite `state.json` and `events.jsonl` are imported once and moved into the protected `legacy-imports/` directory; a later/recreated `events.jsonl` is ignored rather than merged into canonical audit history.

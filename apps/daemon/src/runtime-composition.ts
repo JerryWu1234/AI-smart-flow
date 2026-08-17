@@ -135,7 +135,6 @@ export class ProductionRuntimeComposition {
     }
     await new PublishCoordinator(
       context.store,
-      resolve(this.daemonDataDirectory, "signing", "ed25519-private.pem"),
       this.workspaceApplyAdapter
     ).publish(context.jobId);
   };
@@ -152,7 +151,6 @@ export class ProductionRuntimeComposition {
       reconcilePublish: async (operationId, operationsHash) => {
         const result: PublishServiceResult = await new PublishCoordinator(
           context.store,
-          resolve(this.daemonDataDirectory, "signing", "ed25519-private.pem"),
           this.workspaceApplyAdapter
         ).recover(context.jobId, operationId, operationsHash);
         if (result.status === "COMMITTED") return { status: "COMMITTED", result: result.result };

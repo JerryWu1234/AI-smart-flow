@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ProjectRuntime } from "@smartflow/daemon";
 import { StructuredLogger } from "@smartflow/observability";
 import { PiEventNormalizer } from "@smartflow/provider-pi";
-import { createTasksSource } from "../../packages/task-manifest/src/test-fixture.js";
+import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 
 const harnesses: RuntimeHarness[] = [];
@@ -54,7 +54,7 @@ describe("runtime absolute-path non-disclosure", () => {
     const runtime = new ProjectRuntime({
       dataDirectory: harness.dataDir,
       runPipeline: (): Promise<void> => Promise.reject(new Error(
-        `failure in ${harness.projectDir}/sum.js with state ${harness.dataDir}/state.json`
+        `failure in ${harness.projectDir}/sum.js with state ${harness.dataDir}/state.sqlite`
       ))
     });
     const executed = await runtime.handle({

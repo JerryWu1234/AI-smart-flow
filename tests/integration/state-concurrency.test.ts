@@ -15,7 +15,7 @@ import {
 import {
   createProjectState,
   createRunRecord
-} from "../../packages/state-store/src/test-fixture.js";
+} from "../fixtures/state-store/test-fixture.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 
 const activeHarnesses: RuntimeHarness[] = [];

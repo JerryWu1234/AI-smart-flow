@@ -1,14 +1,10 @@
-import { createHash, generateKeyPairSync } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { relative, resolve, sep } from "node:path";
 
 import {
-  createDeliveryBundle,
-  exportSigningPublicKey,
   operationsHash,
-  serializeDeliveryBundle,
-  signDeliveryManifest,
-  signingKeyId,
   stableOperationId,
   type ApplyOperation
 } from "@smartflow/publish";
@@ -20,12 +16,16 @@ import {
 import { frozenPiRuntimeConfig } from "@smartflow/provider-pi";
 import { StateStore, canonicalHash, type RunRecord } from "@smartflow/state-store";
 import { compileTaskManifest } from "@smartflow/task-manifest";
-import type { GitCandidate, GitWorkspaceSnapshot } from "@smartflow/workspace";
+import {
+  initializeGitObjectStore,
+  type GitCandidate,
+  type GitWorkspaceSnapshot
+} from "@smartflow/workspace";
 import {
   createProjectState,
   createRunRecord
-} from "../../packages/state-store/src/test-fixture.js";
-import { createTasksSource } from "../../packages/task-manifest/src/test-fixture.js";
+} from "../fixtures/state-store/test-fixture.js";
+import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
 import type { RuntimeHarness } from "../helpers/runtime-harness.js";
 
 export async function createLifecycleStore(
@@ -76,6 +76,17 @@ export async function createLifecycleStore(
 
   const sourceBytes = await readFile(resolve(harness.projectDir, "sum.js"));
   const sourceHash = createHash("sha256").update(sourceBytes).digest("hex");
+  const objectStore = await initializeGitObjectStore(
+    resolve(store.dataDirectory, "runs/job-1")
+  );
+  const resultBlobId = execFileSync(
+    "git",
+    ["--git-dir", objectStore.gitDirectory, "hash-object", "-w", "--stdin"],
+    { input: sourceBytes, encoding: "utf8" }
+  ).trim();
+  const objectDirectory = relative(store.dataDirectory, objectStore.objectDirectory)
+    .split(sep)
+    .join("/");
   const snapshotCreatedAt = "2026-07-20T00:00:00.000Z";
   const baselineBody = {
     repositoryId: "1".repeat(64),
@@ -96,7 +107,7 @@ export async function createLifecycleStore(
     path: "sum.js",
     kind: "FILE" as const,
     mode: "100644" as const,
-    blobId: "2".repeat(40),
+    blobId: resultBlobId,
     sha256: sourceHash,
     size: sourceBytes.byteLength
   };
@@ -237,10 +248,6 @@ export async function createLifecycleStore(
     Buffer.from(JSON.stringify(leaderDecision), "utf8")
   );
 
-  const publishBlob = await store.writeArtifact(
-    `runs/job-1/revision-1/publish-blobs/${sourceHash}`,
-    sourceBytes
-  );
   const applyOperation: ApplyOperation = {
     path: "sum.js",
     type: "ADD",
@@ -249,32 +256,12 @@ export async function createLifecycleStore(
     expectedOldMode: null,
     newHash: sourceHash,
     newMode: 0o644,
-    blobRef: publishBlob
+    blobRef: {
+      relativePath: `git-object-store/blobs/${resultBlobId}`,
+      sha256: sourceHash,
+      size: sourceBytes.byteLength
+    }
   };
-  const deliveryBundle = createDeliveryBundle({
-    revision: 1,
-    taskManifestHash: taskManifest.sha256,
-    baselineHash: baseline.snapshotHash,
-    candidateHash: candidate.hash,
-    reviewHash: reviewDecision.reviewHash,
-    operations: [applyOperation],
-    patch: `+${new TextDecoder().decode(sourceBytes)}`,
-    blobs: { "sum.js": sourceBytes }
-  });
-  const signer = generateKeyPairSync("ed25519");
-  const signingKey = {
-    privateKey: signer.privateKey,
-    publicKey: signer.publicKey,
-    keyId: signingKeyId(signer.publicKey)
-  };
-  const deliveryBundleRef = await store.writeArtifact(
-    `runs/job-1/revision-1/delivery-bundles/${deliveryBundle.canonicalManifestHash}/delivery-bundle.json`,
-    serializeDeliveryBundle(
-      deliveryBundle,
-      signDeliveryManifest(deliveryBundle.canonicalManifestHash, signingKey),
-      exportSigningPublicKey(signingKey.publicKey)
-    )
-  );
   const publishOperationsHash = operationsHash([applyOperation]);
   const publishOperationId = stableOperationId({
     projectId,
@@ -324,7 +311,7 @@ export async function createLifecycleStore(
             capability: capabilityRef,
             repositoryId: baseline.repositoryId,
             inclusionPolicyHash: baseline.includedPathPolicyHash,
-            objectDirectory: "runs/job-1/git-object-store/objects",
+            objectDirectory,
             runBaselineSnapshot: baselineRef,
             revisions: {
               "1": {
@@ -381,7 +368,6 @@ export async function createLifecycleStore(
     ...(hasLeader ? { leaderDecision: leaderDecisionRef } : {}),
     ...(phase === "PUBLISHING"
       ? {
-          deliveryBundle: deliveryBundleRef,
           publish: {
             operationId: publishOperationId,
             operationsHash: publishOperationsHash,

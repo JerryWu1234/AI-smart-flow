@@ -20,7 +20,7 @@
   "scripts": {
     "build": "tsdown --config ../../tsdown.workspace.config.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --root ../.. --passWithNoTests apps/cli/src"
+    "test": "vitest run --root ../.. --passWithNoTests tests/unit/apps/cli"
   },
   "dependencies": {
     "@smartflow/daemon": "workspace:*",

@@ -74,7 +74,7 @@
 
 ### CP-009：Single-Writer、CAS 与 Host-turn Ownership（强制）
 - 单个 Project MUST 由唯一有效 writer lease 保护共享运行状态与 Publish；所有 mutation MUST 使用 Project-wide revision/CAS 语义。
-- 同一 `projectId + jobId` 的复合 Review turn MUST 串行化；不同 Run MAY 并行，但共享 `state.json` 的每次提交都必须重新校验 stateVersion。
+- 同一 `projectId + jobId` 的复合 Review turn MUST 串行化；不同 Run MAY 并行，但共享 `state.sqlite` 的每次提交都必须重新校验 stateVersion。
 - claim intent、claimed review、等待用户输入和自动修复额度 MUST durable-first 持久化；每个 active Host turn MUST 绑定稳定 `hostTurnId + turnToken + revision`。
 - 自动重试 MUST 使用稳定派生的 child request IDs；CAS mismatch、重启或重复请求不得重复 claim、Review submission、repair 或 Publish。
 - 失去 lease、Host-turn ownership 或当前 Revision/Candidate 绑定的进程 MUST 停止写入；stale continuation 只能获得无敏感路径的当前状态。

@@ -26,7 +26,7 @@ import type {
 import { normalizeFinding } from "@smartflow/review";
 import { StateStore, type ProjectState } from "@smartflow/state-store";
 import { hashCanonical } from "@smartflow/task-manifest";
-import { createTasksSource } from "../../packages/task-manifest/src/test-fixture.js";
+import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
 import { combineReviewStageResults } from "../helpers/reviewer-provenance.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 

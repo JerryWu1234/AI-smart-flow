@@ -188,7 +188,7 @@ describe("publish path and Git safety", () => {
       adapter
     );
     expect(result).toEqual({
-      status: "BUNDLE_READY",
+      status: "MANUAL_PUBLISH_REQUIRED",
       reason: "PUBLISH_ATOMIC_CAS_UNAVAILABLE"
     });
     expect(applyCalls).toBe(0);

@@ -19,7 +19,7 @@ These rules must be frozen before Git Adapter implementation begins:
    - A preflight conflict must return before publishing starts and must cause zero writes.
    - Automatic publish is allowed when the Apply Adapter supports expected-old-hash checks, stable operation IDs, result queries, and either strict `atomicBatchCas` or local `preflightBatchWrite`.
    - `preflightBatchWrite` checks every Candidate path before writing, then replaces files one by one. A process or machine failure after writing starts may produce PARTIAL or UNKNOWN and must enter `PUBLISH_RECOVERY_BLOCKED`.
-   - Without either supported batch mode, SmartFlow produces a DeliveryBundle and does not write the Active Workspace.
+   - Without either supported batch mode, SmartFlow performs no write and creates no PublishAttempt. It pauses with the reviewed Candidate workspace available only to the owning Host, who may retry, cancel, or externally merge and request strict target-state confirmation.
 4. **There is no legacy fallback**
    - Missing Git or any unsupported repository capability enters `PAUSED` with a durable reason.
    - SmartFlow must not silently fall back to the legacy Baseline/Candidate scanner.
@@ -45,13 +45,12 @@ interface GitWorkspaceAdapter {
   materialize(input: MaterializeInput): Promise<GitRevisionWorkspaceRef>;
   captureResult(input: CaptureResultInput): Promise<GitWorkspaceSnapshot>;
   buildCandidate(input: BuildCandidateInput): Promise<GitCandidateV3>;
-  buildTreePatch(input: BuildTreePatchInput): Promise<Uint8Array>;
   preflight(input: PublishPreflightInput): Promise<GitPublishConflict[]>;
   cleanup(input: CleanupInput): Promise<void>;
 }
 ```
 
-The exact TypeScript names can change during implementation. Snapshot and Candidate operations produce durable Artifacts and state transitions; tree patches are deterministic derived bytes embedded in a DeliveryBundle only when Publish requires them.
+The exact TypeScript names can change during implementation. Snapshot and Candidate operations produce durable Artifacts and state transitions. Publish deterministically combines the Candidate with its bound immutable Result Snapshot, then reads final bytes from the retained Run Git object store using object ID plus SHA-256 and size checks; it does not create a second delivery artifact.
 
 ## Safety invariants
 
@@ -63,8 +62,9 @@ The exact TypeScript names can change during implementation. Snapshot and Candid
 - Candidate operations are sorted canonically and carry expected old content hashes and modes.
 - A new Revision never overwrites an earlier Revision's Snapshot or Candidate Artifacts.
 - A preflight-detected conflict returns before publish starts and causes zero writes.
-- Preflight inspects only cumulative Candidate paths. A conflict result includes conflict paths, `0/N`, `activeWorkspaceChanged=false` and a Patch/DeliveryBundle.
-- PARTIAL or UNKNOWN apply results enter `PUBLISH_RECOVERY_BLOCKED`; they never become `COMPLETED` and are not automatically rolled back.
+- Preflight inspects only cumulative Candidate paths. A conflict result includes all conflict paths, `0/N`, `activeWorkspaceChanged=false`, and durable `publishPrecheck`; it creates neither a PublishAttempt nor a write.
+- For `PUBLISH_ADAPTER_UNAVAILABLE` or `PUBLISH_PRECHECK_CONFLICT`, only the owning Host's `USER_INPUT_REQUIRED` may expose the reviewed Candidate `worktreePath` and `confirm_manual_publish`. Confirmation is read-only and succeeds only when every Candidate target kind/hash/mode already matches in the original project.
+- PARTIAL or UNKNOWN apply results enter `PUBLISH_RECOVERY_BLOCKED`; they never become `COMPLETED`, are not automatically rolled back, and cannot use manual confirmation.
 - Temporary state is retained until referenced Artifacts and publish/recovery reconciliation are durable; cleanup is idempotent.
 - Pi receives only the materialized Revision workspace. The Run object store, temporary index, original project path and other Revision/Run directories are not inside Pi's project-data sandbox policy.
 - `.smartflow-runtime/` is excluded or removed before Result Snapshot and Candidate generation.

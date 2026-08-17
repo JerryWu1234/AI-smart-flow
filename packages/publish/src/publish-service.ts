@@ -37,8 +37,12 @@ export type PublishServiceResult =
   | { status: "PUBLISH_BUSY" }
   | { status: "PUBLISH_RECOVERY_BLOCKED"; operationId: string; result?: PublishResult }
   | {
-      status: "BUNDLE_READY";
-      reason: "PUBLISH_ADAPTER_UNAVAILABLE" | "PUBLISH_ATOMIC_CAS_UNAVAILABLE";
+      status: "MANUAL_PUBLISH_REQUIRED";
+      reason:
+        | "PUBLISH_ADAPTER_UNAVAILABLE"
+        | "PUBLISH_ATOMIC_CAS_UNAVAILABLE"
+        | "PUBLISH_TARGET_MISMATCH";
+      conflicts?: PreflightConflict[];
     };
 
 export interface PublishBindings {
@@ -85,7 +89,7 @@ export class PublishService {
   ): Promise<PublishServiceResult> {
     const hash = operationsHash(operations);
     const operationId = stableOperationId({ ...bindings, operationsHash: hash });
-    if (adapter === undefined) return { status: "BUNDLE_READY", reason: "PUBLISH_ADAPTER_UNAVAILABLE" };
+    if (adapter === undefined) return { status: "MANUAL_PUBLISH_REQUIRED", reason: "PUBLISH_ADAPTER_UNAVAILABLE" };
     const capabilities = await adapter.probe();
     const supportedBatch = capabilities.atomicBatchCas || capabilities.preflightBatchWrite === true;
     if (
@@ -96,7 +100,7 @@ export class PublishService {
       typeof capabilities.adapterId !== "string" ||
       capabilities.adapterId.trim().length === 0
     ) {
-      return { status: "BUNDLE_READY", reason: "PUBLISH_ATOMIC_CAS_UNAVAILABLE" };
+      return { status: "MANUAL_PUBLISH_REQUIRED", reason: "PUBLISH_ATOMIC_CAS_UNAVAILABLE" };
     }
     if (this.store.acquireLease !== undefined && !(await this.store.acquireLease(operationId))) {
       return { status: "PUBLISH_BUSY" };

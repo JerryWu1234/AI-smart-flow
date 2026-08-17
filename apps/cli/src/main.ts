@@ -1,6 +1,6 @@
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { readFile, realpath } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 
 import {
   LocalIpcClient,
@@ -11,10 +11,8 @@ import {
 } from "@smartflow/daemon";
 import { runSmartFlowMcpGateway } from "@smartflow/mcp-server";
 import { StructuredLogger } from "@smartflow/observability";
-import { writeDeliveryBundleDirectory } from "@smartflow/publish";
 
 import { runDoctor } from "./doctor.js";
-import { verifyBundleDirectoryForCli } from "./bundle-verify.js";
 
 function flagValue(argv: string[], name: string): string | undefined {
   const index = argv.indexOf(name);
@@ -79,30 +77,6 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     }
     return 0;
   }
-  if (command === "bundle" && argv[1] === "verify") {
-    const directory = flagValue(argv, "--bundle") ?? argv[2];
-    if (directory === undefined || directory.startsWith("--")) {
-      throw new Error("bundle verify requires a bundle directory or --bundle PATH");
-    }
-    const trustedKeyPath = flagValue(argv, "--trusted-key");
-    const trustedFingerprint = flagValue(argv, "--trusted-fingerprint");
-    const result = await verifyBundleDirectoryForCli(directory, {
-      ...(trustedKeyPath === undefined ? {} : { trustedKeyPath }),
-      ...(trustedFingerprint === undefined ? {} : { trustedFingerprint })
-    });
-    print(result);
-    return result.valid ? 0 : 1;
-  }
-  if (command === "bundle" && argv[1] === "export") {
-    const artifactPath = flagValue(argv, "--artifact");
-    const outputPath = flagValue(argv, "--output");
-    if (artifactPath === undefined || outputPath === undefined) {
-      throw new Error("bundle export requires --artifact FILE and --output DIRECTORY");
-    }
-    await writeDeliveryBundleDirectory(outputPath, await readFile(artifactPath));
-    print({ exported: true, output: resolve(outputPath) });
-    return 0;
-  }
   if (command === "version" || command === "--version" || command === "-v") {
     process.stdout.write("0.1.0\n");
     return 0;
@@ -116,8 +90,6 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       "  Required Pi env: SMARTFLOW_PI_API, SMARTFLOW_PI_BASE_URL, SMARTFLOW_PI_MODEL, SMARTFLOW_PI_API_KEY",
       "  Optional Pi env: SMARTFLOW_PI_CONTEXT_WINDOW, SMARTFLOW_PI_MAX_TOKENS, SMARTFLOW_PI_THINKING, SMARTFLOW_PI_ATTEMPT_DEADLINE_MS",
       "  health [--data-dir PATH]",
-      "  bundle verify BUNDLE_DIR [--trusted-key PUBLIC_KEY_PEM] [--trusted-fingerprint SHA256]",
-      "  bundle export --artifact DELIVERY_BUNDLE_JSON --output BUNDLE_DIR",
       "  version"
     ].join("\n") + "\n"
   );
