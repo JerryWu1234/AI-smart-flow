@@ -24,9 +24,6 @@ export type ReviewActionResult = HostReviewCallbackOutput;
 export type ReviewActionContext = HostReviewContext;
 
 export interface RepairLimitContext {
-  projectId: string;
-  jobId: string;
-  revision: number;
   repairRounds: 15;
   result: ReviewResult;
 }
@@ -94,9 +91,6 @@ export async function executeApprovedWorkflow(
         turn.review !== undefined
       ) {
         const continueRepairs = await callbacks.continueAfterRepairLimit?.({
-          projectId: turn.projectId,
-          jobId: turn.jobId,
-          revision: turn.revision,
           repairRounds: 15,
           result: turn.review
         }) ?? false;
@@ -105,8 +99,8 @@ export async function executeApprovedWorkflow(
       if (answer !== undefined) {
         const validated = reviewTurnInputSchema.parse({
           requestId: `${input.requestId}:review-turn-answer:${String(sequence)}`,
-          projectId: turn.projectId,
-          jobId: turn.jobId,
+          projectId: execute.projectId,
+          jobId: execute.jobId,
           hostTurnId: input.hostTurnId,
           turnToken: turn.turnToken,
           answer
@@ -121,13 +115,9 @@ export async function executeApprovedWorkflow(
     }
 
     const context: ReviewActionContext = {
-      reviewAttemptId: turn.reviewAttemptId,
       worktreePath: turn.worktreePath,
-      taskSourceHash: turn.taskSourceHash,
-      candidateHash: turn.candidateHash,
       changedPaths: [...turn.changedPaths],
-      reviewerSession: { ...turn.reviewerSession },
-      piSessionId: turn.piSessionId
+      reviewerSession: { ...turn.reviewerSession }
     };
     if (callbacks.review === undefined) {
       continuation = {
@@ -143,11 +133,7 @@ export async function executeApprovedWorkflow(
       try {
         const candidate = await callbacks.review(retryContext);
         const reviewerSessionId = reviewerSessionIdFromOutput(candidate);
-        if (
-          reviewerSessionId !== undefined &&
-          retryContext.reviewerSession.mode === "CREATE" &&
-          reviewerSessionId !== retryContext.piSessionId
-        ) {
+        if (reviewerSessionId !== undefined && retryContext.reviewerSession.mode === "CREATE") {
           retryContext = {
             ...retryContext,
             reviewerSession: { mode: "RESUME", reviewerSessionId }

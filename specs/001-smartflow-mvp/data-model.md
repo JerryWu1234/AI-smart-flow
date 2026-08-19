@@ -276,47 +276,34 @@ interface ReviewTurnInput {
 type ReviewTurnOutput =
   | {
       kind: "NOT_READY";
-      projectId: string;
-      jobId: string;
-      revision: number;
-      stateVersion: number;
-      phase: RunPhase;
       retryAfterMs: number;
-      progress: { completed: number; total: number };
     }
   | {
       kind: "REVIEW_REQUIRED";
-      projectId: string;
-      jobId: string;
-      revision: number;
-      stateVersion: number;
       turnToken: string;
-      worktreePath: string;
-      reviewAttemptId: string;
-      taskSourceHash: string;
-      candidateHash: string;
-      changedPaths: string[];
       reviewerSession:
         | { mode: "CREATE" }
         | { mode: "RESUME"; reviewerSessionId: string };
-      piSessionId: string;
+      worktreePath: string;
+      tasksPath: string;
+      taskIds: string[];
+      changedPaths: string[];
       deadlineAt: string;
     }
   | {
       kind: "USER_INPUT_REQUIRED";
-      projectId: string;
-      jobId: string;
-      revision: number;
-      stateVersion: number;
       turnToken: string;
       pause: { code: string; message: string };
-      worktreePath?: string;
-      reviewResult?: ReviewResult;
+      result: ResultOutput;
+      options: Array<{ answer: ResumeAction; description: string }>;
       requiredInput?: RequiredRevisionInput;
-      options: Array<{ answer: string; description: string }>;
+      review?: ReviewResult;
+      worktreePath?: string;
     }
   | { kind: "DONE"; result: ResultOutput };
 ```
+
+The output is a compact projection of Daemon state carrying only what a caller can act on. Run identity the caller already supplied, `revision`/`stateVersion` CAS bookkeeping, Run `phase`, Review attempt identity, task-source/Candidate hashes, Provider session identity, and Task-completion counts all stay inside the Daemon and its durable evidence. `REVIEW_REQUIRED` does name `tasksPath` and `taskIds`, because a caller cannot satisfy the exact Task coverage the Daemon enforces without them.
 
 `review`, `answer`, and `reviewUnavailableReason` are mutually exclusive and require `turnToken`. A submitted result is validated completely before any durable artifact or state write. Validation failure rejects the continuation atomically, leaves the Run, checkpoint, token, counters, Candidate, Review history, and state version unchanged, and lets the owning Host correct and resubmit against the same active turn. Stale continuations return current no-path `NOT_READY`. `DONE` is terminal-only and embeds canonical `ResultOutput` directly. That payload has the same shape as the independent `smartflow_result` response, but producing `DONE` does not call that public API.
 

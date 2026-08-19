@@ -32,7 +32,8 @@ const digestC = "c".repeat(64);
 const nowText = "2026-08-11T10:00:00.000Z";
 const projectId = "project-1";
 const jobId = "job-1";
-const reviewDeadlineMs = 30 * 60_000;
+const reviewDeadlineMs = 45 * 60_000;
+const reviewDeadlineAt = new Date(Date.parse(nowText) + reviewDeadlineMs).toISOString();
 
 const temporaryDirectories: string[] = [];
 const coordinators: HostTurnCoordinator[] = [];
@@ -108,12 +109,15 @@ async function createStore(run: RunRecord): Promise<TestStore> {
   const tasksSource = createTasksSource({
     tasks: "## M01 · Core\n\n- [ ] T001 Edit `src/a.ts` — 验收：review passes"
   });
-  const canonicalTaskPath = join(directory, "tasks.md");
+  // The Run keeps the absolute approved task path while the Manifest keeps the
+  // Project-relative logical path, exactly as ProjectRuntime.execute records them.
+  const logicalTaskPath = "tasks.md";
+  const canonicalTaskPath = join(directory, logicalTaskPath);
   const compiled = compileTaskManifest(tasksSource, {
     projectId,
     jobId,
     revision: 1,
-    canonicalTaskPath,
+    canonicalTaskPath: logicalTaskPath,
     providerRuntimeConfig: { model: "test" },
     approval: {
       kind: "USER",
@@ -230,15 +234,6 @@ function createDependencies(
         phase: run.phase,
         revision: run.revision,
         stateVersion: state.stateVersion,
-        progress: {
-          completed: new Set([
-            "REVIEW_PENDING",
-            "REVIEWING",
-            "READY_TO_PUBLISH",
-            "COMPLETED"
-          ]).has(run.phase) ? 1 : 0,
-          total: 1
-        },
         ...(run.pendingAction === undefined ? {} : { pendingAction: run.pendingAction }),
         ...(run.pause === undefined ? {} : { pause: run.pause })
       };
@@ -331,7 +326,7 @@ describe("HostTurnCoordinator simplified review state machine", () => {
         hostTurnId: "host-1",
         turnToken: first.turnToken,
         reviewAttemptId: "review-attempt-1",
-        deadlineAt: "2026-08-11T10:30:00.000Z"
+        deadlineAt: reviewDeadlineAt
       }
     });
     expect(afterFirst.runs[jobId]?.pendingAction).not.toHaveProperty("claimId");
@@ -391,7 +386,8 @@ describe("HostTurnCoordinator simplified review state machine", () => {
       review: completeTaskReview()
     }));
 
-    expect(output).toMatchObject({ kind: "NOT_READY", phase: "READY_TO_PUBLISH" });
+    expect(output).toMatchObject({ kind: "NOT_READY" });
+    expect((await store.readState()).runs[jobId]?.phase).toBe("READY_TO_PUBLISH");
     expect(writeState).toHaveBeenCalledTimes(1);
     const state = await store.readState();
     const run = state.runs[jobId];
@@ -430,7 +426,7 @@ describe("HostTurnCoordinator simplified review state machine", () => {
       review: incompleteTaskReview()
     }));
 
-    expect(output).toMatchObject({ kind: "NOT_READY", phase: "FIXING" });
+    expect(output).toMatchObject({ kind: "NOT_READY" });
     const repairedRun = (await store.readState()).runs[jobId];
     expect(repairedRun).toMatchObject({
       phase: "FIXING",
@@ -488,7 +484,7 @@ describe("HostTurnCoordinator simplified review state machine", () => {
       turnToken: paused.turnToken,
       answer: "resume_review_decision"
     }));
-    expect(resumed).toMatchObject({ kind: "NOT_READY", phase: "FIXING" });
+    expect(resumed).toMatchObject({ kind: "NOT_READY" });
     const resumedRun = (await store.readState()).runs[jobId];
     expect(resumedRun).toMatchObject({
       phase: "FIXING",
@@ -509,7 +505,8 @@ describe("HostTurnCoordinator simplified review state machine", () => {
       turnToken: "turn-stale",
       review: completeTaskReview()
     }));
-    expect(stale).toMatchObject({ kind: "NOT_READY", phase: "REVIEWING" });
+    expect(stale).toMatchObject({ kind: "NOT_READY" });
+    expect((await firstStore.store.readState()).runs[jobId]?.phase).toBe("REVIEWING");
     expect(await firstStore.store.readState()).toEqual(before);
 
     const boundRun = reviewRun({
@@ -634,7 +631,8 @@ describe("HostTurnCoordinator simplified review state machine", () => {
       turnToken: prompt.turnToken,
       answer: "confirm_manual_publish"
     }));
-    expect(continued).toMatchObject({ kind: "NOT_READY", phase: "READY_TO_PUBLISH" });
+    expect(continued).toMatchObject({ kind: "NOT_READY" });
+    expect((await store.readState()).runs[jobId]?.phase).toBe("READY_TO_PUBLISH");
     expect(resume).toHaveBeenCalledWith(
       expect.objectContaining({ resumeAction: "confirm_manual_publish" }),
       expect.objectContaining({

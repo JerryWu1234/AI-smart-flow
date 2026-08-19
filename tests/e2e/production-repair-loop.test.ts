@@ -226,6 +226,10 @@ function createReviewCallback(
 }
 
 type ReviewRequiredTurn = Extract<ReviewTurnOutput, { kind: "REVIEW_REQUIRED" }>;
+// The Revision under review is Daemon state, not Host-visible wire data.
+async function runRevision(store: StateStore, jobId: string): Promise<number | undefined> {
+  return (await store.readState()).runs[jobId]?.revision;
+}
 type ReviewTurnDriver = (
   continuation?: Record<string, unknown>
 ) => Promise<ReviewTurnOutput>;
@@ -266,13 +270,9 @@ async function submitReviewerResult(
   review: NonNullable<HostActionCallbacks["review"]>
 ): Promise<ReviewTurnOutput> {
   const output = await review({
-    reviewAttemptId: turn.reviewAttemptId,
     worktreePath: turn.worktreePath,
-    taskSourceHash: turn.taskSourceHash,
-    candidateHash: turn.candidateHash,
     changedPaths: [...turn.changedPaths],
-    reviewerSession: { ...turn.reviewerSession },
-    piSessionId: turn.piSessionId
+    reviewerSession: { ...turn.reviewerSession }
   });
   return nextTurn({
     turnToken: turn.turnToken,
@@ -398,7 +398,10 @@ describe("production review repair loop", () => {
 
     releaseRevision2();
     const secondTurn = await secondTurnPromise;
-    if (secondTurn.kind !== "REVIEW_REQUIRED" || secondTurn.revision !== 2) {
+    if (
+      secondTurn.kind !== "REVIEW_REQUIRED" ||
+      await runRevision(store, execute.jobId) !== 2
+    ) {
       throw new Error("second revision did not request Review");
     }
     const secondReviewPending = await store.readState();
@@ -411,7 +414,10 @@ describe("production review repair loop", () => {
     expect(provider.starts.map((start) => start.revision)).toEqual([1, 2]);
 
     const thirdTurn = await submitReviewerResult(nextTurn, secondTurn, reviewer.review);
-    if (thirdTurn.kind !== "REVIEW_REQUIRED" || thirdTurn.revision !== 3) {
+    if (
+      thirdTurn.kind !== "REVIEW_REQUIRED" ||
+      await runRevision(store, execute.jobId) !== 3
+    ) {
       throw new Error("third revision did not request Review");
     }
     await new Promise<void>((settle) => setTimeout(settle, 100));
@@ -497,7 +503,10 @@ describe("production review repair loop", () => {
     ): Promise<void> => {
       reviewPlans.set(revision, { verdict: "REQUEST_CHANGES", findingCodes });
       const requested = requestedTurn ?? await nextTurn();
-      if (requested.kind !== "REVIEW_REQUIRED" || requested.revision !== revision) {
+      if (
+        requested.kind !== "REVIEW_REQUIRED" ||
+        await runRevision(store, execute.jobId) !== revision
+      ) {
         throw new Error(`revision ${String(revision)} did not request Review`);
       }
       const run = (await store.readState()).runs[execute.jobId];
@@ -519,10 +528,8 @@ describe("production review repair loop", () => {
         });
         return;
       }
-      expect(response).toMatchObject({
-        kind: "REVIEW_REQUIRED",
-        revision: revision + 1
-      });
+      expect(response).toMatchObject({ kind: "REVIEW_REQUIRED" });
+      expect(await runRevision(store, execute.jobId)).toBe(revision + 1);
     };
 
     await completeRound(1, ["A", "B", "C"], 0, "NEXT_REVISION");
@@ -536,7 +543,10 @@ describe("production review repair loop", () => {
 
     reviewPlans.set(16, { verdict: "REQUEST_CHANGES", findingCodes: ["A"] });
     const limitedReview = await nextTurn();
-    if (limitedReview.kind !== "REVIEW_REQUIRED" || limitedReview.revision !== 16) {
+    if (
+      limitedReview.kind !== "REVIEW_REQUIRED" ||
+      await runRevision(store, execute.jobId) !== 16
+    ) {
       throw new Error("revision 16 did not request Review");
     }
     const limitPause = await submitReviewerResult(nextTurn, limitedReview, reviewer.review);
@@ -556,7 +566,10 @@ describe("production review repair loop", () => {
       answer: "resume_review_decision"
     });
     expect((await store.readState()).runs[execute.jobId]?.noProgressCount).toBe(13);
-    if (revision17.kind !== "REVIEW_REQUIRED" || revision17.revision !== 17) {
+    if (
+      revision17.kind !== "REVIEW_REQUIRED" ||
+      await runRevision(store, execute.jobId) !== 17
+    ) {
       throw new Error("revision 17 did not request Review after the repair-limit pause");
     }
     await completeRound(17, ["A"], 14, "NEXT_REVISION", revision17);
@@ -765,7 +778,6 @@ describe("production review repair loop", () => {
     expect(recovered).toMatchObject({
       kind: "REVIEW_REQUIRED",
       turnToken: first.turnToken,
-      reviewAttemptId: first.reviewAttemptId,
       reviewerSession: { mode: "CREATE" }
     });
     if (recovered.kind !== "REVIEW_REQUIRED") {

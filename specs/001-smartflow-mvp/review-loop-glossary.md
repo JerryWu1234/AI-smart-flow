@@ -20,7 +20,7 @@
 | Daemon-internal Review mechanics | Atomic Review begin/finalization, deterministic decision planning, complete approved-scope repair continuation, and Publish scheduling. They are domain operations, not callable wait/claim/renew/Leader primitives. |
 | Absent Review primitive symbols | The symbols, schemas, handlers, registrations, and aliases for `smartflow_wait`, `smartflow_claim_action`, `smartflow_renew_action_claim`, `smartflow_submit_review`, and `smartflow_submit_leader_decision`, plus the `HostActionLoop` symbol, do not exist; the Daemon does not reconstruct them as internal callable APIs. |
 | Four public states | The exclusive composite outputs: `NOT_READY`, `REVIEW_REQUIRED`, `USER_INPUT_REQUIRED`, and terminal-only `DONE`. |
-| `NOT_READY` | A no-path progress response with bounded `retryAfterMs`; also the safe response to stale continuation payloads. |
+| `NOT_READY` | A no-path polling response carrying bounded `retryAfterMs` and nothing else; also the safe response to stale continuation payloads. |
 | `REVIEW_REQUIRED` | A current Review turn whose `REVIEWING + AWAITING_REVIEW` state was committed atomically. This is the only response allowed to expose `worktreePath`. |
 | `USER_INPUT_REQUIRED` | A durable nonterminal pause containing legal options and, when needed, a typed answer template. Only the owning Host may ask the user and submit the answer through `smartflow_review_turn` with the active `turnToken`. Public Run-management APIs are not ReviewTurn answers or continuations; public `smartflow_resume` cannot bypass the active owner/token checks. |
 | `DONE` | A canonical terminal result for `COMPLETED`, `CANCELED`, or `FAILED`; never an alias for pause/conflict. |
@@ -40,6 +40,6 @@
 | Repair feedback | Every Issue from every incomplete Task in the validated ReviewResult, deterministically converted by the Daemon into the next approved-scope Revision. The Host/Leader cannot choose a subset or add entries. |
 | No-progress state and identity | `run.recovery.repairRound` stores `{ failureIds, tasks, relevantPathHashes }`; hashes come from Candidate operations and use `DELETED` for deletions. Identity compares only failure IDs, `(TaskReview.id, Issue.path)`, and relevant hashes. Strict problem-set reduction or a relevant hash change is progress; `message` and `suggestedFix` do not participate. First round initializes the count to zero and the default pause threshold is 15. |
 | Completion percentage | A TaskReview-local score only. SmartFlow never aggregates Task scores; acceptance requires every Task to equal 100%, which also requires every `issues` array to be empty. |
-| Stale continuation | A Review, failure, or answer whose token/current checkpoint no longer matches. It causes no side effect and returns current no-path progress. |
+| Stale continuation | A Review, failure, or answer whose token/current checkpoint no longer matches. It causes no side effect, reads no Run state, and returns the no-path `NOT_READY`. |
 | Publish | Applying a Candidate whose validated ReviewResult has every Task at 100% to the original project through conflict-checked CAS after the Daemon's deterministic `ACCEPT`. |
 | Viewable pause | A durable stopped Run that retains Candidate/Review evidence and legal recovery actions without false completion or cleanup. |

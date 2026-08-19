@@ -13,6 +13,7 @@ import {
   hostActionSchema,
   resultOutputSchema,
   resultInputSchema,
+  resumeActionSchema,
   resumeInputSchema,
   reviewTurnInputSchema,
   statusInputSchema,
@@ -319,6 +320,12 @@ function resumeSchedule(
   }
 }
 
+// Durable action lists still carry read-only markers such as inspect_* that no public
+// tool accepts, so the public result projection advertises only submittable actions.
+function publicActions(actions: readonly string[] | undefined): string[] {
+  return (actions ?? []).filter((action) => resumeActionSchema.safeParse(action).success);
+}
+
 function publicAction(value: Record<string, unknown> | undefined): HostAction | undefined {
   if (value === undefined) return undefined;
   const selected = value.type === "REVIEW"
@@ -592,18 +599,12 @@ export class ProjectRuntime {
     if (artifactFailure !== undefined) {
       throw new ProjectRuntimeError("ARTIFACT_INTEGRITY_BLOCKED", artifactFailure);
     }
-    const manifest = taskManifestSchema.parse(JSON.parse(
-      new TextDecoder().decode(await store.readArtifact(run.taskManifest))
-    ));
-    const completed = new Set(["REVIEW_PENDING", "REVIEWING", "LEADER_DECISION", "READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"])
-      .has(run.phase) ? manifest.enabledTaskIds.length : 0;
     return {
       projectId: state.projectId,
       jobId: run.jobId,
       phase: run.phase,
       revision: run.revision,
       stateVersion: state.stateVersion,
-      progress: { completed, total: manifest.enabledTaskIds.length },
       ...(run.pause === undefined ? {} : { pause: run.pause }),
       ...(publicAction(run.pendingAction) === undefined ? {} : { pendingAction: publicAction(run.pendingAction) }),
       ...(currentAttempt(run) === undefined ? {} : { activeAttempt: currentAttempt(run) }),
@@ -870,11 +871,12 @@ export class ProjectRuntime {
       (state, nextStateVersion) => {
         const run = state.runs[input.jobId];
         if (run === undefined) throw new ProjectRuntimeError("RUN_NOT_FOUND", input.jobId);
-        this.assertHostTurnAuthority(run, undefined);
+        this.assertCancelAuthority(run, input.hostTurnId);
         const nextRun: RunRecord = {
           ...run,
           phase: "CANCELING",
           pause: undefined,
+          hostTurn: undefined,
           cancellation: { reason: input.reason, requestedAt: now(), status: "REQUESTED" },
           updatedAt: now()
         };
@@ -911,13 +913,15 @@ export class ProjectRuntime {
       phase: run.phase,
       status,
       artifacts: artifactList(run),
-      nextActions: run.pause?.resumeActions ?? [],
+      nextActions: publicActions(run.pause?.resumeActions),
       ...(publicRepairDraft(run) === undefined ? {} : { repairDraft: publicRepairDraft(run) }),
       ...(publicPublishOutcome(run) === undefined ? {} : { publishOutcome: publicPublishOutcome(run) }),
       ...(publicPublishPrecheck(run) === undefined
         ? {}
         : { publishPrecheck: publicPublishPrecheck(run) }),
-      ...(run.lastError === undefined ? {} : { error: run.lastError })
+      ...(run.lastError === undefined
+        ? {}
+        : { error: { ...run.lastError, nextActions: publicActions(run.lastError.nextActions) } })
     };
   }
 
@@ -926,6 +930,19 @@ export class ProjectRuntime {
       throw new ProjectRuntimeError("PROJECT_ID_INVALID", "Invalid projectId");
     }
     return new StateStore(resolve(this.projectsDirectory, projectId));
+  }
+
+  // Cancellation stays owner-bound: a caller that cannot name the active turn must
+  // not abort someone else's Run. Supplying the owning hostTurnId lets that Host
+  // cancel out of turn instead of having to drive a full composite turn first.
+  private assertCancelAuthority(run: RunRecord, hostTurnId: string | undefined): void {
+    const hostTurn = run.hostTurn;
+    if (hostTurn === undefined) return;
+    if (hostTurnId !== undefined && hostTurn.hostTurnId === hostTurnId) return;
+    throw new ProjectRuntimeError(
+      "HOST_TURN_ACTIVE",
+      "Run is owned by an active composite Host turn"
+    );
   }
 
   private assertHostTurnAuthority(

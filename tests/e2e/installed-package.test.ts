@@ -347,8 +347,6 @@ describe("installed SmartFlow package", () => {
         nextActions: [],
         publishOutcome: { status: "COMMITTED" }
       });
-      expect(typeof result.revision).toBe("number");
-      expect(result.revision as number).toBeGreaterThanOrEqual(2);
 
       expect(new Set(workflowToolNames)).toEqual(new Set([
         "smartflow_execute",
@@ -389,6 +387,13 @@ describe("installed SmartFlow package", () => {
       expect(repairMarker).toMatch(/^\/\/ SMARTFLOW_DYNAMIC_REPAIR_[0-9a-f]{20}$/u);
 
       const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
+      // The Revision counter is Daemon state, so the durable artifact layout is the
+      // Host-visible proof that automatic repair produced a second Revision.
+      expect(artifacts
+        .map((artifact) => String(asRecord(artifact, "result artifact").relativePath))
+        .some((relativePath) => relativePath.includes(
+          `runs/${String(result.jobId)}/revision-2/`
+        ))).toBe(true);
       const taskSourceArtifact = artifacts
         .map((artifact) => asRecord(artifact, "result artifact"))
         .find((artifact) =>

@@ -65,9 +65,11 @@ type ReviewTurnOutput =
   | Done;
 ```
 
+The Host-visible output is a compact projection of Daemon state. It carries only what a caller can act on: Run identity the caller already supplied, Revision/`stateVersion` CAS bookkeeping, Review attempt identity, task-source/Candidate hashes, and Provider session identity all stay inside the Daemon and its durable evidence. Every guarantee below is unchanged by that projection.
+
 ### `NOT_READY`
 
-Returns `projectId`, `jobId`, `revision`, `stateVersion`, current `phase`, `progress`, and bounded `retryAfterMs`. It never contains `worktreePath`, turn authority, or Reviewer internals. The Host waits for `retryAfterMs` and calls the composite tool again with a new request ID.
+Returns bounded `retryAfterMs` and nothing else. It never contains `worktreePath`, turn authority, Run phase internals, task-completion counts, or Reviewer internals. The Host waits for `retryAfterMs` and calls the composite tool again with a new request ID.
 
 A stale `review`, `reviewUnavailableReason`, or `answer` continuation returns the current no-path `NOT_READY` state rather than replaying a side effect or redisclosing a worktree. This stale-continuation behavior is distinct from rejecting a malformed payload for the current active token.
 
@@ -75,17 +77,18 @@ A stale `review`, `reviewUnavailableReason`, or `answer` continuation returns th
 
 Returned only after one CAS mutation has validated the current Review context, moved the Run to `REVIEWING`, and persisted `AWAITING_REVIEW`. It includes:
 
-- `turnToken`, `reviewAttemptId`, `taskSourceHash`, `candidateHash`, and complete `changedPaths`; the bound Task manifest's `enabledTaskIds` define exact Review coverage;
-- the bound `worktreePath`, disclosed only in this state to the owning Host;
+- `turnToken` and complete `changedPaths`;
 - `reviewerSession: { mode: "CREATE" }` for the first round or `{ mode: "RESUME", reviewerSessionId }` thereafter;
-- the current `piSessionId` for provenance separation;
+- the bound `worktreePath`, disclosed only in this state;
 - the fixed review `deadlineAt`.
 
-The Host opens that worktree, rereads the synchronized Task and current files, executes exactly the requested Reviewer session mode, and submits one strict `ReviewResult` with the same `turnToken`. The Reviewer session must differ from the Pi session.
+The Host opens that worktree, rereads the synchronized Task and current files, executes exactly the requested Reviewer session mode, and submits one strict `ReviewResult` with the same `turnToken`. The bound Task manifest's `enabledTaskIds` define exact Review coverage and the Daemon enforces it. Review attempt identity, task-source/Candidate hashes, and the Pi session stay internal: the Daemon binds them itself and still rejects a reused attempt, a drifted task source, or a Reviewer session equal to the Pi session.
 
 ### `USER_INPUT_REQUIRED`
 
-Returns a durable pause with `turnToken`, `pause.code`, `pause.message`, legal mutable `options`, separate read-only `inspectionOptions`, the canonical paused `result`, and, when needed, `requiredInput`. Revision approval uses `mode: "COLLECT"` with a non-submit-ready `inputForm` when user values are missing, or `mode: "CONFIRM"` with a complete schema-valid `answer` when all values are available. It may include current Review evidence. An optional `worktreePath` is allowed only for an owning Host's publish-related pause; non-publish pauses never disclose one.
+Returns a durable pause with `turnToken`, `pause.code`, `pause.message`, legal mutable `options`, the canonical paused `result`, and, when needed, `requiredInput`. Revision approval uses `mode: "COLLECT"` with a non-submit-ready `inputForm` when user values are missing, or `mode: "CONFIRM"` with a complete schema-valid `answer` when all values are available. It may include current Review evidence in `review`. An optional `worktreePath` is allowed only for a publish-related pause; non-publish pauses never disclose one.
+
+The repair draft is carried once, inside `result.repairDraft`. Read-only `inspect_*` actions are not part of the wire: no tool accepts them, so durable pause evidence reaches the Host through `result.artifacts` and the independent `smartflow_result` API.
 
 - `AUTOMATIC_REPAIR_LIMIT` may offer `resume_review_decision`; the owning Host submits that answer through `smartflow_review_turn` with the active `turnToken`. HostTurnCoordinator verifies durable artifacts and replans the stored v2 Review with `repairRounds: 0`. A resulting `REPAIR` commits `autoRepairRounds: 1`; RepairCoordinator then either prepares the next Revision or enters a genuine repair pause.
 - `PUBLISH_ADAPTER_UNAVAILABLE`, `PUBLISH_PRECHECK_CONFLICT`, and a follow-up `MANUAL_PUBLISH_TARGET_MISMATCH` expose the reviewed Candidate `worktreePath` only to the owning Host. The first two may offer `confirm_manual_publish`; the Host obtains user confirmation after an external merge, and the Daemon completes only if every Candidate target kind/hash/mode already matches. `PUBLISH_RECOVERY_BLOCKED` never offers this action.

@@ -77,7 +77,7 @@
 
 ## Completed Implementation Checks
 
-- [x] `changedPaths`, `taskSourceHash`, and `candidateHash` from `REVIEW_REQUIRED` reach the packaged Host Reviewer callback (T205)
+- [x] `changedPaths`, `tasksPath`, and `taskIds` from `REVIEW_REQUIRED` reach the packaged Host Reviewer callback, while Review attempt identity and task-source/Candidate hashes stay inside the Daemon (T205)
 - [x] Review coverage rejects missing, duplicate, extra, unknown, and disabled Task IDs before durable writes
 - [x] Review validation enforces complete/empty and incomplete/non-empty issue equivalence, safe project-relative Issue paths, and per-Task `path + message` uniqueness
 - [x] A malformed or coverage-invalid current Review leaves `stateVersion`, phase, active owner/token, repair budget, and Review/Leader evidence unchanged; correction can reuse the same active turn

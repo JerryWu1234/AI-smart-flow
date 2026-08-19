@@ -49,14 +49,14 @@ Schema/coverage-invalid Review:
 
 Host 使用稳定 `hostTurnId` 调用 `smartflow_review_turn`，不携带 continuation。Daemon 最长 bounded wait 后返回四态之一：
 
-- `NOT_READY`：只含 phase/progress/`retryAfterMs`，不含 worktree path；
+- `NOT_READY`：只含 bounded `retryAfterMs`，不含 worktree path；
 - `REVIEW_REQUIRED`：`REVIEWING + AWAITING_REVIEW` 已在一个 CAS mutation 中 durable 提交，允许 Host 执行 Reviewer；
 - `USER_INPUT_REQUIRED`：只能由 Host 向用户取得选项或批准字段；
 - `DONE`：只对应 `COMPLETED | CANCELED | FAILED`。
 
 ### Review continuation
 
-`REVIEW_REQUIRED` 提供 `turnToken`、`reviewAttemptId`、Task/Candidate Hash、完整 changed paths、`CREATE | RESUME`、Pi session provenance、deadline 和当前 worktree path。绑定 Task manifest 的 `enabledTaskIds` 定义 Reviewer 必须精确覆盖的 Task 集合。Host 提交：
+`REVIEW_REQUIRED` 提供 `turnToken`、`CREATE | RESUME` Reviewer session、当前 worktree path、`tasksPath`、`taskIds`、完整 changed paths 和 deadline；Review attempt identity、Task/Candidate hash 与 Pi session provenance 留在 Daemon 的 durable evidence 内。绑定 Task manifest 的 `enabledTaskIds` 定义 Reviewer 必须精确覆盖的 Task 集合，并由响应中的 `taskIds` 直接给出。Host 提交：
 
 ```ts
 {

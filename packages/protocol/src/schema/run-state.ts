@@ -103,9 +103,11 @@ export const reviewIssueSchema = z
   })
   .strict();
 
+export const taskIdSchema = z.string().regex(/^T\d{3,}$/u);
+
 export const taskReviewSchema = z
   .object({
-    id: z.string().regex(/^T\d{3,}$/u),
+    id: taskIdSchema,
     completionPercentage: z.number().int().min(0).max(100),
     issues: z.array(reviewIssueSchema)
   })
@@ -262,9 +264,6 @@ export const runSummarySchema = z
     phase: runPhaseSchema,
     revision: positiveIntegerSchema,
     stateVersion: nonNegativeIntegerSchema,
-    progress: z
-      .object({ completed: nonNegativeIntegerSchema, total: nonNegativeIntegerSchema })
-      .strict(),
     pause: z
       .object({ code: z.string().min(1), resumeActions: z.array(z.string().min(1)) })
       .strict()

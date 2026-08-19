@@ -47,22 +47,17 @@ class WorkflowGateway implements HostGateway {
         this.phase = "PAUSED";
         return Promise.resolve({
           kind: "USER_INPUT_REQUIRED",
-          projectId: "project-1",
-          jobId: "job-1",
-          revision: this.revision,
-          stateVersion: this.stateVersion,
           turnToken: `turn-${String(this.reviewNumber)}`,
           pause: {
             code: "AUTOMATIC_REPAIR_LIMIT",
             message: "The automatic repair limit of fifteen rounds was reached."
           },
           result: this.result(),
-          review: result,
-          inspectionOptions: [],
           options: [
             { answer: "resume_review_decision", description: "Continue repairs" },
             { answer: "cancel", description: "Cancel" }
-          ]
+          ],
+          review: result
         });
       }
       this.decisions.push("repair");
@@ -77,20 +72,14 @@ class WorkflowGateway implements HostGateway {
   private reviewRequired(): object {
     return {
       kind: "REVIEW_REQUIRED",
-      projectId: "project-1",
-      jobId: "job-1",
-      revision: this.revision,
-      stateVersion: this.stateVersion,
       turnToken: `turn-${String(this.reviewNumber + 1)}`,
-      worktreePath: "/tmp/worktree",
-      reviewAttemptId: `review-attempt-${String(this.reviewNumber + 1)}`,
-      taskSourceHash: digest,
-      candidateHash: digest,
-      changedPaths: ["src/a.ts", "src/b.ts"],
       reviewerSession: this.reviewerSessionId === undefined
         ? { mode: "CREATE" }
         : { mode: "RESUME", reviewerSessionId: this.reviewerSessionId },
-      piSessionId: "pi-session-1",
+      worktreePath: "/tmp/worktree",
+      tasksPath: "tasks.md",
+      taskIds: ["T001"],
+      changedPaths: ["src/a.ts", "src/b.ts"],
       deadlineAt: "2026-07-20T00:30:00Z"
     };
   }
@@ -294,10 +283,6 @@ describe("executeApprovedWorkflow", () => {
         }
         return Promise.resolve({
           kind: "USER_INPUT_REQUIRED",
-          projectId: "project-1",
-          jobId: "job-1",
-          revision: 1,
-          stateVersion: 1,
           turnToken: "turn-user",
           pause: {
             code: "REPAIR_USER_APPROVAL_REQUIRED",
@@ -311,30 +296,15 @@ describe("executeApprovedWorkflow", () => {
             artifacts: [],
             nextActions: ["approve_new_manifest_revision", "cancel"]
           },
-          repairDraft: {
-            sourceArtifact: {
-              relativePath: "runs/job-1/repair.md",
-              sha256: digest,
-              size: 10
-            },
-            sourceHash: digest,
-            suggestedTasksPath: "tasks.md",
-            appendText: "repair",
-            addedTaskLines: ["- [ ] T002 repair"],
-            reasons: ["scope change"],
-            approval: answerTemplate.approval
-          },
-          requiredInput: {
-            mode: "CONFIRM",
-            action: "approve_new_manifest_revision",
-            fields: ["tasksPath", "approvedSourceHash", "approval"],
-            answer: answerTemplate
-          },
-          inspectionOptions: [],
           options: [
             { answer: "approve_new_manifest_revision", description: "Approve revision" },
             { answer: "cancel", description: "Cancel" }
-          ]
+          ],
+          requiredInput: {
+            mode: "CONFIRM",
+            action: "approve_new_manifest_revision",
+            answer: answerTemplate
+          }
         });
       }
     };

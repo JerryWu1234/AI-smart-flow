@@ -10,13 +10,9 @@ export type ReviewerSessionRequest =
   | { mode: "RESUME"; reviewerSessionId: string };
 
 export interface HostReviewContext {
-  reviewAttemptId: string;
   worktreePath: string;
-  taskSourceHash: string;
-  candidateHash: string;
   changedPaths: string[];
   reviewerSession: ReviewerSessionRequest;
-  piSessionId: string;
 }
 
 export interface HostReviewOutput {
@@ -54,11 +50,12 @@ export function validateHostReviewOutput(
   const output = record(value);
   exactKeys(output, ["reviewerSessionId", "result"]);
   const reviewerSessionId = identifierSchema.parse(output.reviewerSessionId);
-  if (context.reviewerSession.mode === "CREATE") {
-    if (reviewerSessionId === context.piSessionId) {
-      throw new Error("REVIEWER_SESSION_MATCHES_WORKER");
-    }
-  } else if (reviewerSessionId !== context.reviewerSession.reviewerSessionId) {
+  // Worker/Reviewer separation is enforced by the Daemon review gate; a caller
+  // can only honor the RESUME binding it was handed.
+  if (
+    context.reviewerSession.mode === "RESUME" &&
+    reviewerSessionId !== context.reviewerSession.reviewerSessionId
+  ) {
     throw new Error("REVIEWER_SESSION_RESUME_MISMATCH");
   }
   return {

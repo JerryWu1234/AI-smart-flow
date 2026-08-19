@@ -52,7 +52,7 @@ This walkthrough validates the Pi migration, removal of Broker/OpenCode, daemon-
 1. Call `smartflow_execute` once with approved Task hash and record `projectId/jobId`.
 2. Thereafter call only `smartflow_review_turn` for Review orchestration. Use one stable `hostTurnId` and a new idempotency `requestId` per call.
 3. On `NOT_READY`, confirm no `worktreePath` exists, wait `retryAfterMs`, and poll again.
-4. On first `REVIEW_REQUIRED`, record `reviewAttemptId`, `taskSourceHash`, `candidateHash`, complete `changedPaths`, and the bound manifest's `enabledTaskIds`; confirm `reviewerSession.mode === "CREATE"`.
+4. On first `REVIEW_REQUIRED`, record `turnToken`, `worktreePath`, `tasksPath`, complete `changedPaths`, and the response's `taskIds`; confirm `reviewerSession.mode === "CREATE"`. Review attempt identity and task-source/Candidate hashes stay inside the Daemon and are verified against durable evidence, not resupplied by the caller.
 5. Create an independent Reviewer, read the synchronized Task/current files, and submit exactly `ReviewResult={tasks: TaskReview[]}` with the same `turnToken`. Confirm Task IDs are unique and exactly equal `manifest.enabledTaskIds`.
 6. For every Task, confirm `completionPercentage` is an integer in 0–100 and equals 100 iff `issues=[]`; every incomplete Task has at least one issue. Confirm each Issue contains only project-relative `path`, concrete `message`, and optional `suggestedFix`, and is unique within its Task by `path + message`.
 7. On later repair Review, confirm `mode === "RESUME"` with the original Reviewer session and a new Pi session.
@@ -63,7 +63,7 @@ This walkthrough validates the Pi migration, removal of Broker/OpenCode, daemon-
 
 ## 7. Validate independent Run management APIs
 
-1. Exercise `smartflow_status` independently and confirm it reports Run progress without exposing the Review worktree path.
+1. Exercise `smartflow_status` independently and confirm it reports Run phase and revision without exposing the Review worktree path.
 2. Exercise public `smartflow_resume` only as an independent paused-Run recovery API when no active `hostTurn` owns the answer; it must not accept a ReviewTurn answer or bypass owner/token checks.
 3. Exercise public `smartflow_cancel` as a standalone Run operation outside an active ReviewTurn answer and confirm cancellation does not submit Review or make a Leader decision.
 4. Exercise `smartflow_result` independently for the Run's canonical result; confirm the Host Review workflow does not use it as a pause fallback.

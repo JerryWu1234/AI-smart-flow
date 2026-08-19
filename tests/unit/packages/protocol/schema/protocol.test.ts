@@ -31,13 +31,7 @@ describe("smartflow.v5 protocol schemas", () => {
     expect("smartflow_submit_tool_decision" in mcpToolSchemas).toBe(false);
   });
 
-  it("models the single review-turn entry point without leaking worktree paths", () => {
-    const identity = {
-      projectId: "project-1",
-      jobId: "job-1",
-      revision: 1,
-      stateVersion: 3
-    };
+  it("projects a compact review turn and keeps Daemon bookkeeping off the wire", () => {
     const pausedResult = {
       projectId: "project-1",
       jobId: "job-1",
@@ -46,35 +40,65 @@ describe("smartflow.v5 protocol schemas", () => {
       artifacts: [],
       nextActions: ["cancel"]
     };
+
+    const notReady = {
+      kind: "NOT_READY" as const,
+      retryAfterMs: 1_000
+    };
+    expect(reviewTurnOutputSchema.parse(notReady)).toEqual(notReady);
+    expect(reviewTurnOutputSchema.safeParse({
+      ...notReady,
+      worktreePath: "/private/run-worktree"
+    }).success).toBe(false);
+
     const reviewRequired = {
       kind: "REVIEW_REQUIRED" as const,
-      ...identity,
       turnToken: "turn-1",
-      worktreePath: "/private/run-worktree",
-      reviewAttemptId: "review-attempt-1",
-      taskSourceHash: digest,
-      candidateHash: "b".repeat(64),
-      changedPaths: ["src/a.ts"],
       reviewerSession: { mode: "CREATE" as const },
-      piSessionId: "pi-session-1",
+      worktreePath: "/private/run-worktree",
+      tasksPath: "specs/tasks.md",
+      taskIds: ["T001", "T002"],
+      changedPaths: ["src/a.ts"],
       deadlineAt: "2026-08-11T12:30:00+00:00"
     };
     expect(reviewTurnOutputSchema.parse(reviewRequired)).toEqual(reviewRequired);
-    expect(reviewTurnOutputSchema.safeParse({
-      kind: "NOT_READY",
-      ...identity,
-      phase: "RUNNING",
-      retryAfterMs: 1_000,
-      progress: { completed: 0, total: 1 },
-      worktreePath: "/private/run-worktree"
-    }).success).toBe(false);
+    expect(reviewTurnOutputSchema.parse({
+      ...reviewRequired,
+      reviewerSession: { mode: "RESUME", reviewerSessionId: "reviewer-1" }
+    })).toBeDefined();
+    // Daemon bookkeeping must not reappear on the Host-visible wire.
+    for (const leak of [
+      { projectId: "project-1" },
+      { jobId: "job-1" },
+      { revision: 1 },
+      { stateVersion: 3 },
+      { reviewAttemptId: "review-attempt-1" },
+      { taskSourceHash: digest },
+      { candidateHash: digest },
+      { piSessionId: "pi-session-1" }
+    ]) {
+      expect(reviewTurnOutputSchema.safeParse({ ...reviewRequired, ...leak }).success).toBe(false);
+      expect(reviewTurnOutputSchema.safeParse({ ...notReady, ...leak }).success).toBe(false);
+    }
+    // REVIEW_REQUIRED must name the reviewable Task set unambiguously, because the
+    // Daemon rejects any Review that does not cover exactly those Task IDs.
+    for (const invalid of [
+      { tasksPath: "/absolute/tasks.md" },
+      { tasksPath: "../outside/tasks.md" },
+      { taskIds: [] },
+      { taskIds: ["T001", "T001"] },
+      { taskIds: ["task-1"] }
+    ]) {
+      expect(
+        reviewTurnOutputSchema.safeParse({ ...reviewRequired, ...invalid }).success
+      ).toBe(false);
+    }
+
     const userInput = {
       kind: "USER_INPUT_REQUIRED" as const,
-      ...identity,
       turnToken: "turn-2",
       pause: { code: "REPAIR_NO_PROGRESS", message: "User action required" },
       result: pausedResult,
-      inspectionOptions: [],
       options: [{ answer: "cancel" as const, description: "Cancel the run" }]
     };
     expect(reviewTurnOutputSchema.parse(userInput)).toEqual(userInput);
@@ -82,6 +106,16 @@ describe("smartflow.v5 protocol schemas", () => {
       ...userInput,
       worktreePath: "/private/run-worktree"
     }).success).toBe(false);
+    // Unroutable inspect_* pseudo-actions are gone from the wire.
+    expect(reviewTurnOutputSchema.safeParse({
+      ...userInput,
+      inspectionOptions: []
+    }).success).toBe(false);
+    expect(reviewTurnOutputSchema.safeParse({
+      ...userInput,
+      options: [{ answer: "inspect_conflict", description: "Inspect" }]
+    }).success).toBe(false);
+
     const publishUserInput = {
       ...userInput,
       turnToken: "turn-publish",
@@ -91,14 +125,15 @@ describe("smartflow.v5 protocol schemas", () => {
         status: "PRECHECK_CONFLICT" as const,
         nextActions: ["retry_publish", "confirm_manual_publish", "cancel"]
       },
-      worktreePath: "/private/run-worktree",
       options: [
         { answer: "retry_publish" as const, description: "Retry publish" },
         { answer: "confirm_manual_publish" as const, description: "Confirm target state" },
         { answer: "cancel" as const, description: "Cancel the run" }
-      ]
+      ],
+      worktreePath: "/private/run-worktree"
     };
     expect(reviewTurnOutputSchema.parse(publishUserInput)).toEqual(publishUserInput);
+
     const repairDraft = {
       sourceArtifact: { relativePath: "runs/job-1/repair.md", sha256: digest, size: 10 },
       sourceHash: digest,
@@ -112,9 +147,14 @@ describe("smartflow.v5 protocol schemas", () => {
         authorizedCriterionIds: ["T002"]
       }
     };
+    const confirmAnswer = {
+      action: "approve_new_manifest_revision" as const,
+      tasksPath: "tasks.md",
+      approvedSourceHash: digest,
+      approval: repairDraft.approval
+    };
     const userApproval = {
       kind: "USER_INPUT_REQUIRED" as const,
-      ...identity,
       turnToken: "turn-user",
       pause: { code: "REPAIR_USER_APPROVAL_REQUIRED", message: "Approval required" },
       result: {
@@ -122,28 +162,30 @@ describe("smartflow.v5 protocol schemas", () => {
         nextActions: ["approve_new_manifest_revision", "cancel"],
         repairDraft
       },
-      repairDraft,
-      requiredInput: {
-        mode: "CONFIRM" as const,
-        action: "approve_new_manifest_revision" as const,
-        fields: ["tasksPath", "approvedSourceHash", "approval"] as const,
-        answer: {
-          action: "approve_new_manifest_revision" as const,
-          tasksPath: "tasks.md",
-          approvedSourceHash: digest,
-          approval: repairDraft.approval
-        }
-      },
-      inspectionOptions: [],
       options: [
         { answer: "approve_new_manifest_revision" as const, description: "Approve revision" },
         { answer: "cancel" as const, description: "Cancel the run" }
-      ]
+      ],
+      requiredInput: {
+        mode: "CONFIRM" as const,
+        action: "approve_new_manifest_revision" as const,
+        answer: confirmAnswer
+      }
     };
     expect(reviewTurnOutputSchema.parse(userApproval)).toEqual(userApproval);
-    const genericApproval = {
-      kind: "USER_INPUT_REQUIRED" as const,
-      ...identity,
+    // The repair draft is carried once, inside result.
+    expect(reviewTurnOutputSchema.safeParse({ ...userApproval, repairDraft }).success).toBe(false);
+    // The constant field list is gone from requiredInput.
+    expect(reviewTurnOutputSchema.safeParse({
+      ...userApproval,
+      requiredInput: {
+        ...userApproval.requiredInput,
+        fields: ["tasksPath", "approvedSourceHash", "approval"]
+      }
+    }).success).toBe(false);
+
+    const collectApproval = {
+      ...userApproval,
       turnToken: "turn-generic-approval",
       pause: { code: "APPROVED_SOURCE_DRIFT", message: "Approval required" },
       result: {
@@ -153,28 +195,19 @@ describe("smartflow.v5 protocol schemas", () => {
       requiredInput: {
         mode: "COLLECT" as const,
         action: "approve_new_manifest_revision" as const,
-        fields: ["tasksPath", "approvedSourceHash", "approval"] as const,
         inputForm: {
           tasksPath: null,
           approvedSourceHash: null,
           approval: null
         }
-      },
-      inspectionOptions: [],
-      options: [
-        { answer: "approve_new_manifest_revision" as const, description: "Approve revision" },
-        { answer: "cancel" as const, description: "Cancel the run" }
-      ]
+      }
     };
-    expect(reviewTurnOutputSchema.parse(genericApproval)).toEqual(genericApproval);
+    expect(reviewTurnOutputSchema.parse(collectApproval)).toEqual(collectApproval);
     expect(reviewTurnOutputSchema.safeParse({
-      ...genericApproval,
-      requiredInput: { ...genericApproval.requiredInput, inputForm: {} }
+      ...collectApproval,
+      requiredInput: { ...collectApproval.requiredInput, inputForm: {} }
     }).success).toBe(false);
-    expect(reviewTurnOutputSchema.safeParse({
-      ...genericApproval,
-      options: [{ answer: "inspect_conflict", description: "Inspect" }]
-    }).success).toBe(false);
+
     const inspectionActions = [
       "inspect_processes",
       "inspect_recovery",
@@ -182,13 +215,6 @@ describe("smartflow.v5 protocol schemas", () => {
       "inspect_repair_diff",
       "inspect_no_progress"
     ] as const;
-    expect(reviewTurnOutputSchema.safeParse({
-      ...genericApproval,
-      inspectionOptions: inspectionActions.map((action) => ({
-        action,
-        description: `Inspect with ${action}`
-      }))
-    }).success).toBe(true);
     const resumeInput = {
       requestId: "resume-request-1",
       projectId: "project-1",
@@ -210,6 +236,7 @@ describe("smartflow.v5 protocol schemas", () => {
         resumeAction
       }).success).toBe(false);
     }
+
     const baseInput = {
       requestId: "review-turn-request-1",
       projectId: "project-1",
@@ -247,7 +274,7 @@ describe("smartflow.v5 protocol schemas", () => {
     }).success).toBe(true);
     expect(reviewTurnInputSchema.safeParse({
       ...baseInput,
-      answer: userApproval.requiredInput.answer
+      answer: confirmAnswer
     }).success).toBe(true);
     expect(reviewTurnInputSchema.safeParse({
       ...baseInput,

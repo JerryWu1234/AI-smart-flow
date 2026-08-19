@@ -5,7 +5,6 @@ import {
   durableReviewDecisionSchema,
   resultOutputSchema,
   resumeActionSchema,
-  reviewTurnInspectionActionSchema,
   reviewTurnOutputSchema,
   statusOutputSchema,
   type ResumeInput,
@@ -13,6 +12,7 @@ import {
   type ReviewTurnOutput
 } from "@smartflow/protocol";
 import { REPAIR_ROUND_LIMIT } from "@smartflow/review";
+import { taskManifestSchema } from "@smartflow/task-manifest";
 import {
   StateStore,
   StateStoreError,
@@ -32,7 +32,7 @@ import {
 import { verifyRunArtifacts } from "./recovery-manager.js";
 
 const DEFAULT_RETRY_AFTER_MS = 1_000;
-const REVIEW_DEADLINE_MS = 30 * 60_000;
+const REVIEW_DEADLINE_MS = 45 * 60_000;
 const TERMINAL_PHASES = new Set(["COMPLETED", "CANCELED", "FAILED"]);
 
 interface ResumeOptions {
@@ -102,25 +102,11 @@ function mutableResumeActions(run: RunRecord): ResumeInput["resumeAction"][] {
   return actions.length > 0 ? actions : ["cancel"];
 }
 
-function inspectionResumeActions(
-  run: RunRecord
-): Array<ReturnType<typeof reviewTurnInspectionActionSchema.parse>> {
-  return (run.pause?.resumeActions ?? []).flatMap((action) => {
-    const parsed = reviewTurnInspectionActionSchema.safeParse(action);
-    return parsed.success ? [parsed.data] : [];
-  });
-}
-
 function optionDescription(action: string): string {
   const descriptions: Record<string, string> = {
     approve_new_manifest_revision: "Approve the supplied revision and continue the run",
     cancel: "Cancel the run and preserve its current evidence",
     confirm_manual_publish: "Confirm that the Project already matches the reviewed Candidate",
-    inspect_conflict: "Inspect the durable publish conflict evidence",
-    inspect_no_progress: "Inspect why automatic repair stopped making progress",
-    inspect_processes: "Inspect the unresolved Pi process containment evidence",
-    inspect_recovery: "Inspect the durable recovery evidence",
-    inspect_repair_diff: "Inspect the proposed repair task revision",
     resume_review_decision: "Grant another fifteen automatic repair rounds",
     retry_host_review: "Retry review with the same bound Reviewer session",
     retry_publish: "Retry publishing the accepted Candidate",
@@ -178,7 +164,7 @@ export class HostTurnCoordinator {
       return await this.advance(input);
     } catch (error) {
       if (!isStateVersionMismatch(error)) throw error;
-      return this.staleContinuation(input);
+      return this.staleContinuation();
     }
   }
 
@@ -238,7 +224,7 @@ export class HostTurnCoordinator {
         const run = state.runs[input.jobId];
         const turn = run?.hostTurn;
         if (run === undefined) throw new Error("RUN_NOT_FOUND");
-        if (turn?.stage !== "AWAITING_REVIEW") return this.notReady(status);
+        if (turn?.stage !== "AWAITING_REVIEW") return this.notReady();
         this.assertHostOwner(turn, input.hostTurnId);
         if (Date.parse(turn.deadlineAt) <= Date.now()) {
           await this.pauseActiveReview(
@@ -250,35 +236,27 @@ export class HostTurnCoordinator {
           continue;
         }
         this.scheduleDeadline(input.projectId, input.jobId, state);
-        return this.reviewRequired(state, run, turn);
+        return await this.reviewRequired(state, run, turn);
       }
       if (status.phase === "LEADER_DECISION") {
         await this.finalizeLegacyDecision(input);
         continue;
       }
-      return this.notReady(status);
+      return this.notReady();
     }
   }
 
-  private notReady(status: ReturnType<typeof statusOutputSchema.parse>): ReviewTurnOutput {
+  private notReady(): ReviewTurnOutput {
     return reviewTurnOutputSchema.parse({
       kind: "NOT_READY",
-      projectId: status.projectId,
-      jobId: status.jobId,
-      revision: status.revision,
-      stateVersion: status.stateVersion,
-      phase: status.phase,
-      retryAfterMs: DEFAULT_RETRY_AFTER_MS,
-      progress: status.progress
+      retryAfterMs: DEFAULT_RETRY_AFTER_MS
     });
   }
 
-  private async staleContinuation(input: ReviewTurnInput): Promise<ReviewTurnOutput> {
-    const status = statusOutputSchema.parse(await this.dependencies.status({
-      projectId: input.projectId,
-      jobId: input.jobId
-    }));
-    return this.notReady(status);
+  // A stale continuation has no path to disclose and no side effect to replay, so
+  // it needs no Run state read. The next real turn re-reads and re-verifies.
+  private staleContinuation(): ReviewTurnOutput {
+    return this.notReady();
   }
 
   private async beginReview(
@@ -292,7 +270,7 @@ export class HostTurnCoordinator {
     if (run.hostTurn?.stage === "AWAITING_REVIEW") {
       this.assertHostOwner(run.hostTurn, input.hostTurnId);
       this.scheduleDeadline(input.projectId, input.jobId, state);
-      return this.reviewRequired(state, run, run.hostTurn);
+      return await this.reviewRequired(state, run, run.hostTurn);
     }
     const turnToken = deterministicTurnToken(input, `review-r${String(revision)}`);
     const deadlineAt = new Date(Date.now() + REVIEW_DEADLINE_MS).toISOString();
@@ -355,38 +333,33 @@ export class HostTurnCoordinator {
     const nextRun = mutation.state.runs[input.jobId];
     const nextTurn = nextRun?.hostTurn;
     if (nextRun === undefined || nextTurn?.stage !== "AWAITING_REVIEW") {
-      return this.staleContinuation(input);
+      return this.staleContinuation();
     }
     this.scheduleDeadline(input.projectId, input.jobId, mutation.state);
-    return this.reviewRequired(mutation.state, nextRun, nextTurn);
+    return await this.reviewRequired(mutation.state, nextRun, nextTurn);
   }
 
-  private reviewRequired(
+  private async reviewRequired(
     state: ProjectState,
     run: RunRecord,
     turn: Extract<HostTurn, { stage: "AWAITING_REVIEW" }>
-  ): ReviewTurnOutput {
+  ): Promise<ReviewTurnOutput> {
     const action = pendingReviewAction(run);
     if (action === undefined || run.workspace === undefined) {
       throw new Error("REVIEW_ACTION_CONTEXT_MISSING");
     }
+    const store = this.dependencies.store(state.projectId);
+    const manifest = taskManifestSchema.parse(JSON.parse(
+      new TextDecoder().decode(await store.readArtifact(run.taskManifest))
+    ));
     return reviewTurnOutputSchema.parse({
       kind: "REVIEW_REQUIRED",
-      projectId: state.projectId,
-      jobId: run.jobId,
-      revision: run.revision,
-      stateVersion: state.stateVersion,
       turnToken: turn.turnToken,
-      worktreePath: resolve(
-        this.dependencies.store(state.projectId).dataDirectory,
-        run.workspace.relativePath
-      ),
-      reviewAttemptId: action.reviewAttemptId,
-      taskSourceHash: action.taskSourceHash,
-      candidateHash: action.candidateHash,
-      changedPaths: action.changedPaths,
       reviewerSession: action.reviewerSession,
-      piSessionId: action.piSessionId,
+      worktreePath: resolve(store.dataDirectory, run.workspace.relativePath),
+      tasksPath: manifest.canonicalTaskPath,
+      taskIds: manifest.enabledTaskIds,
+      changedPaths: action.changedPaths,
       deadlineAt: turn.deadlineAt
     });
   }
@@ -402,7 +375,7 @@ export class HostTurnCoordinator {
       turn.turnToken !== input.turnToken ||
       input.review === undefined
     ) {
-      return this.staleContinuation(input);
+      return this.staleContinuation();
     }
     this.assertHostOwner(turn, input.hostTurnId);
     const review = input.review;
@@ -543,7 +516,7 @@ export class HostTurnCoordinator {
       turn.turnToken !== input.turnToken ||
       input.reviewUnavailableReason === undefined
     ) {
-      return this.staleContinuation(input);
+      return this.staleContinuation();
     }
     this.assertHostOwner(turn, input.hostTurnId);
     const reason = input.reviewUnavailableReason.startsWith("HOST_REVIEW_UNAVAILABLE")
@@ -638,7 +611,6 @@ export class HostTurnCoordinator {
     }));
     const repairDraft = result.repairDraft;
     const resumeActions = mutableResumeActions(run);
-    const inspectionActions = inspectionResumeActions(run);
     const requiresRevisionApproval = resumeActions.includes("approve_new_manifest_revision");
     const revisionApprovalAnswer = repairDraft?.approval.kind === "USER"
       ? {
@@ -656,26 +628,22 @@ export class HostTurnCoordinator {
       : undefined;
     return reviewTurnOutputSchema.parse({
       kind: "USER_INPUT_REQUIRED",
-      projectId: state.projectId,
-      jobId: run.jobId,
-      revision: run.revision,
-      stateVersion: state.stateVersion,
       turnToken: turn.turnToken,
       pause: {
         code: turn.pauseCode,
         message: pauseMessage(run)
       },
       result,
-      ...(worktreePath === undefined ? {} : { worktreePath }),
-      ...(review === undefined ? {} : { review }),
-      ...(repairDraft === undefined ? {} : { repairDraft }),
+      options: resumeActions.map((answer) => ({
+        answer,
+        description: optionDescription(answer)
+      })),
       ...(requiresRevisionApproval
         ? {
             requiredInput: revisionApprovalAnswer === undefined
               ? {
                   mode: "COLLECT",
                   action: "approve_new_manifest_revision",
-                  fields: ["tasksPath", "approvedSourceHash", "approval"],
                   inputForm: {
                     tasksPath: null,
                     approvedSourceHash: null,
@@ -685,19 +653,12 @@ export class HostTurnCoordinator {
               : {
                   mode: "CONFIRM",
                   action: "approve_new_manifest_revision",
-                  fields: ["tasksPath", "approvedSourceHash", "approval"],
                   answer: revisionApprovalAnswer
                 }
           }
         : {}),
-      inspectionOptions: inspectionActions.map((action) => ({
-        action,
-        description: optionDescription(action)
-      })),
-      options: resumeActions.map((answer) => ({
-        answer,
-        description: optionDescription(answer)
-      }))
+      ...(review === undefined ? {} : { review }),
+      ...(worktreePath === undefined ? {} : { worktreePath })
     });
   }
 
@@ -713,7 +674,7 @@ export class HostTurnCoordinator {
       turn.turnToken !== input.turnToken ||
       answer === undefined
     ) {
-      return this.staleContinuation(input);
+      return this.staleContinuation();
     }
     this.assertHostOwner(turn, input.hostTurnId);
     if (!mutableResumeActions(run).includes(answer.action)) {

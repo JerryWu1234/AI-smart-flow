@@ -537,8 +537,8 @@ const MAIN = [
     explanation: "单次 mutation 直接写 REVIEWING + AWAITING_REVIEW，再返回 REVIEW_REQUIRED；没有 CLAIMING 中间态。",
     before: { phase: "REVIEW_PENDING", hostTurn: "—" }, after: { phase: "REVIEWING", hostTurn: "AWAITING_REVIEW" },
     actorIds: ["host", "mcp", "daemon", "ledger"], dataDetailIds: ["data.review.host-action", "data.run.record"],
-    payloadExample: "REVIEW_REQUIRED { turnToken, worktreePath, reviewAttemptId, deadlineAt }",
-    changes: ["phase: REVIEW_PENDING → REVIEWING", "hostTurn: — → AWAITING_REVIEW", "deadline: — → 30 minutes"],
+    payloadExample: "REVIEW_REQUIRED { turnToken, reviewerSession, worktreePath, changedPaths, deadlineAt }",
+    changes: ["phase: REVIEW_PENDING → REVIEWING", "hostTurn: — → AWAITING_REVIEW", "deadline: — → review deadline scheduled"],
     sources: [
       source("apps/daemon/src/host-turn-coordinator.ts", "HostTurnCoordinator.beginReview"),
       source("apps/daemon/src/review-coordinator.ts", "ReviewCoordinator.beginReview")
@@ -551,7 +551,7 @@ const MAIN = [
     explanation: "Host 创建与 Pi Worker 不同的独立 Reviewer；Reviewer 在 worktree 中只读检查。",
     before: { phase: "REVIEWING", reviewerBinding: "—" }, after: { phase: "REVIEWING", reviewerBinding: "pending first valid submission" },
     actorIds: ["host", "reviewer", "workspace"], dataDetailIds: ["data.review.host-action", "data.review.submission"],
-    payloadExample: "{ mode: CREATE, reviewAttemptId, piSessionId }",
+    payloadExample: "{ mode: CREATE } — attempt identity and Pi session stay Daemon-internal",
     changes: ["Reviewer native session: — → created", "Run phase remains REVIEWING"],
     sources: [source("apps/daemon/src/review-coordinator.ts", "assertReviewerContext")]
   }),
@@ -898,7 +898,7 @@ const BRANCHES = [
     explanation: "以稳定 operationId 和 result journal 保存证据并暂停；PARTIAL、UNKNOWN 与 PUBLISH_RECOVERY_BLOCKED 都不能通过人工确认分支绕过。",
     before: { phase: "PUBLISHING", result: "PARTIAL / UNKNOWN / unqueryable" }, after: { phase: "PAUSED", pauseCode: "PUBLISH_RECOVERY_BLOCKED" },
     actorIds: ["daemon", "project", "ledger", "host"], dataDetailIds: ["data.publish.operations-attempt", "data.publish.result", "data.pause.record"],
-    payloadExample: "USER_INPUT_REQUIRED { options: ['cancel'], inspectionOptions: ['inspect_recovery'] }",
+    payloadExample: "USER_INPUT_REQUIRED { options: ['cancel'], result.artifacts: recovery evidence }",
     changes: ["phase: PUBLISHING → PAUSED", "operationId and journal retained", "COMPLETED remains forbidden"],
     sources: [
       source("packages/publish/src/publish-service.ts", "PublishService.recover"),
@@ -1023,7 +1023,7 @@ const RECOVERY = [
     explanation: "进入 PAUSED_PROCESS_RECONCILIATION，禁止同时启动第二个 Worker。",
     before: { phase: "RUNNING", process: "UNKNOWN" }, after: { phase: "PAUSED", pauseCode: "PAUSED_PROCESS_RECONCILIATION" },
     actorIds: ["daemon", "ledger", "host"], dataDetailIds: ["data.worker.attempt", "data.recovery.epoch", "data.pause.record"],
-    payloadExample: "inspectionOptions: ['inspect_processes']",
+    payloadExample: "durable pause evidence via result.artifacts",
     changes: ["phase: RUNNING → PAUSED", "new Worker start: forbidden"],
     sources: [source("apps/daemon/src/recovery-manager.ts", "RecoveryManager.recoverWorker")]
   }),
@@ -1034,7 +1034,7 @@ const RECOVERY = [
     explanation: "恢复 deadline timer 并继续等待同一 Host/Reviewer identity，不创建重复 Reviewer。",
     before: { phase: "REVIEWING", timer: "lost", hostTurn: "durable" }, after: { phase: "REVIEWING", timer: "restored", hostTurn: "same" },
     actorIds: ["daemon", "ledger", "host", "reviewer"], dataDetailIds: ["data.review.host-action", "data.recovery.epoch"],
-    payloadExample: "same turnToken + reviewAttemptId + reviewer mode",
+    payloadExample: "same turnToken + same durable attempt binding + reviewer mode",
     changes: ["runtime timer: absent → scheduled", "phase remains REVIEWING"],
     sources: [
       source("apps/daemon/src/recovery-manager.ts", "RecoveryManager.recover"),
@@ -1044,11 +1044,11 @@ const RECOVERY = [
   transition({
     id: "tr.recovery.review-wait", fromStageId: "stage.recovery.reconcile", toStageId: "stage.review.active",
     label: "恢复同一 Review wait", graphLabel: "same Review", lane: "recovery", tone: "violet", bend: -64,
-    condition: "HostTurn identity 完整且 30 分钟 deadline 未过。",
+    condition: "HostTurn identity 完整且 review deadline 未过。",
     explanation: "重新返回相同 REVIEW_REQUIRED 上下文；如果超时则走 HOST_REVIEW_UNAVAILABLE pause。",
     before: { phase: "REVIEWING", runtime: "reconciling" }, after: { phase: "REVIEWING", hostTurn: "AWAITING_REVIEW" },
     actorIds: ["daemon", "ledger", "host"], dataDetailIds: ["data.review.host-action", "data.recovery.epoch"],
-    payloadExample: "REVIEW_REQUIRED { same reviewAttemptId, same binding }",
+    payloadExample: "REVIEW_REQUIRED { same turnToken, same binding }",
     changes: ["phase remains REVIEWING", "review deadline timer restored"],
     sources: [source("apps/daemon/src/host-turn-coordinator.ts", "HostTurnCoordinator.recoverRun")]
   }),
@@ -1087,7 +1087,7 @@ const RECOVERY = [
     explanation: "统一进入 PUBLISH_RECOVERY_BLOCKED；用户只能检查恢复证据或取消，不能通过人工确认、重试声明或其他路径把 PARTIAL/UNKNOWN 变成成功。",
     before: { phase: "PUBLISHING", result: "unknown" }, after: { phase: "PAUSED", pauseCode: "PUBLISH_RECOVERY_BLOCKED" },
     actorIds: ["daemon", "ledger", "project", "host"], dataDetailIds: ["data.publish.operations-attempt", "data.publish.result", "data.recovery.epoch", "data.pause.record"],
-    payloadExample: "USER_INPUT_REQUIRED { pause.code: 'PUBLISH_RECOVERY_BLOCKED', inspectionOptions: ['inspect_recovery'], options: ['cancel'] }",
+    payloadExample: "USER_INPUT_REQUIRED { pause.code: 'PUBLISH_RECOVERY_BLOCKED', options: ['cancel'] }",
     changes: ["phase: PUBLISHING → PAUSED", "operationId/result journal retained", "COMPLETED remains forbidden"],
     sources: [
       source("apps/daemon/src/publish-coordinator.ts", "PublishCoordinator.recover"),
@@ -1317,7 +1317,7 @@ export const SCENARIOS = Object.freeze({
 export const PUBLIC_TOOLS = Object.freeze([
   { id: "execute", name: "smartflow_execute", role: "创建 Run", direction: "Host → Daemon", description: "验证批准源并原子创建 Revision 1。" },
   { id: "review-turn", name: "smartflow_review_turn*", role: "唯一评审主循环", direction: "Host ↔ Daemon", description: "返回 NOT_READY、REVIEW_REQUIRED、USER_INPUT_REQUIRED 或 DONE；发布暂停可携带 worktreePath 与 confirm_manual_publish。" },
-  { id: "status", name: "smartflow_status", role: "只读状态", direction: "Host ← Daemon", description: "读取 phase、revision 与进度，不推进状态。" },
+  { id: "status", name: "smartflow_status", role: "只读状态", direction: "Host ← Daemon", description: "读取 phase 与 revision，不推进状态。" },
   { id: "resume", name: "smartflow_resume", role: "独立恢复", direction: "Host → Daemon", description: "恢复没有活动 composite HostTurn 的 PAUSED Run，包括合法 retry/confirm action。" },
   { id: "cancel", name: "smartflow_cancel", role: "取消", direction: "Host → Daemon", description: "进入 CANCELING 并核销活动身份。" },
   { id: "result", name: "smartflow_result", role: "只读结果", direction: "Host ← Daemon", description: "投影 durable artifacts、publishOutcome、publishPrecheck 与 nextActions。" }

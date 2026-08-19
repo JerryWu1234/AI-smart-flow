@@ -11,7 +11,8 @@ import {
 import {
   reviewResultSchema,
   runPhaseSchema,
-  runSummarySchema
+  runSummarySchema,
+  taskIdSchema
 } from "./run-state.js";
 
 const stateMutationSchema = z
@@ -79,14 +80,6 @@ export const resumeActionSchema = z.enum([
   "confirm_manual_publish"
 ]);
 
-export const reviewTurnInspectionActionSchema = z.enum([
-  "inspect_processes",
-  "inspect_recovery",
-  "inspect_conflict",
-  "inspect_repair_diff",
-  "inspect_no_progress"
-]);
-
 const reviewTurnMutableActionSchema = resumeActionSchema;
 
 export const revisionApprovalSchema = z
@@ -105,7 +98,10 @@ export const resumeInputSchema = stateMutationSchema.extend({
 });
 export const resumeOutputSchema = mutationResultSchema;
 
-export const cancelInputSchema = stateMutationSchema.extend({ reason: z.string().min(1) });
+export const cancelInputSchema = stateMutationSchema.extend({
+  reason: z.string().min(1),
+  hostTurnId: identifierSchema.optional()
+});
 export const cancelOutputSchema = mutationResultSchema;
 
 export const resultInputSchema = statusInputSchema;
@@ -208,12 +204,6 @@ const reviewTurnAnswerSchema = z.union([
   reviewTurnRevisionApprovalAnswerSchema
 ]);
 
-const reviewTurnRevisionApprovalFieldsSchema = z.tuple([
-  z.literal("tasksPath"),
-  z.literal("approvedSourceHash"),
-  z.literal("approval")
-]);
-
 const reviewTurnRevisionApprovalFormSchema = z.object({
   tasksPath: tasksPathSchema.nullable(),
   approvedSourceHash: sha256Schema.nullable(),
@@ -224,13 +214,11 @@ const reviewTurnRevisionApprovalRequiredInputSchema = z.discriminatedUnion("mode
   z.object({
     mode: z.literal("COLLECT"),
     action: z.literal("approve_new_manifest_revision"),
-    fields: reviewTurnRevisionApprovalFieldsSchema,
     inputForm: reviewTurnRevisionApprovalFormSchema
   }).strict(),
   z.object({
     mode: z.literal("CONFIRM"),
     action: z.literal("approve_new_manifest_revision"),
-    fields: reviewTurnRevisionApprovalFieldsSchema,
     answer: reviewTurnRevisionApprovalAnswerSchema
   }).strict()
 ]);
@@ -268,20 +256,15 @@ export const reviewTurnInputSchema = z
     }
   });
 
-const reviewTurnIdentitySchema = z.object({
-  projectId: identifierSchema,
-  jobId: identifierSchema,
-  revision: positiveIntegerSchema,
-  stateVersion: nonNegativeIntegerSchema
-});
-
-const reviewTurnNotReadySchema = reviewTurnIdentitySchema.extend({
+// The Host-visible review turn carries only what a caller can act on. Run
+// identity it already supplied, Revision/stateVersion CAS bookkeeping, Review
+// attempt identity, source/Candidate hashes, and Provider session identity all
+// stay inside the Daemon and its durable evidence. REVIEW_REQUIRED does name the
+// approved Task source and Task IDs, because the caller cannot satisfy the exact
+// Task coverage the Daemon enforces without them.
+const reviewTurnNotReadySchema = z.object({
   kind: z.literal("NOT_READY"),
-  phase: runPhaseSchema,
-  retryAfterMs: z.number().int().min(1).max(30_000),
-  progress: z
-    .object({ completed: nonNegativeIntegerSchema, total: nonNegativeIntegerSchema })
-    .strict()
+  retryAfterMs: z.number().int().min(1).max(30_000)
 }).strict();
 
 const reviewerSessionRequestSchema = z.discriminatedUnion("mode", [
@@ -292,20 +275,21 @@ const reviewerSessionRequestSchema = z.discriminatedUnion("mode", [
   }).strict()
 ]);
 
-const reviewTurnReviewRequiredSchema = reviewTurnIdentitySchema.extend({
+const reviewTurnReviewRequiredSchema = z.object({
   kind: z.literal("REVIEW_REQUIRED"),
   turnToken: identifierSchema,
-  worktreePath: z.string().min(1),
-  reviewAttemptId: identifierSchema,
-  taskSourceHash: sha256Schema,
-  candidateHash: sha256Schema,
-  changedPaths: z.array(z.string().min(1)),
   reviewerSession: reviewerSessionRequestSchema,
-  piSessionId: identifierSchema,
+  worktreePath: z.string().min(1),
+  tasksPath: tasksPathSchema,
+  taskIds: z.array(taskIdSchema).min(1).refine(
+    (ids) => new Set(ids).size === ids.length,
+    { message: "task ids must be unique" }
+  ),
+  changedPaths: z.array(z.string().min(1)),
   deadlineAt: z.iso.datetime({ offset: true })
 }).strict();
 
-const reviewTurnUserInputRequiredSchema = reviewTurnIdentitySchema.extend({
+const reviewTurnUserInputRequiredSchema = z.object({
   kind: z.literal("USER_INPUT_REQUIRED"),
   turnToken: identifierSchema,
   pause: z
@@ -315,18 +299,13 @@ const reviewTurnUserInputRequiredSchema = reviewTurnIdentitySchema.extend({
     })
     .strict(),
   result: resultOutputSchema,
-  worktreePath: z.string().min(1).optional(),
-  review: reviewResultSchema.optional(),
-  repairDraft: repairDraftSchema.optional(),
-  requiredInput: reviewTurnRevisionApprovalRequiredInputSchema.optional(),
-  inspectionOptions: z.array(z.object({
-    action: reviewTurnInspectionActionSchema,
-    description: z.string().min(1)
-  }).strict()),
   options: z.array(z.object({
     answer: reviewTurnMutableActionSchema,
     description: z.string().min(1)
-  }).strict()).min(1)
+  }).strict()).min(1),
+  requiredInput: reviewTurnRevisionApprovalRequiredInputSchema.optional(),
+  review: reviewResultSchema.optional(),
+  worktreePath: z.string().min(1).optional()
 }).strict();
 
 const reviewTurnDoneSchema = z

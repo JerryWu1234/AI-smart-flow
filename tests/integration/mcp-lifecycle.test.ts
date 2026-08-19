@@ -706,18 +706,14 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         }
       }
     }) as ReviewTurnOutput;
-    expect(response).toMatchObject({
-      kind: "NOT_READY",
-      phase: "READY_TO_PUBLISH"
-    });
+    expect(response).toMatchObject({ kind: "NOT_READY" });
+    // Review attempt identity stays inside the Daemon and its durable evidence.
+    expect(requested).not.toHaveProperty("reviewAttemptId");
 
     const reviewed = (await store.readState()).runs["job-1"];
     expect(reviewed).toMatchObject({
       phase: "READY_TO_PUBLISH",
-      reviewHistory: [{
-        reviewAttemptId: requested.reviewAttemptId,
-        reviewerSessionId
-      }]
+      reviewHistory: [{ reviewerSessionId }]
     });
     expect(reviewed?.review).toBeDefined();
     expect(reviewed?.leaderDecision).toBeDefined();
@@ -838,7 +834,11 @@ describe("Host planning, approval, and MCP lifecycle", () => {
           answer: "restore_approved_tasks"
         }
       }) as ReviewTurnOutput;
-      expect(requested).toMatchObject({ kind: "REVIEW_REQUIRED", revision: 1 });
+      expect(requested).toMatchObject({ kind: "REVIEW_REQUIRED" });
+      expect((await store.readState()).runs["job-1"]).toMatchObject({
+        revision: 1,
+        phase: "REVIEWING"
+      });
       expect(pipelineCalls).toBe(0);
       expect(publishCalls).toBe(0);
   });

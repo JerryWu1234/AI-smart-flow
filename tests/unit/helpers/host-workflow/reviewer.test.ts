@@ -5,16 +5,10 @@ import {
   type HostReviewContext
 } from "../../../helpers/host-workflow/reviewer.js";
 
-const digest = "a".repeat(64);
-
 const context: HostReviewContext = {
-  reviewAttemptId: "review-attempt-1",
   worktreePath: "/tmp/worktree",
-  taskSourceHash: digest,
-  candidateHash: digest,
   changedPaths: ["src/a.ts", "src/b.ts"],
-  reviewerSession: { mode: "CREATE" },
-  piSessionId: "pi-session-1"
+  reviewerSession: { mode: "CREATE" }
 };
 
 describe("compact Reviewer completion result", () => {

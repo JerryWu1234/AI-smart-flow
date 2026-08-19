@@ -132,7 +132,6 @@ try {
   let secondCanceled;
   let repairMarker;
   let reviewerSessionId;
-  let workflowRevision;
 
   stage = "execute";
   workflowToolNames.push("smartflow_execute");
@@ -150,7 +149,6 @@ try {
   if (typeof execute.revision !== "number" || !Number.isInteger(execute.revision)) {
     throw new Error("smartflow_execute omitted its revision");
   }
-  workflowRevision = execute.revision;
 
   stage = "review-turn-loop";
   const hostTurnId = `host-turn-${randomUUID()}`;
@@ -167,9 +165,6 @@ try {
       ...continuation
     });
     continuation = {};
-    if (typeof turn.revision === "number" && Number.isInteger(turn.revision)) {
-      workflowRevision = Math.max(workflowRevision, turn.revision);
-    }
 
     if (turn.kind === "NOT_READY") {
       const retryAfterMs = Number(turn.retryAfterMs);
@@ -194,15 +189,11 @@ try {
 
     const reviewerSession = asRecord(turn.reviewerSession, "Reviewer session request");
     const reviewerMode = asString(reviewerSession.mode, "Reviewer session mode");
-    const piSessionId = asString(turn.piSessionId, "Pi session ID");
     if (reviewerMode === "CREATE") {
       if (reviewCalls !== 1 || reviewerSessionId !== undefined) {
         throw new Error("Installed Reviewer received CREATE after its first turn");
       }
       reviewerSessionId = `reviewer-${randomUUID()}`;
-      if (reviewerSessionId === piSessionId) {
-        throw new Error("Installed Reviewer session matched the Pi worker session");
-      }
     } else if (reviewerMode === "RESUME") {
       if (
         reviewerSessionId === undefined ||
@@ -217,10 +208,6 @@ try {
 
     const worktreePath = asString(turn.worktreePath, "Reviewer worktree path");
     const tasksSource = await readFile(resolve(worktreePath, TASKS_PATH));
-    const observedHash = createHash("sha256").update(tasksSource).digest("hex");
-    if (observedHash !== turn.taskSourceHash) {
-      throw new Error("HOST_REVIEW_TASKS_SOURCE_DRIFT");
-    }
     const enabledTaskIds = [...new Set(
       [...tasksSource.toString("utf8").matchAll(/^\s*-\s+\[\s\]\s+(T\d{3,})\b/gmu)]
         .map((match) => match[1])
@@ -241,9 +228,8 @@ try {
     }
 
     if (reviewCalls === 1) {
-      const reviewAttemptId = asString(turn.reviewAttemptId, "Review attempt ID");
       repairMarker = `// SMARTFLOW_DYNAMIC_REPAIR_${createHash("sha256")
-        .update(reviewAttemptId)
+        .update(asString(turn.turnToken, "Review turn token"))
         .digest("hex")
         .slice(0, 20)}`;
       if (sumSource.includes(repairMarker)) {
@@ -281,15 +267,14 @@ try {
   if (
     secondExecute === undefined ||
     secondCanceled === undefined ||
-    repairMarker === undefined ||
-    workflowRevision === undefined
+    repairMarker === undefined
   ) {
     throw new Error("Installed MCP workflow omitted required lifecycle evidence");
   }
   if (result.phase !== "COMPLETED" || result.status !== "COMMITTED") {
     throw new Error(`Installed MCP workflow failed closed: ${JSON.stringify(result)}`);
   }
-  if (workflowRevision < 2 || reviewCalls < 2) {
+  if (reviewCalls < 2) {
     throw new Error("Installed MCP workflow did not perform an automatic repair review");
   }
 
@@ -298,7 +283,7 @@ try {
     scope,
     secondExecute,
     secondCanceled,
-    result: { ...result, revision: workflowRevision },
+    result,
     workflowToolNames,
     reviewerModes,
     reviewChangedPaths,
