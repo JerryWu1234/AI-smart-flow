@@ -9,7 +9,6 @@ export default tseslint.config(
       "coverage/**",
       ".agents/**",
       ".smartflow-e2e/**",
-      ".specify/**",
       "eslint.config.js",
       "scripts/**",
       "tests/fixtures/**"

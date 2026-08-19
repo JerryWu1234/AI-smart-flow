@@ -178,6 +178,9 @@ export const resultOutputSchema = z
     ]),
     artifacts: z.array(artifactRefSchema),
     nextActions: z.array(z.string().min(1)),
+    // The latest durable Review, so a caller reads per-Task completion and issues
+    // without filesystem access to Artifacts. Absent until a Review is recorded.
+    review: reviewResultSchema.optional(),
     repairDraft: repairDraftSchema.optional(),
     publishOutcome: publishOutcomeSchema.optional(),
     publishPrecheck: publishPrecheckSchema.optional(),
@@ -304,7 +307,6 @@ const reviewTurnUserInputRequiredSchema = z.object({
     description: z.string().min(1)
   }).strict()).min(1),
   requiredInput: reviewTurnRevisionApprovalRequiredInputSchema.optional(),
-  review: reviewResultSchema.optional(),
   worktreePath: z.string().min(1).optional()
 }).strict();
 

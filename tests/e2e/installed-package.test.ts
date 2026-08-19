@@ -163,7 +163,6 @@ describe("installed SmartFlow package", () => {
           maxBuffer: 2_000_000
         })
       ]);
-      expect(packedFiles).not.toMatch(/(?:^|\/)\.specify(?:\/|$)|(?:^|\/)specs(?:\/|$)/u);
       const removedHostSdkArtifact = `package/dist/${["host", "skill"].join("-")}.mjs`;
       expect(packedFiles).not.toContain(removedHostSdkArtifact);
       const packedManifest = asRecord(JSON.parse(manifestSource) as unknown, "packed manifest");

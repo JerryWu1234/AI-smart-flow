@@ -24,7 +24,7 @@ export const DATA_DETAILS = Object.freeze({
     transformation: "Host 批准的任务字节 → SHA-256 → approvedSourceHash；Daemon 重新读取并比较",
     lifecycle: "Host 在 execute 前提供这两个输入；Run 创建后任务源保存为 TaskSource Artifact。",
     fields: [
-      field("tasksPath", "string", true, "specs/001-smartflow-mvp/tasks.md", "被批准任务源的项目内路径。"),
+      field("tasksPath", "string", true, "docs/tasks.md", "被批准任务源的项目内路径。"),
       field("approvedSourceHash", "sha256", true, "sha256:9c72…e41b", "只授权与该摘要完全相同的字节。")
     ],
     sources: [
@@ -44,7 +44,7 @@ export const DATA_DETAILS = Object.freeze({
     lifecycle: "请求本身短暂存在；requestId 回执会持久化以支持安全重试。",
     fields: [
       field("projectRoot", "absolute path", true, "/repo/AI-smart-flow", "限定项目身份与后续所有文件操作边界。"),
-      field("tasksPath", "string", true, "specs/001-smartflow-mvp/tasks.md", "指向已批准任务源。"),
+      field("tasksPath", "string", true, "docs/tasks.md", "指向已批准任务源。"),
       field("approvedSourceHash", "sha256", true, "sha256:9c72…e41b", "必须与 Daemon 重新读取的字节一致。"),
       field("requestId", "identifier", true, "req-execute-001", "相同请求可重放但不会重复创建 Run。"),
       field("expectedStateVersion", "integer", false, "0", "可选 CAS 前置条件，防止覆盖并发状态。")

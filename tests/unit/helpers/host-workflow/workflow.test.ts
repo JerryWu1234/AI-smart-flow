@@ -52,12 +52,11 @@ class WorkflowGateway implements HostGateway {
             code: "AUTOMATIC_REPAIR_LIMIT",
             message: "The automatic repair limit of fifteen rounds was reached."
           },
-          result: this.result(),
+          result: { ...this.result(), review: result },
           options: [
             { answer: "resume_review_decision", description: "Continue repairs" },
             { answer: "cancel", description: "Cancel" }
-          ],
-          review: result
+          ]
         });
       }
       this.decisions.push("repair");

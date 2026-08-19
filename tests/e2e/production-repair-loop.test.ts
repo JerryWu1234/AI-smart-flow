@@ -864,8 +864,10 @@ describe("production review repair loop", () => {
     expect(paused).toMatchObject({
       kind: "USER_INPUT_REQUIRED",
       pause: { code: "AUTOMATIC_REPAIR_LIMIT" },
-      review: {
-        tasks: [{ id: "T001", completionPercentage: 50 }]
+      result: {
+        review: {
+          tasks: [{ id: "T001", completionPercentage: 50 }]
+        }
       }
     });
     expect(JSON.stringify(paused)).not.toContain(first.worktreePath);

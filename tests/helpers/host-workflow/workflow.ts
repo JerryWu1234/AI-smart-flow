@@ -88,11 +88,11 @@ export async function executeApprovedWorkflow(
       if (
         answer === undefined &&
         turn.pause.code === "AUTOMATIC_REPAIR_LIMIT" &&
-        turn.review !== undefined
+        turn.result.review !== undefined
       ) {
         const continueRepairs = await callbacks.continueAfterRepairLimit?.({
           repairRounds: 15,
-          result: turn.review
+          result: turn.result.review
         }) ?? false;
         if (continueRepairs) answer = "resume_review_decision";
       }

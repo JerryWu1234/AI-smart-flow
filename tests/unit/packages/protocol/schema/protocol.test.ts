@@ -106,6 +106,19 @@ describe("smartflow.v5 protocol schemas", () => {
       ...userInput,
       worktreePath: "/private/run-worktree"
     }).success).toBe(false);
+    // The recorded Review rides the shared result projection, never a second copy.
+    const reviewedPause = {
+      ...userInput,
+      result: {
+        ...pausedResult,
+        review: { tasks: [{ id: "T001", completionPercentage: 40, issues: [{ path: "src/a.ts", message: "unmet" }] }] }
+      }
+    };
+    expect(reviewTurnOutputSchema.parse(reviewedPause)).toEqual(reviewedPause);
+    expect(reviewTurnOutputSchema.safeParse({
+      ...userInput,
+      review: { tasks: [{ id: "T001", completionPercentage: 100, issues: [] }] }
+    }).success).toBe(false);
     // Unroutable inspect_* pseudo-actions are gone from the wire.
     expect(reviewTurnOutputSchema.safeParse({
       ...userInput,

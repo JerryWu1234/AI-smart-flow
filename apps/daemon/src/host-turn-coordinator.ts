@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
 import {
-  durableReviewDecisionSchema,
   resultOutputSchema,
   resumeActionSchema,
   reviewTurnOutputSchema,
@@ -595,16 +594,6 @@ export class HostTurnCoordinator {
     run: RunRecord,
     turn: Extract<HostTurn, { stage: "AWAITING_USER_INPUT" }>
   ): Promise<ReviewTurnOutput> {
-    const durableReview = run.review === undefined
-      ? undefined
-      : durableReviewDecisionSchema.safeParse(JSON.parse(
-          new TextDecoder().decode(
-            await this.dependencies.store(state.projectId).readArtifact(run.review)
-          )
-        ));
-    const review = durableReview?.success === true
-      ? durableReview.data.gate.result
-      : undefined;
     const result = resultOutputSchema.parse(await this.dependencies.result({
       projectId: state.projectId,
       jobId: run.jobId
@@ -657,7 +646,6 @@ export class HostTurnCoordinator {
                 }
           }
         : {}),
-      ...(review === undefined ? {} : { review }),
       ...(worktreePath === undefined ? {} : { worktreePath })
     });
   }

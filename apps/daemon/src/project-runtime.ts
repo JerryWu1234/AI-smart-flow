@@ -9,6 +9,7 @@ import { redactPiValue } from "@smartflow/provider-pi";
 
 import {
   cancelInputSchema,
+  durableReviewDecisionSchema,
   executeInputSchema,
   hostActionSchema,
   resultOutputSchema,
@@ -907,6 +908,14 @@ export class ProjectRuntime {
       throw new ProjectRuntimeError("ARTIFACT_INTEGRITY_BLOCKED", artifactFailure);
     }
     const status = resultStatus(run);
+    // Inline the latest durable Review so a caller reads per-Task completion and
+    // issues without filesystem access. A damaged artifact degrades to no Review
+    // rather than failing the whole projection.
+    const durableReview = run.review === undefined
+      ? undefined
+      : durableReviewDecisionSchema.safeParse(JSON.parse(
+          new TextDecoder().decode(await store.readArtifact(run.review))
+        ));
     return {
       projectId: state.projectId,
       jobId: run.jobId,
@@ -914,6 +923,9 @@ export class ProjectRuntime {
       status,
       artifacts: artifactList(run),
       nextActions: publicActions(run.pause?.resumeActions),
+      ...(durableReview?.success === true
+        ? { review: durableReview.data.gate.result }
+        : {}),
       ...(publicRepairDraft(run) === undefined ? {} : { repairDraft: publicRepairDraft(run) }),
       ...(publicPublishOutcome(run) === undefined ? {} : { publishOutcome: publicPublishOutcome(run) }),
       ...(publicPublishPrecheck(run) === undefined

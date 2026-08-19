@@ -52,16 +52,16 @@ describe("task manifest runtime inputs", () => {
     expect(compiled.manifest.providerRuntimeConfigHash).toBe(piRuntimeConfigHash(piConfiguration));
   });
 
-  it("compiles a run after the project .specify directory is deleted", async () => {
+  it("compiles a run after a project authoring-only directory is deleted", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const tasksPath = resolve(harness.projectDir, "tasks.md");
-    const specifyPath = resolve(harness.projectDir, ".specify");
-    await mkdir(specifyPath, { recursive: true });
-    await writeFile(resolve(specifyPath, "authoring-only.txt"), "not runtime input", "utf8");
+    const authoringPath = resolve(harness.projectDir, "docs/authoring");
+    await mkdir(authoringPath, { recursive: true });
+    await writeFile(resolve(authoringPath, "authoring-only.txt"), "not runtime input", "utf8");
     await writeFile(tasksPath, createTasksSource(), "utf8");
     const before = compileTaskManifest(await readFile(tasksPath), compileOptions);
-    await rm(specifyPath, { recursive: true });
+    await rm(authoringPath, { recursive: true });
     const after = compileTaskManifest(await readFile(tasksPath), compileOptions);
     expect(after).toEqual(before);
   });
