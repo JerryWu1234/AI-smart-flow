@@ -215,15 +215,6 @@ function resultStatus(run: RunRecord): ResultOutput["status"] {
 
 type ResumeSchedule = "pipeline" | "publish" | "cancel" | "recover" | "none";
 
-const readOnlyResumeActions = new Set<ResumeInput["resumeAction"]>([
-  "inspect_processes",
-  "inspect_recovery",
-  "inspect_conflict",
-  "inspect_repair_diff",
-  "inspect_no_progress",
-  "leader_append_repair_tasks"
-]);
-
 function closedResumeRoute(
   run: RunRecord,
   action: ResumeInput["resumeAction"]
@@ -278,8 +269,6 @@ function closedResumeRoute(
       ]).has(code ?? "")
         ? { phase: "PREPARING", schedule: "pipeline" }
         : undefined;
-    case "resume":
-      return undefined;
     case "restore_approved_tasks":
       if (code !== "APPROVED_SOURCE_DRIFT") return undefined;
       {
@@ -291,12 +280,6 @@ function closedResumeRoute(
         : { phase: "PREPARING", schedule: "pipeline" };
     case "retry":
     case "approve_new_manifest_revision":
-    case "leader_append_repair_tasks":
-    case "inspect_processes":
-    case "inspect_recovery":
-    case "inspect_conflict":
-    case "inspect_repair_diff":
-    case "inspect_no_progress":
       return undefined;
   }
 }
@@ -324,8 +307,6 @@ function resumeSchedule(
       return "cancel";
     case "retry_provider":
       return "pipeline";
-    case "resume":
-      return "recover";
     case "resume_review_decision":
       return phase === "FIXING"
         ? "pipeline"
@@ -334,12 +315,6 @@ function resumeSchedule(
           : "none";
     case "retry_host_review":
     case "retry":
-    case "leader_append_repair_tasks":
-    case "inspect_processes":
-    case "inspect_recovery":
-    case "inspect_conflict":
-    case "inspect_repair_diff":
-    case "inspect_no_progress":
       return "none";
   }
 }
@@ -643,12 +618,6 @@ export class ProjectRuntime {
       expectedHostTurnToken?: string;
     } = {}
   ): Promise<unknown> {
-    if (readOnlyResumeActions.has(input.resumeAction)) {
-      throw new ProjectRuntimeError(
-        "RESUME_ACTION_READ_ONLY",
-        `${input.resumeAction} is exposed through status/result and cannot mutate Run state`
-      );
-    }
     const store = this.store(input.projectId);
     const mutationPayload = Object.keys(internalOptions).length === 0
       ? input
@@ -772,7 +741,7 @@ export class ProjectRuntime {
         }
         if (input.resumeAction === "resume_review_decision") {
           if (
-            !new Set(["AUTOMATIC_REPAIR_LIMIT", "LEADER_PAUSED"]).has(run.pause.code) ||
+            run.pause.code !== "AUTOMATIC_REPAIR_LIMIT" ||
             run.review === undefined
           ) {
             throw new ProjectRuntimeError(

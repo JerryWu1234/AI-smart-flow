@@ -13,7 +13,7 @@ import {
   type ReviewActionResult
 } from "../helpers/host-workflow/index.js";
 import type {
-  ReviewSubmission,
+  ReviewResult,
   ReviewTurnOutput
 } from "@smartflow/protocol";
 import type {
@@ -23,9 +23,8 @@ import type {
   WorkerProvider,
   WorkerStartInput
 } from "@smartflow/provider-core";
-import { normalizeFinding } from "@smartflow/review";
 import { StateStore, type ProjectState } from "@smartflow/state-store";
-import { hashCanonical } from "@smartflow/task-manifest";
+import { hashCanonical, taskManifestSchema } from "@smartflow/task-manifest";
 import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
 import { combineReviewStageResults } from "../helpers/reviewer-provenance.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
@@ -146,12 +145,21 @@ async function waitForState(
   return state;
 }
 
+async function enabledTaskIdsForRun(store: StateStore, jobId: string): Promise<string[]> {
+  const run = (await store.readState()).runs[jobId];
+  if (run === undefined) throw new Error("review run is missing");
+  const manifest = taskManifestSchema.parse(JSON.parse(
+    new TextDecoder().decode(await store.readArtifact(run.taskManifest))
+  ));
+  return manifest.enabledTaskIds;
+}
+
 function createReviewCallback(
   plans: Map<number, {
     verdict: "APPROVE" | "REQUEST_CHANGES";
     findingCodes: string[];
-    blocking?: boolean;
-  }>
+  }>,
+  loadEnabledTaskIds: () => Promise<readonly string[]>
 ): {
   review: NonNullable<HostActionCallbacks["review"]>;
   observations: Array<{
@@ -191,41 +199,27 @@ function createReviewCallback(
         verdict: "REQUEST_CHANGES" as const,
         findingCodes: ["REPAIR_REQUIRED"]
       };
-      const { verdict, findingCodes } = plan;
-      const findings = findingCodes.map((code) => normalizeFinding({
-        code,
-        criterionId: "T001",
+      const taskIds = [...await loadEnabledTaskIds()];
+      const targetTaskId = taskIds[0];
+      if (targetTaskId === undefined) throw new Error("review source has no enabled tasks");
+      const issues = plan.findingCodes.map((code) => ({
         path: "sum.js",
-        severity: "P1",
-        blocking: plan.blocking ?? true,
-        summary: `Revision requires corrective implementation for ${code}`,
-        evidence: [`production repair-loop test finding ${code}`]
+        message: `sum requires corrective implementation for ${code}`,
+        suggestedFix: `Update sum to satisfy ${code}`
       }));
-      const approval: ReviewSubmission = {
-        verdict: "APPROVE",
-        completionPercentage: verdict === "APPROVE" ? 100 : 0,
-        convergeFindings: [],
-        adversarialFindings: [],
-        pathCoverage: { "sum.js": "FULL" },
-        residualRisks: []
+      const approval: ReviewResult = {
+        tasks: taskIds.map((id) => ({ id, completionPercentage: 100, issues: [] }))
       };
-      const converge = verdict === "APPROVE" ? approval : {
-        ...approval,
-        verdict,
-        convergeFindings: findings
+      const incomplete: ReviewResult = {
+        tasks: taskIds.map((id) => id === targetTaskId
+          ? { id, completionPercentage: 0, issues }
+          : { id, completionPercentage: 100, issues: [] })
       };
-      const adversarial = verdict === "APPROVE" ? approval : {
-        ...approval,
-        verdict,
-        adversarialFindings: findings
-      };
+      const converge = plan.verdict === "APPROVE" ? approval : incomplete;
+      const adversarial = plan.verdict === "APPROVE" ? approval : incomplete;
       return {
         reviewerSessionId,
-        result: combineReviewStageResults(
-          ["sum.js"],
-          converge,
-          adversarial
-        )
+        result: combineReviewStageResults(converge, adversarial)
       };
     }
   };
@@ -284,12 +278,7 @@ async function submitReviewerResult(
     turnToken: turn.turnToken,
     review: {
       reviewerSessionId: output.reviewerSessionId,
-      result: "result" in output
-        ? output.result
-        : {
-            completionPercentage: output.completionPercentage,
-            tasks: output.tasks
-          }
+      result: output.result
     }
   });
 }
@@ -332,7 +321,6 @@ describe("production review repair loop", () => {
     const reviewPlans = new Map<number, {
       verdict: "APPROVE" | "REQUEST_CHANGES";
       findingCodes: string[];
-      blocking?: boolean;
     }>([
       [1, {
         verdict: "REQUEST_CHANGES",
@@ -341,8 +329,7 @@ describe("production review repair loop", () => {
       [2, { verdict: "REQUEST_CHANGES", findingCodes: ["REPAIR_REQUIRED"] }],
       [3, {
         verdict: "REQUEST_CHANGES",
-        findingCodes: ["REPAIR_REQUIRED"],
-        blocking: false
+        findingCodes: ["REPAIR_REQUIRED"]
       }]
     ]);
     const runtime = new ProjectRuntime({
@@ -369,7 +356,10 @@ describe("production review repair loop", () => {
       "repair-turn"
     );
     const store = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
-    const reviewer = createReviewCallback(reviewPlans);
+    const reviewer = createReviewCallback(
+      reviewPlans,
+      () => enabledTaskIdsForRun(store, execute.jobId)
+    );
 
     const firstReviewPending = await waitForState(
       store,
@@ -429,7 +419,7 @@ describe("production review repair loop", () => {
     expect(finalRun).toMatchObject({
       revision: 3,
       phase: "REVIEWING",
-      noProgressCount: 1,
+      noProgressCount: 0,
       hostTurn: { stage: "AWAITING_REVIEW" }
     });
     expect(finalRun?.pendingAction).not.toHaveProperty("claimId");
@@ -447,7 +437,7 @@ describe("production review repair loop", () => {
       .toContain('implementedRevision = "stable"');
   }, 30_000);
 
-  it("counts reduced problems without path changes and resets only after both improve", async () => {
+  it("ignores issue wording/count changes and resets no-progress when the Candidate path changes", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const tasksPath = resolve(harness.projectDir, "tasks.md");
@@ -457,7 +447,7 @@ describe("production review repair loop", () => {
 - [ ] T001 Edit \`sum.js\` — 验收：Reviewer confirms the requested behavior`
     });
     await writeFile(tasksPath, tasksSource, "utf8");
-    const provider = new RepairLoopProvider((revision) => revision <= 2 ? "stable" : String(revision));
+    const provider = new RepairLoopProvider((revision) => revision <= 2 ? "stable" : "changed");
     const composition = new ProductionRuntimeComposition(
       harness.dataDir,
       undefined,
@@ -492,7 +482,10 @@ describe("production review repair loop", () => {
       "mixed-progress-turn"
     );
     const store = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
-    const reviewer = createReviewCallback(reviewPlans);
+    const reviewer = createReviewCallback(
+      reviewPlans,
+      () => enabledTaskIdsForRun(store, execute.jobId)
+    );
     const candidateHashes = new Map<number, string>();
 
     const completeRound = async (
@@ -821,15 +814,11 @@ describe("production review repair loop", () => {
       throw new Error("expired review turn was not reissued");
     }
     expect(retried.turnToken).not.toBe(first.turnToken);
-    const incomplete = normalizeFinding({
-      code: "REPAIR_REQUIRED",
-      criterionId: "T001",
+    const incompleteIssue = {
       path: "sum.js",
-      severity: "P1",
-      blocking: true,
-      summary: "The first revision needs a corrective implementation",
-      evidence: ["review_turn e2e incomplete finding"]
-    });
+      message: "sum in the first revision needs a corrective implementation",
+      suggestedFix: "Update sum to satisfy the approved task"
+    };
     const beforeLimit = await turnStore.readState();
     const limitedRun = beforeLimit.runs[execute.jobId];
     if (limitedRun === undefined) throw new Error("run missing before repair-limit test");
@@ -852,19 +841,20 @@ describe("production review repair loop", () => {
       review: {
         reviewerSessionId: "reviewer-session-review-turn",
         result: {
-          verdict: "REQUEST_CHANGES",
-          completionPercentage: 50,
-          convergeFindings: [incomplete],
-          adversarialFindings: [],
-          pathCoverage: { "sum.js": "FULL" },
-          residualRisks: []
+          tasks: [{
+            id: "T001",
+            completionPercentage: 50,
+            issues: [incompleteIssue]
+          }]
         }
       }
     });
     expect(paused).toMatchObject({
       kind: "USER_INPUT_REQUIRED",
       pause: { code: "AUTOMATIC_REPAIR_LIMIT" },
-      review: { completionPercentage: 50 }
+      review: {
+        tasks: [{ id: "T001", completionPercentage: 50 }]
+      }
     });
     expect(JSON.stringify(paused)).not.toContain(first.worktreePath);
     if (paused.kind !== "USER_INPUT_REQUIRED") {
@@ -883,17 +873,13 @@ describe("production review repair loop", () => {
       }
     });
     if (second.kind !== "REVIEW_REQUIRED") throw new Error("second review was not requested");
+    const completedTaskIds = await enabledTaskIdsForRun(turnStore, execute.jobId);
     const completed = await nextTurn({
       turnToken: second.turnToken,
       review: {
         reviewerSessionId: "reviewer-session-review-turn",
         result: {
-          verdict: "APPROVE",
-          completionPercentage: 100,
-          convergeFindings: [],
-          adversarialFindings: [],
-          pathCoverage: { "sum.js": "FULL" },
-          residualRisks: []
+          tasks: completedTaskIds.map((id) => ({ id, completionPercentage: 100, issues: [] }))
         }
       }
     });

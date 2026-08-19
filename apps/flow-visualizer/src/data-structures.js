@@ -174,44 +174,78 @@ export const DATA_DETAILS = Object.freeze({
   }),
 
   "data.review.submission": detail("data.review.submission", {
-    objectName: "ReviewSubmission",
+    objectName: "Review continuation envelope",
     category: "message",
     producer: "Independent Reviewer through Host",
     consumer: "ReviewCoordinator.finalizeReview",
-    summary: "Reviewer 对 Manifest 中每个 Task 的完成度、结论和 finding。",
-    purpose: "让完成判断可逐任务核验，而不是只提交一个模糊的通过/失败布尔值。",
-    transformation: "Reviewer result → normalize every enabled task → evaluateReviewGate",
-    lifecycle: "提交后写为 hash-bound Review Artifact，并追加 reviewHistory。",
+    summary: "Host 用 reviewerSessionId 提交严格 ReviewResult；ReviewResult 本身只包含 tasks。",
+    purpose: "让每个未完成 Task 直接携带可修复问题，避免顶层关联字段和 Issue 身份。",
+    transformation: "parse continuation envelope + strict ReviewResult { tasks } + exact enabled Task coverage → evaluateReviewGate",
+    lifecycle: "合法提交写为 hash-bound Review Artifact，并追加 reviewHistory；非法提交不产生 durable 写入。",
     fields: [
-      field("reviewerSessionId", "identifier", true, "reviewer-session-r9", "必须符合 CREATE/RESUME 绑定规则。"),
-      field("result.tasks[]", "task score[]", true, "[{ taskId: 'T1', score: 100 }]", "每个启用 Task 恰好出现一次。"),
-      field("result.completionPercentage", "0..100 integer", true, "100", "所有任务分数的四舍五入算术平均。"),
-      field("result.verdict", "APPROVE | REQUEST_CHANGES", true, "APPROVE", "Reviewer 的整体结论。"),
-      field("result.findings[]", "finding[]", true, "[]", "带路径、criterion 和 fingerprint 的具体问题。")
+      field("reviewerSessionId", "identifier", true, "reviewer-session-r9", "Continuation envelope 字段；必须符合 CREATE/RESUME 绑定规则。"),
+      field("result", "ReviewResult", true, "{ tasks: [...] }", "严格结果对象，除 tasks 外不接受其他字段。"),
+      field("result.tasks[].id", "Task identifier", true, "T001", "每个启用 Task 恰好出现一次。"),
+      field("result.tasks[].completionPercentage", "0..100 integer", true, "75", "该 Task 的完成度；100 必须没有 issue。"),
+      field("result.tasks[].issues[]", "ReviewIssue[]", true, "[{ path, message }]", "未完成 Task 至少一个；完成 Task 必须为空。"),
+      field("result.tasks[].issues[].path", "path string with limited lexical checks", true, "src/app.ts", "trim 后必须非空；拒绝前导 `/`、反斜杠及空/`.`/`..` segment，但不另行识别 drive-qualified 形式，也不验证存在性、文件/目录类型或 symlink。"),
+      field("result.tasks[].issues[].message", "string", true, "renderApp 在空输入时返回错误状态", "Reviewer prompt 要求描述具体函数或行为、触发条件与影响；schema 只校验非空。"),
+      field("result.tasks[].issues[].suggestedFix", "string", false, "补充空输入分支", "可选修复建议，不作为 Issue 身份。")
     ],
     sources: [
+      "packages/protocol/src/schema/run-state.ts#reviewResultSchema",
       "packages/protocol/src/schema/mcp-tools.ts#reviewTurnInputSchema",
       "apps/daemon/src/review-coordinator.ts#ReviewCoordinator.finalizeReview"
     ]
   }),
 
-  "data.review.decision": detail("data.review.decision", {
-    objectName: "DurableReviewDecision + DurableLeaderDecision",
+  "data.review.artifact": detail("data.review.artifact", {
+    objectName: "DurableReviewDecisionV2",
     category: "artifact",
-    producer: "ReviewCoordinator / deterministic policy",
-    consumer: "PublishCoordinator or RepairCoordinator",
-    summary: "Review 证据及 accept、repair、pause 的确定性决策，二者以 reviewHash 绑定。",
-    purpose: "只有 APPROVE、100% 且无阻塞 finding 才发布；其它结果不能由 Host 随意改写。",
-    transformation: "normalized review gate + repair counter → accept | repair | pause",
-    lifecycle: "与 Candidate 和 Reviewer session 一起永久保存；当前 finalize mutation 直接进入下一 phase。",
+    producer: "ReviewCoordinator",
+    consumer: "deterministic policy / PublishCoordinator / RepairCoordinator",
+    summary: "保存 Review gate、完整 ReviewResult 和 Candidate、Task、session provenance。",
+    purpose: "把 Reviewer 证据绑定到 revision 与 Candidate，并通过 reviewHash 供独立 Leader artifact 引用。",
+    transformation: "validated continuation → strict v2 Review artifact",
+    lifecycle: "写入后不可变；恢复、发布和修复均重新 strict parse 并校验 hash binding。",
     fields: [
-      field("reviewHash", "sha256", true, "sha256:bc19…", "绑定任务、Candidate、Reviewer 和逐项结果。"),
-      field("decision", "accept | repair | pause", true, "repair", "冻结策略输出。"),
-      field("repairItems[]", "repair item[]", true, "[findingFingerprint]", "repair 时仅选择可证明的阻塞项。"),
-      field("reason", "string", true, "2 blocking findings", "解释策略为何选择该出口。"),
-      field("decisionHash", "sha256", true, "sha256:449a…", "LeaderDecision Artifact 的内容身份。")
+      field("schemaVersion", "literal 2", true, "2", "strict parser 拒绝 v1 或未知字段。"),
+      field("revision", "positive integer", true, "2", "绑定当前批准 Revision。"),
+      field("claimId", "identifier", true, "turn-review-r2", "等于当前 Review turnToken，绑定本次 continuation。"),
+      field("reviewAttemptId", "identifier", true, "review-attempt-r2", "绑定本轮 Review attempt。"),
+      field("taskSourceHash", "unprefixed sha256", true, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "绑定批准任务源。"),
+      field("candidateHash", "unprefixed sha256", true, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "绑定被检查的 Candidate。"),
+      field("reviewerSessionId", "identifier", true, "reviewer-session-r9", "绑定独立 Reviewer session。"),
+      field("piSessionId", "identifier", true, "pi-session-r2", "记录产生 Candidate 的 Pi session。"),
+      field("gate", "DurableReviewGate", true, "{ accepted, allowedLeaderDecisions, result: { tasks: [...] } }", "保存固定 gate 输出及唯一 ReviewResult。"),
+      field("reviewHash", "unprefixed sha256", true, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "Review artifact canonical body 的内容身份。")
     ],
     sources: [
+      "packages/protocol/src/schema/run-state.ts#durableReviewDecisionSchema",
+      "apps/daemon/src/review-coordinator.ts#ReviewCoordinator.finalizeReview"
+    ]
+  }),
+
+  "data.review.decision": detail("data.review.decision", {
+    objectName: "DurableLeaderDecisionV2",
+    category: "artifact",
+    producer: "deterministic policy",
+    consumer: "PublishCoordinator or RepairCoordinator",
+    summary: "通过 reviewHash 引用 Review 证据，并保存 accept、repair 或 pause 的确定性决策。",
+    purpose: "只有全部 Task 都为 100% 才发布；任一嵌套 issue 都进入整组自动修复。",
+    transformation: "Review gate + repair counter → accept | repair | pause",
+    lifecycle: "写入后不可变；finalize mutation 依据该决策直接进入下一 phase。",
+    fields: [
+      field("schemaVersion", "literal 2", true, "2", "strict parser 拒绝旧 Leader Artifact。"),
+      field("revision", "positive integer", true, "2", "绑定被决策的 Revision。"),
+      field("reviewHash", "unprefixed sha256", true, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "引用独立 DurableReviewDecisionV2。"),
+      field("decision", "accept | repair | pause", true, "repair", "冻结策略输出；repair 自动覆盖全部 issues。"),
+      field("reason", "string", true, "Reviewer reported incomplete approved tasks", "解释策略为何选择该出口。"),
+      field("decidedAt", "ISO datetime", true, "2026-08-12T10:15:00Z", "记录机械决策时间。"),
+      field("decisionHash", "unprefixed sha256", true, "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "Leader artifact canonical body 的内容身份。")
+    ],
+    sources: [
+      "packages/protocol/src/schema/run-state.ts#durableLeaderDecisionSchema",
       "packages/review/src/review-decision.ts#planReviewDecision",
       "apps/daemon/src/review-coordinator.ts#ReviewCoordinator.finalizeReview"
     ]
@@ -222,18 +256,17 @@ export const DATA_DETAILS = Object.freeze({
     category: "derived-state",
     producer: "RepairCoordinator",
     consumer: "repair progress policy / manifest compiler",
-    summary: "本轮阻塞问题、相关路径哈希和进展判定。",
-    purpose: "只修 Reviewer 指出的范围，并防止无进展的无限循环。",
-    transformation: "selected finding fingerprints + Candidate path hashes → scoped repair tasks",
-    lifecycle: "作为 recovery.repairRound 持久化；下一轮比较严格子集和真实路径变化。",
+    summary: "保存本轮稳定失败范围、逐 Task issues 与相关 Candidate 路径哈希。",
+    purpose: "处理 Review 中全部 issues，并在不依赖 message 或 Issue ID 的情况下防止无限循环。",
+    transformation: "tasks[].issues[] + Candidate operation hashes → RepairRound",
+    lifecycle: "作为 run.recovery.repairRound 持久化；Run 的 noProgressCount 与 RepairAssessment 的 authorizedCriterionIds 位于该对象之外。",
     fields: [
-      field("findings[]", "normalized finding[]", true, "[P1 blocker]", "当前必须解决的阻塞集合。"),
-      field("relevantPathHashes", "record<string, sha256>", true, "src/app.ts → sha256:…", "证明相关文件确实发生变化。"),
-      field("noProgressCount", "non-negative integer", true, "0", "未严格缩小 blocker 或路径未变化时增加。"),
-      field("authorizedCriterionIds[]", "string[]", true, "['T1']", "限制自动追加任务可触及的原验收标准。")
+      field("failureIds[]", "string[]", true, "['candidate:EMPTY']", "保存非 Review 来源的稳定失败范围。"),
+      field("tasks[]", "TaskReview[]", true, "[{ id: 'T001', completionPercentage: 75, issues: [...] }]", "保存当前 Review 的完整嵌套问题。"),
+      field("relevantPathHashes", "record<string, sha256 | 'DELETED'>", true, "src/app.ts → sha256:…", "来自 Candidate operations 的 newEntry.sha256 或 DELETED。")
     ],
     sources: [
-      "packages/review/src/repair-loop.ts#assessRepairProgress",
+      "packages/review/src/repair-loop.ts#RepairRound",
       "apps/daemon/src/repair-coordinator.ts#RepairCoordinator.prepare"
     ]
   }),

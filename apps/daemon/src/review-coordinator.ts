@@ -2,37 +2,21 @@ import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
 import {
+  durableLeaderDecisionSchema,
   durableReviewDecisionSchema,
   hostActionSchema,
+  reviewResultSchema,
+  type DurableReviewDecision,
   type HostAction,
-  type ReviewSubmission,
-  type ReviewTurnInput,
-  type TaskCompletionReview
+  type ReviewResult
 } from "@smartflow/protocol";
 import {
   assertLeaderDecision,
   evaluateReviewGate,
-  planReviewDecision,
-  type ReviewGateDecision,
-  type ReviewResultInput
+  planReviewDecision
 } from "@smartflow/review";
 import { StateStore, type HostTurn, type ProjectState, type RunRecord } from "@smartflow/state-store";
 import { taskManifestSchema } from "@smartflow/task-manifest";
-
-type ReviewInputResult = NonNullable<ReviewTurnInput["review"]>["result"];
-
-interface DurableReviewDecision {
-  schemaVersion: 1;
-  revision: number;
-  claimId: string;
-  reviewAttemptId: string;
-  taskSourceHash: string;
-  candidateHash: string;
-  reviewerSessionId: string;
-  piSessionId: string;
-  gate: ReviewGateDecision;
-  reviewHash: string;
-}
 
 export interface ReviewMutation<T> {
   nextState: ProjectState;
@@ -61,14 +45,14 @@ export interface FinalizeReviewInput {
   hostTurnId: string;
   turnToken: string;
   reviewerSessionId: string;
-  result: ReviewInputResult;
+  result: ReviewResult;
 }
 
 export interface FinalizeReviewOutput {
   phase: RunRecord["phase"];
   stateVersion: number;
   reviewHash: string;
-  result: ReviewSubmission;
+  result: ReviewResult;
   schedule: "none" | "pipeline" | "publish";
 }
 
@@ -89,44 +73,15 @@ function verifyDurableDecision(decision: DurableReviewDecision): boolean {
   return hash(body) === reviewHash;
 }
 
-function isTaskCompletionReview(
-  input: ReviewInputResult
-): input is TaskCompletionReview {
-  return "tasks" in input;
-}
-
-function normalizeReviewResult(
-  expectedTaskIds: readonly string[],
-  changedPaths: readonly string[],
-  input: ReviewInputResult
-): ReviewResultInput {
-  const pathCoverage = Object.fromEntries(changedPaths.map((path) => [path, "FULL" as const]));
-  if (!isTaskCompletionReview(input)) return { ...input, pathCoverage };
-
-  const reviewedTaskIds = new Set(input.tasks.map((task) => task.id));
+function assertTaskCoverage(expectedTaskIds: readonly string[], result: ReviewResult): void {
+  const reviewedTaskIds = new Set(result.tasks.map((task) => task.id));
   if (
     reviewedTaskIds.size !== expectedTaskIds.length ||
+    result.tasks.length !== expectedTaskIds.length ||
     expectedTaskIds.some((taskId) => !reviewedTaskIds.has(taskId))
   ) {
     throw new Error("REVIEW_TASK_COVERAGE_INCOMPLETE");
   }
-  const incompleteTasks = input.tasks.filter((task) => task.completionPercentage < 100);
-  return {
-    verdict: incompleteTasks.length === 0 ? "APPROVE" : "REQUEST_CHANGES",
-    completionPercentage: input.completionPercentage,
-    convergeFindings: incompleteTasks.map((task) => ({
-      code: "TASK_INCOMPLETE",
-      criterionId: task.id,
-      path: null,
-      severity: "P1",
-      blocking: true,
-      summary: `Reason: ${task.reason ?? "Not provided"}; Suggestion: ${task.suggestion ?? "Not provided"}`,
-      evidence: [`Task ${task.id} is ${String(task.completionPercentage)}% complete`]
-    })),
-    adversarialFindings: [],
-    pathCoverage,
-    residualRisks: []
-  };
 }
 
 function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
@@ -162,9 +117,9 @@ function workerSession(run: RunRecord): string {
 
 function boundReviewerSession(run: RunRecord): string | undefined {
   const sessions = (run.reviewHistory ?? [])
-    .map((entry) => stringField(entry, "reviewerSessionId"))
-    .filter((value): value is string => value !== undefined);
-  const unique = [...new Set(sessions)];
+    .map((entry: Record<string, unknown> | undefined) => stringField(entry, "reviewerSessionId"))
+    .filter((value: string | undefined): value is string => value !== undefined);
+  const unique = [...new Set<string>(sessions)];
   if (unique.length > 1) throw new Error("REVIEWER_SESSION_HISTORY_INVALID");
   return unique[0];
 }
@@ -197,7 +152,7 @@ function assertReviewerContext(run: RunRecord, action: HostAction): void {
     throw new Error("REVIEW_ACTION_CONTEXT_STALE");
   }
   if ((run.reviewHistory ?? []).some(
-    (entry) => stringField(entry, "reviewAttemptId") === action.reviewAttemptId
+    (entry: Record<string, unknown> | undefined) => stringField(entry, "reviewAttemptId") === action.reviewAttemptId
   )) {
     throw new Error("REVIEW_ATTEMPT_REUSED");
   }
@@ -288,23 +243,19 @@ export class ReviewCoordinator {
     const manifest = taskManifestSchema.parse(JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(run.taskManifest))
     ));
-    const reviewResult = normalizeReviewResult(
-      manifest.enabledTaskIds,
-      action.changedPaths,
-      input.result
-    );
+    const reviewResult = reviewResultSchema.parse(input.result);
+    assertTaskCoverage(manifest.enabledTaskIds, reviewResult);
     const gate = evaluateReviewGate(
       {
         reviewAttemptId: action.reviewAttemptId,
         reviewerSessionId: input.reviewerSessionId,
         piSessionId: workerSession(run),
-        ...(boundSessionId === undefined ? {} : { boundReviewerSessionId: boundSessionId }),
-        changedPaths: action.changedPaths
+        ...(boundSessionId === undefined ? {} : { boundReviewerSessionId: boundSessionId })
       },
       reviewResult
     );
     const reviewBody = {
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
       revision: run.revision,
       claimId: turn.turnToken,
       reviewAttemptId: action.reviewAttemptId,
@@ -314,10 +265,10 @@ export class ReviewCoordinator {
       piSessionId: workerSession(run),
       gate
     };
-    const reviewDecision: DurableReviewDecision = {
+    const reviewDecision = durableReviewDecisionSchema.parse({
       ...reviewBody,
       reviewHash: hash(reviewBody)
-    };
+    });
     const reviewArtifact = await this.store.writeArtifact(
       `runs/${run.jobId}/revision-${String(run.revision)}/reviews/${action.reviewAttemptId}.json`,
       Buffer.from(canonical(reviewDecision), "utf8")
@@ -327,30 +278,23 @@ export class ReviewCoordinator {
       result: gate.result,
       repairRounds: run.autoRepairRounds ?? 0
     });
-    const repairItems = plan.decision === "repair" ? plan.repairItems : [];
-    assertLeaderDecision(gate, plan.decision, repairItems);
-    const leaderTaskIds = new Set(
-      repairItems.flatMap((item) => item.source === "leader" ? [item.taskId] : [])
-    );
-    if (leaderTaskIds.size > 0) {
-      const currentTaskIds = new Set(manifest.tasks.map((task) => task.id));
-      if ([...leaderTaskIds].some((taskId) => !currentTaskIds.has(taskId))) {
-        throw new Error("LEADER_REPAIR_TASK_UNKNOWN");
-      }
-    }
+    assertLeaderDecision(gate, plan.decision);
     const leaderBody = {
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
       revision: run.revision,
       reviewHash: reviewDecision.reviewHash,
       decision: plan.decision,
-      repairItems,
       reason: plan.reason,
       decidedAt: now.toISOString()
     };
     const decisionHash = hash(leaderBody);
+    const leaderDecisionValue = durableLeaderDecisionSchema.parse({
+      ...leaderBody,
+      decisionHash
+    });
     const leaderDecision = await this.store.writeArtifact(
       `runs/${run.jobId}/revision-${String(run.revision)}/leader-decisions/${decisionHash}.json`,
-      Buffer.from(canonical({ ...leaderBody, decisionHash }), "utf8")
+      Buffer.from(canonical(leaderDecisionValue), "utf8")
     );
 
     const phase: RunRecord["phase"] = plan.kind === "ACCEPT"
@@ -360,9 +304,7 @@ export class ReviewCoordinator {
         : "PAUSED";
     const pauseCode = plan.kind === "PAUSE_REPAIR_LIMIT"
       ? "AUTOMATIC_REPAIR_LIMIT"
-      : plan.kind === "PAUSE_INVALID_REVIEW"
-        ? "INVALID_REVIEW"
-        : undefined;
+      : undefined;
     const nextHostTurn: HostTurn | undefined = pauseCode === undefined
       ? undefined
       : {
@@ -398,9 +340,7 @@ export class ReviewCoordinator {
         : {
             pause: {
               code: pauseCode,
-              resumeActions: pauseCode === "AUTOMATIC_REPAIR_LIMIT"
-                ? ["resume_review_decision", "cancel"]
-                : ["cancel"]
+              resumeActions: ["resume_review_decision", "cancel"]
             }
           }),
       updatedAt: now.toISOString()
@@ -431,7 +371,7 @@ export class ReviewCoordinator {
     const run = state.runs[jobId];
     const resumableRepairLimit = options.resetAutoRepairRounds === true &&
       run?.phase === "PAUSED" &&
-      (run.pause?.code === "AUTOMATIC_REPAIR_LIMIT" || run.pause?.code === "LEADER_PAUSED");
+      run.pause?.code === "AUTOMATIC_REPAIR_LIMIT";
     if (
       run === undefined ||
       (run.phase !== "LEADER_DECISION" && !resumableRepairLimit) ||
@@ -441,37 +381,29 @@ export class ReviewCoordinator {
     }
     const decision = durableReviewDecisionSchema.parse(JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(run.review))
-    )) as DurableReviewDecision;
+    ));
     if (!verifyDurableDecision(decision)) throw new Error("LEADER_REVIEW_BINDING_INVALID");
     const plan = planReviewDecision({
       result: decision.gate.result,
       repairRounds: options.repairRounds ?? run.autoRepairRounds ?? 0
     });
-    const repairItems = plan.decision === "repair" ? plan.repairItems : [];
-    assertLeaderDecision(decision.gate, plan.decision, repairItems);
-    const manifest = taskManifestSchema.parse(JSON.parse(
-      new TextDecoder().decode(await this.store.readArtifact(run.taskManifest))
-    ));
-    const leaderTaskIds = new Set(
-      repairItems.flatMap((item) => item.source === "leader" ? [item.taskId] : [])
-    );
-    const currentTaskIds = new Set(manifest.tasks.map((task) => task.id));
-    if ([...leaderTaskIds].some((taskId) => !currentTaskIds.has(taskId))) {
-      throw new Error("LEADER_REPAIR_TASK_UNKNOWN");
-    }
+    assertLeaderDecision(decision.gate, plan.decision);
     const leaderBody = {
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
       revision: run.revision,
       reviewHash: decision.reviewHash,
       decision: plan.decision,
-      repairItems,
       reason: plan.reason,
       decidedAt: now.toISOString()
     };
     const decisionHash = hash(leaderBody);
+    const leaderDecisionValue = durableLeaderDecisionSchema.parse({
+      ...leaderBody,
+      decisionHash
+    });
     const leaderDecision = await this.store.writeArtifact(
       `runs/${run.jobId}/revision-${String(run.revision)}/leader-decisions/${decisionHash}.json`,
-      Buffer.from(canonical({ ...leaderBody, decisionHash }), "utf8")
+      Buffer.from(canonical(leaderDecisionValue), "utf8")
     );
     const phase: RunRecord["phase"] = plan.kind === "ACCEPT"
       ? "READY_TO_PUBLISH"
@@ -480,9 +412,7 @@ export class ReviewCoordinator {
         : "PAUSED";
     const pauseCode = plan.kind === "PAUSE_REPAIR_LIMIT"
       ? "AUTOMATIC_REPAIR_LIMIT"
-      : plan.kind === "PAUSE_INVALID_REVIEW"
-        ? "INVALID_REVIEW"
-        : undefined;
+      : undefined;
     const nextHostTurn: HostTurn | undefined = pauseCode === undefined || run.hostTurn === undefined
       ? undefined
       : {
@@ -511,9 +441,7 @@ export class ReviewCoordinator {
         : {
             pause: {
               code: pauseCode,
-              resumeActions: pauseCode === "AUTOMATIC_REPAIR_LIMIT"
-                ? ["resume_review_decision", "cancel"]
-                : ["cancel"]
+              resumeActions: ["resume_review_decision", "cancel"]
             }
           }),
       updatedAt: now.toISOString()

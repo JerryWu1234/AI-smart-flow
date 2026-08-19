@@ -4,11 +4,13 @@ import { relative, sep } from "node:path";
 import {
   assessRepairProgress,
   deriveRepairApproval,
-  normalizeFinding,
-  type Finding,
   type RepairRound
 } from "@smartflow/review";
-import { durableLeaderDecisionSchema, type RepairItem } from "@smartflow/protocol";
+import {
+  durableLeaderDecisionSchema,
+  durableReviewDecisionSchema,
+  type TaskReview
+} from "@smartflow/protocol";
 import { StateStore, type RunRecord } from "@smartflow/state-store";
 import {
   compileTaskManifest,
@@ -41,54 +43,13 @@ function candidatePathHashes(candidate: Candidate): Record<string, string> {
   ]));
 }
 
-function reviewFindings(value: unknown): Finding[] {
-  const gate = (value as { gate?: { result?: {
-    convergeFindings?: unknown;
-    adversarialFindings?: unknown;
-  } } }).gate;
-  const convergeSource = gate?.result?.convergeFindings;
-  const adversarialSource = gate?.result?.adversarialFindings;
-  const convergeFindings: unknown[] = Array.isArray(convergeSource)
-    ? convergeSource.map<unknown>((entry: unknown) => entry)
-    : [];
-  const adversarialFindings: unknown[] = Array.isArray(adversarialSource)
-    ? adversarialSource.map<unknown>((entry: unknown) => entry)
-    : [];
-  const entries = [
-    ...convergeFindings,
-    ...adversarialFindings
-  ];
-  return entries
-    .map((entry) => normalizeFinding(entry as Parameters<typeof normalizeFinding>[0]));
-}
-
-function leaderRepairFinding(
-  item: Extract<RepairItem, { source: "leader" }>,
-  manifest: TaskManifest,
-  decisionReason: string
-): Finding {
-  const task = manifest.tasks.find((candidate) => candidate.id === item.taskId);
-  if (task === undefined) throw new Error("LEADER_REPAIR_TASK_UNKNOWN");
-  const path = item.path ?? task.filePaths[0];
-  if (path === undefined) throw new Error("REPAIR_TARGET_PATH_MISSING");
-  return normalizeFinding({
-    code: item.code,
-    criterionId: item.taskId,
-    path,
-    severity: "P1",
-    blocking: true,
-    summary: item.reason,
-    evidence: [`Leader decision: ${decisionReason}`]
-  });
-}
-
 function parsePreviousRound(run: RunRecord): RepairRound | undefined {
   const value = run.recovery?.repairRound;
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const round = value as Record<string, unknown>;
   if (
     !Array.isArray(round.failureIds) ||
-    !Array.isArray(round.findings) ||
+    !Array.isArray(round.tasks) ||
     typeof round.relevantPathHashes !== "object" ||
     round.relevantPathHashes === null
   ) return undefined;
@@ -123,72 +84,58 @@ export class RepairCoordinator {
       new TextDecoder().decode(await this.store.readArtifact(run.candidate))
     ) as Candidate;
     const failures: string[] = [];
-    let findings: Finding[] = [];
+    let tasks: TaskReview[] = [];
     const hasReviewDecision = run.review !== undefined;
     if (run.review !== undefined) {
       if (run.leaderDecision === undefined) throw new Error("REPAIR_LEADER_DECISION_MISSING");
-      const reviewDecision = JSON.parse(
+      const reviewDecision = durableReviewDecisionSchema.parse(JSON.parse(
         new TextDecoder().decode(await this.store.readArtifact(run.review))
-      ) as { reviewHash?: unknown };
+      ));
       const leaderDecision = durableLeaderDecisionSchema.parse(JSON.parse(
         new TextDecoder().decode(await this.store.readArtifact(run.leaderDecision))
       ));
       if (
         leaderDecision.decision !== "repair" ||
-        leaderDecision.reviewHash !== reviewDecision.reviewHash
+        leaderDecision.reviewHash !== reviewDecision.reviewHash ||
+        !reviewDecision.gate.allowedLeaderDecisions.includes("repair")
       ) throw new Error("REPAIR_LEADER_DECISION_INVALID");
-      const selectedFingerprints = new Set(
-        leaderDecision.repairItems.flatMap((item) =>
-          item.source === "reviewer" ? [item.findingFingerprint] : []
-        )
-      );
-      const currentReviewFindings = reviewFindings(reviewDecision);
-      if ([...selectedFingerprints].some(
-        (fingerprint) => !currentReviewFindings.some((finding) => finding.fingerprint === fingerprint)
-      )) throw new Error("REPAIR_FINDING_SELECTION_INVALID");
-      findings = [
-        ...currentReviewFindings.filter(
-          (finding) => selectedFingerprints.has(finding.fingerprint)
-        ).map((finding) => ({ ...finding, blocking: true })),
-        ...leaderDecision.repairItems.flatMap((item) =>
-          item.source === "leader"
-            ? [leaderRepairFinding(item, parentManifest, leaderDecision.reason)]
-            : []
-        )
-      ];
+      tasks = reviewDecision.gate.result.tasks;
+      if (!tasks.some((task) => task.issues.length > 0)) {
+        throw new Error("REPAIR_REVIEW_HAS_NO_ISSUES");
+      }
     }
-    if (!hasReviewDecision && findings.length === 0 && run.lastError?.code === "WORKER_CANDIDATE_EMPTY") {
+    if (!hasReviewDecision && tasks.length === 0 && run.lastError?.code === "WORKER_CANDIDATE_EMPTY") {
       const parent = parentManifest.tasks[0];
-      if (parent === undefined) throw new Error("REPAIR_PARENT_TASK_MISSING");
+      const path = parent?.filePaths[0];
+      if (parent === undefined || path === undefined) throw new Error("REPAIR_PARENT_TASK_MISSING");
       failures.push("candidate:EMPTY:WORKER_CANDIDATE_EMPTY");
-      findings = [normalizeFinding({
-        code: "WORKER_CANDIDATE_EMPTY",
-        criterionId: parent.id,
-        path: parent.filePaths[0] ?? null,
-        severity: "P1",
-        blocking: true,
-        summary: "Worker completed without a changed Candidate",
-        evidence: [
-          `candidate=${getCandidateHash(candidate)} allowNoChange=${String(parentManifest.allowNoChange)}`
-        ]
-      })];
+      tasks = [{
+        id: parent.id,
+        completionPercentage: 0,
+        issues: [{
+          path,
+          message: "Worker completed without producing a changed Candidate",
+          suggestedFix: `Change the task implementation so Candidate ${getCandidateHash(candidate)} contains the required file update`
+        }]
+      }];
     }
-    if (!hasReviewDecision && findings.length === 0) {
+    if (!hasReviewDecision && tasks.length === 0) {
       const parent = parentManifest.tasks[0];
-      if (parent === undefined) throw new Error("REPAIR_PARENT_TASK_MISSING");
-      findings = [normalizeFinding({
-        code: "LEADER_REPAIR_REQUEST",
-        criterionId: parent.id,
-        path: parent.filePaths[0] ?? null,
-        severity: "P1",
-        blocking: true,
-        summary: "Leader requested a corrective revision",
-        evidence: ["durable Leader decision requested repair"]
-      })];
+      const path = parent?.filePaths[0];
+      if (parent === undefined || path === undefined) throw new Error("REPAIR_PARENT_TASK_MISSING");
+      tasks = [{
+        id: parent.id,
+        completionPercentage: 0,
+        issues: [{
+          path,
+          message: "The current Candidate requires a corrective revision",
+          suggestedFix: "Implement the approved task acceptance criteria in the named file"
+        }]
+      }];
     }
     const currentRound: RepairRound = {
       failureIds: failures,
-      findings,
+      tasks,
       relevantPathHashes: candidatePathHashes(candidate)
     };
     const previousRound = parsePreviousRound(run);

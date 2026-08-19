@@ -35,10 +35,11 @@ interface TaskManifestV3 {
   providerRuntimeConfigHash: string;
   taskSourceArtifact: ArtifactRef;
   tasksSha256: string;
+  enabledTaskIds: string[];
 }
 ```
 
-The original canonical task file is mirrored byte-for-byte to the same path in the Run workspace before each Worker attempt. Worker and Reviewer read that synchronized worktree file; TaskSourceArtifact remains audit evidence. TaskManifest contains no Provider field, permission policy, Broker tool definition, or model credential.
+The original canonical task file is mirrored byte-for-byte to the same path in the Run workspace before each Worker attempt. Worker and Reviewer read that synchronized worktree file; TaskSourceArtifact remains audit evidence. `enabledTaskIds` is derived once from the frozen TaskSource, contains unique IDs in source order, and remains bound through the immutable TaskManifest artifact; Review and Publish never reconstruct it from a mutable task file. TaskManifest contains no Provider field, permission policy, Broker tool definition, or model credential.
 
 ## PiRuntimeConfiguration and credential
 
@@ -157,7 +158,66 @@ interface GitCandidateV3 {
 
 The formal Candidate compares the Run Baseline to the current Result Snapshot. Snapshot Artifacts already carry Git tree, blob, and mode evidence, so Candidate v3 binds their hashes rather than copying those values into another Artifact. `.smartflow-runtime/` and session temporaries are excluded before Result capture. Publish derives `ApplyOperation[]` directly from the bound Candidate and immutable `REVISION_RESULT`; final file bytes remain in the Run Git object store and are hash/size checked when read. Worker does not persist incremental or cumulative patches. Verification remains backward-compatible with unversioned and v2 Candidate Artifacts.
 
-## Review entities and durable Host turn
+## ReviewResult v2 entities and durable Host turn
+
+`ReviewResult` is the only Reviewer result model. The domain result, task result, and issue are strict objects with no compatibility aliases:
+
+```ts
+interface Issue {
+  path: string;
+  message: string;
+  suggestedFix?: string;
+}
+
+interface TaskReview {
+  id: string;
+  completionPercentage: number;
+  issues: Issue[];
+}
+
+interface ReviewResult {
+  tasks: TaskReview[];
+}
+
+interface DurableReviewDecisionV2 {
+  schemaVersion: 2;
+  revision: number;
+  claimId: string;
+  reviewAttemptId: string;
+  taskSourceHash: string;
+  candidateHash: string;
+  reviewerSessionId: string;
+  piSessionId: string;
+  gate: {
+    accepted: boolean;
+    allowedLeaderDecisions: Array<"accept" | "repair" | "pause">;
+    result: ReviewResult;
+  };
+  reviewHash: string;
+}
+
+interface DurableLeaderDecisionV2 {
+  schemaVersion: 2;
+  revision: number;
+  reviewHash: string;
+  decision: "accept" | "repair" | "pause";
+  reason: string;
+  decidedAt: string;
+  decisionHash: string;
+}
+```
+
+Validation is normative:
+
+- `ReviewResult` contains only `tasks`; each `TaskReview` contains only `id`, `completionPercentage`, and `issues`; each `Issue` contains only `path`, `message`, and optional `suggestedFix`.
+- Task IDs are unique and their set equals `manifest.enabledTaskIds` exactly: no missing, duplicate, disabled, or unknown task is accepted.
+- `completionPercentage` is an integer from 0 through 100. It is 100 if and only if `issues` is empty; every incomplete task has at least one issue.
+- `path` is trimmed and non-empty; a leading `/`, any backslash, and any empty/`.`/`..` slash-delimited segment are invalid. These are the complete lexical checks: drive-qualified forms are not separately classified, and the schema does not check filesystem existence, file-vs-directory type, or symlinks.
+- `message` is non-empty; `suggestedFix`, when present, is non-empty guidance rather than a second identity field. Concrete function/behavior, trigger, and impact are Reviewer prompt requirements, not natural-language checks performed by the schema.
+- Within one task, issues are unique by trimmed `path + message`; array order and `suggestedFix` do not create another issue.
+- The strict v2 objects reject every unknown or legacy key; no compatibility aliases or secondary review/repair structures exist.
+
+Durable Review and Leader artifacts always use `schemaVersion: 2`. `reviewHash` is serialized in `DurableReviewDecisionV2` and hashes the canonical body without itself; `decisionHash` does the same for `DurableLeaderDecisionV2`. The Leader artifact has no `plan`, direct `candidateHash`/`taskSourceHash`, or separate repair payload and binds provenance transitively through `reviewHash`. Review/Leader v1 artifacts are rejected by strict v2 parsing; recovery reports `ARTIFACT_SEMANTIC_VALIDATION_FAILED` and pauses or blocks the affected Run. Operators may choose a new Data Directory for deployment, but the runtime uses an unversioned layout and has no format marker/probe. This artifact boundary is independent of supported Project state schema-v4/v5 to schema-v6 migration.
 
 ```ts
 interface ReviewerBinding {
@@ -166,12 +226,13 @@ interface ReviewerBinding {
   createdByActionId: string;
 }
 
-interface ReviewDecision {
+interface BoundReviewResult {
   actionId: string;
   revision: number;
   taskSourceHash: string;
   candidateHash: string;
   reviewerSessionId: string;
+  reviewHash: string;
   reviewArtifact: ArtifactRef;
 }
 
@@ -194,7 +255,7 @@ type HostTurn =
     });
 ```
 
-`AWAITING_REVIEW` proves that Review context, Host ownership, and the 30-minute deadline committed atomically with the `REVIEWING` phase; it is the only stage from which the public Review protocol discloses the Reviewer worktree. `AWAITING_USER_INPUT` persists a nonterminal typed pause. For a publish-related pause, only the owning Host's `USER_INPUT_REQUIRED` may additionally receive the same reviewed Candidate `worktreePath`; ordinary status/result, non-publish pauses, stale continuations, and terminal outputs remain path-free. ReviewerBinding survives repair Revisions; HostTurn does not replace it.
+`AWAITING_REVIEW` proves that Review context, Host ownership, and the 30-minute deadline committed atomically with the `REVIEWING` phase; it is the only stage from which the public Review protocol discloses the Reviewer worktree. `AWAITING_USER_INPUT` persists a genuine nonterminal typed pause. For a publish-related pause, only the owning Host's `USER_INPUT_REQUIRED` may additionally receive the same reviewed Candidate `worktreePath`; ordinary status/result, non-publish pauses, stale continuations, and terminal outputs remain path-free. ReviewerBinding survives repair Revisions; HostTurn does not replace it.
 
 `smartflow_execute → smartflow_review_turn*` is the sole public Review orchestration path. The public MCP surface contains exactly six tools: `smartflow_execute`, `smartflow_review_turn`, `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result`. Status, resume, cancel, and result are separate Run-management APIs, not Review continuations or a second Review orchestration path. Public `smartflow_resume` is for independent paused-Run recovery and cannot answer or bypass an active `hostTurn`. The old wait/claim/renew/submission/Leader primitive symbols, schemas, handlers, registrations, and aliases do not exist; Review begin and finalization are atomic Daemon domain operations.
 
@@ -207,7 +268,7 @@ interface ReviewTurnInput {
   jobId: string;
   hostTurnId: string;
   turnToken?: string;
-  review?: { reviewerSessionId: string; result: ReviewSubmissionInput };
+  review?: { reviewerSessionId: string; result: ReviewResult };
   answer?: ResumeAction | RevisionApprovalAnswer;
   reviewUnavailableReason?: string;
 }
@@ -250,38 +311,49 @@ type ReviewTurnOutput =
       turnToken: string;
       pause: { code: string; message: string };
       worktreePath?: string;
-      review?: ReviewSubmission;
-      repairDraft?: RepairDraft;
+      reviewResult?: ReviewResult;
       requiredInput?: RequiredRevisionInput;
       options: Array<{ answer: string; description: string }>;
     }
   | { kind: "DONE"; result: ResultOutput };
 ```
 
-`review`, `answer`, and `reviewUnavailableReason` are mutually exclusive and require `turnToken`. Stale continuations return current no-path `NOT_READY`. `DONE` is terminal-only and embeds canonical `ResultOutput` directly. That payload has the same shape as the independent `smartflow_result` response, but producing `DONE` does not call that public API.
+`review`, `answer`, and `reviewUnavailableReason` are mutually exclusive and require `turnToken`. A submitted result is validated completely before any durable artifact or state write. Validation failure rejects the continuation atomically, leaves the Run, checkpoint, token, counters, Candidate, Review history, and state version unchanged, and lets the owning Host correct and resubmit against the same active turn. Stale continuations return current no-path `NOT_READY`. `DONE` is terminal-only and embeds canonical `ResultOutput` directly. That payload has the same shape as the independent `smartflow_result` response, but producing `DONE` does not call that public API.
 
 ## Automatic repair counter and decision plan
 
 ```ts
+interface RepairRound {
+  failureIds: string[];
+  tasks: TaskReview[];
+  relevantPathHashes: Record<string, string>;
+}
+
 interface RunReviewAutomation {
   hostTurn?: HostTurn;
   autoRepairRounds?: number;
+  noProgressCount: number;
+  // Previous RepairRound is stored at run.recovery.repairRound.
 }
 
 type ReviewDecisionPlan =
-  | { kind: "ACCEPT"; decision: "accept"; repairItems: [] }
-  | { kind: "REPAIR"; decision: "repair"; repairItems: RepairItem[] }
-  | { kind: "PAUSE_INVALID_REVIEW"; decision: "pause"; repairItems: [] }
-  | { kind: "PAUSE_REPAIR_LIMIT"; decision: "pause"; repairItems: RepairItem[] };
+  | { kind: "ACCEPT"; decision: "accept"; reason: string }
+  | { kind: "REPAIR"; decision: "repair"; reason: string }
+  | { kind: "PAUSE_REPAIR_LIMIT"; decision: "pause"; reason: string };
 ```
 
-`autoRepairRounds` counts daemon-started repairs in the current group and is incremented with automatic repair. To grant another group, the owning Host submits `resume_review_decision` as a `smartflow_review_turn` answer with the active `turnToken`; HostTurnCoordinator atomically re-evaluates the stored Review with a reset allowance and proceeds directly to repair or another real pause. Public `smartflow_resume` is not used for that active HostTurn answer. Accept requires `APPROVE + 100% + no blocking finding`; repair uses only current blocking finding fingerprints and requires counter `< 15`; incomplete Review without actionable findings pauses invalid.
+The plan is mechanical and exhaustive only for a valid `ReviewResult`: all tasks at 100% with empty issues produce `ACCEPT`; otherwise `autoRepairRounds < 15` produces `REPAIR` and forwards every nested issue from the current result; otherwise it produces `PAUSE_REPAIR_LIMIT`. Neither Host nor Leader authors, filters, rewrites, or supplements repair data. An invalid payload produces no plan and no pause state.
+
+`RepairCoordinator.prepare()` builds the current `RepairRound` and compares it with `run.recovery.repairRound`. `relevantPathHashes` comes directly from Candidate operations: non-delete operations use `newEntry.sha256`, and deletions use `DELETED`. Stable problems are `failure:<id>` plus `issue:<taskId>:<path>`. The current set being a strict subset of the previous set, or a relevant hash changing for any Issue path in either round, is progress. Progress resets `noProgressCount`; otherwise it increments. The first round compares current/current with an existing count of `-1`, producing zero. `message`, `suggestedFix`, percentages, and issue order do not participate. Result Snapshots are not reread for this comparison. The default no-progress threshold is 15; reaching it produces the operational `REPAIR_NO_PROGRESS` pause without adding a fourth Review decision.
+
+For `resume_review_decision`, HostTurnCoordinator verifies current durable artifacts and invokes `finalizeStoredReview()` with `repairRounds: 0` and reset allowance. The stored v2 Review is parsed and hash-checked, but exact manifest Task coverage is not rerun. If the plan is `REPAIR`, the committed `autoRepairRounds` becomes 1. Existing `noProgressCount` and `run.recovery.repairRound` remain until repair preparation recomputes them and either creates a new Revision or enters a genuine pause. Integrity, ownership, or CAS failure rejects the continuation without a partial update.
 
 ## CAS and idempotency model
 
 - Project `stateVersion` CAS remains the durable writer boundary; competing writes return a fresh no-path continuation rather than retrying a partial primitive sequence.
 - Child request IDs are deterministic hashes of stable turn identity and operation scope.
-- Review begin and finalization are each one domain mutation; finalization directly selects `READY_TO_PUBLISH`, `FIXING`, or a real `PAUSED` state.
+- Review begin and finalization are each one domain mutation; finalization directly selects `READY_TO_PUBLISH`, `FIXING`, or the real repair-limit `PAUSED` state.
+- Finalization validates the complete strict `ReviewResult`, exact enabled-task coverage, issue invariants, v2 artifact version, and every binding before creating any Review/Leader artifact or mutating state. Any failure is an atomic rejection: Run state, `stateVersion`, host turn/token/deadline, counters, Review history, Candidate, and child requests remain byte-for-byte unchanged.
 - Review deadline is one durable 30-minute timestamp; no short claim lease or renewal loop exists.
 - On restart, durable `hostTurn` is recovered before ordinary Run recovery; ProjectRuntime rereads state and schedules no competing recovery while the checkpoint remains.
 
@@ -313,22 +385,25 @@ When capability probing cannot prove the required batch/CAS/query guarantees, or
 
 ## RunRecord schema-v6 additions
 
-The Project state schema is version 6. Startup migration accepts schema-v4 and schema-v5 records: it preserves the v4 Review conversion, removes obsolete delivery references/actions from v5, records legacy Publish identity compatibility without deleting old files, and safely blocks an in-flight operation whose old hash cannot be reconstructed from the Git source. `RunRecord` retains Task, Revision chain, snapshots, Candidate, Review, publish, receipts, and cleanup, and includes:
+The Project state schema is version 6. Startup migration accepts schema-v4 and schema-v5 records: it preserves the v4 Review-state conversion, removes obsolete delivery references/actions from v5, records legacy Publish identity compatibility without deleting old files, and safely blocks an in-flight operation whose old hash cannot be reconstructed from the Git source. This state migration is a separate version axis from strict Review/Leader artifact v2 parsing. The runtime keeps the unversioned Data Directory layout; encountering a v1 Review/Leader artifact fails semantic validation and pauses or blocks only the affected Run rather than rejecting an entire directory format. `RunRecord` retains Task, Revision chain, snapshots, Candidate, Review history, publish, receipts, and cleanup, and includes:
 
 ```ts
 interface RunRecordReviewTurnFields {
   hostTurn?: HostTurn;
   autoRepairRounds?: number;
+  noProgressCount: number;
+  // recovery?: { repairRound?: RepairRound; ...other recovery facts }
 }
 ```
 
-It stores `workerAttempts: PiWorkerAttempt[]` and no longer stores Broker sessions, effects, managed-process ledgers, Worker block answers, Provider-selection fields, or model credentials. Old active records containing removed fields cannot resume or Publish as 4.x Runs.
+It stores `workerAttempts: PiWorkerAttempt[]` and no longer stores Broker sessions, effects, managed-process ledgers, Worker block answers, Provider-selection fields, model credentials, or any secondary Review/repair identity or draft. Old active records containing removed fields cannot resume or Publish as 4.x Runs.
 
 ## Lifecycle rules
 
-- Active Run: retain every Revision workspace/snapshot, Attempt/session Artifact, Review history, Host turn, and repair count; forbid Git `gc`/`prune`.
+- Active Run: retain every Revision workspace/snapshot, Attempt/session Artifact, durable Review history, Host turn, repair count, no-progress count, and `recovery.repairRound`; forbid Git `gc`/`prune`.
 - Attempt terminal: persist terminal state and session Artifact, reconcile process tree, then clean Run-local Pi runtime files.
-- Review turn: atomically persist `REVIEWING` plus `AWAITING_REVIEW` before path disclosure; clear or replace the checkpoint only through a current CAS-bound transition.
-- Reconciled terminal Run: retain task/snapshot/Candidate/Review/automatic-decision Artifact references plus durable PublishAttempt/PublishResult and audit facts; delete temporary workspaces, indexes, runtime directories, object store, and derivable patch/evidence/blob copies.
-- Recovery: `state.sqlite` references exact task binding, Revision, Attempt, Host turn, and Publish operation; it never infers state from mutable files, timers, queues, or session files.
+- Review turn: atomically persist `REVIEWING` plus `AWAITING_REVIEW` before path disclosure; validate a submission completely before any v2 Review/Leader Artifact or state mutation; clear or replace the checkpoint only through a current CAS-bound transition.
+- Reconciled terminal Run: retain task/snapshot/Candidate/durable Review/Leader references plus PublishAttempt/PublishResult and audit facts; delete temporary workspaces, indexes, runtime directories, object store, and derivable patch/evidence/blob copies.
+- Recovery: `state.sqlite` references exact task binding, Revision, Attempt, Host turn, strict v2 Review/Leader artifacts, and Publish operation; it never infers state from mutable files, timers, queues, session files, or secondary review/repair drafts.
+- Compatibility: strict v2 parsers reject v1 Review/Leader artifacts without in-place artifact conversion; supported Project state v4/v5 records still migrate idempotently to schema v6 in the existing directory layout.
 - Audit: `audit_events` in the same SQLite database is the only runtime audit sink and is not a second recovery authority.

@@ -5,6 +5,7 @@ import {
   durableReviewDecisionSchema,
   resultOutputSchema,
   resumeActionSchema,
+  reviewTurnInspectionActionSchema,
   reviewTurnOutputSchema,
   statusOutputSchema,
   type ResumeInput,
@@ -33,14 +34,6 @@ import { verifyRunArtifacts } from "./recovery-manager.js";
 const DEFAULT_RETRY_AFTER_MS = 1_000;
 const REVIEW_DEADLINE_MS = 30 * 60_000;
 const TERMINAL_PHASES = new Set(["COMPLETED", "CANCELED", "FAILED"]);
-const READ_ONLY_RESUME_ACTIONS = new Set<ResumeInput["resumeAction"]>([
-  "leader_append_repair_tasks",
-  "inspect_processes",
-  "inspect_recovery",
-  "inspect_conflict",
-  "inspect_repair_diff",
-  "inspect_no_progress"
-]);
 
 interface ResumeOptions {
   clearHostTurn?: boolean;
@@ -89,14 +82,8 @@ function pauseMessage(run: RunRecord): string {
   if (code === "REPAIR_NO_PROGRESS") {
     return "Automatic repair is not making progress; inspect the repair state or cancel the run.";
   }
-  if (
-    code === "AUTOMATIC_REPAIR_LIMIT" ||
-    (code === "LEADER_PAUSED" && (run.autoRepairRounds ?? 0) >= REPAIR_ROUND_LIMIT)
-  ) {
+  if (code === "AUTOMATIC_REPAIR_LIMIT") {
     return `The automatic repair limit of ${String(REPAIR_ROUND_LIMIT)} rounds was reached. Continue to grant another ${String(REPAIR_ROUND_LIMIT)} rounds, or cancel.`;
-  }
-  if (code === "INVALID_REVIEW" || code === "LEADER_PAUSED") {
-    return "The Reviewer result did not contain actionable incomplete-task guidance.";
   }
   if (code === "HOST_REVIEW_UNAVAILABLE") {
     return run.lastError?.message ?? "The bound Host Reviewer is unavailable.";
@@ -107,22 +94,21 @@ function pauseMessage(run: RunRecord): string {
   return run.lastError?.message ?? `The run paused with code ${code}.`;
 }
 
-function durableResumeActions(run: RunRecord): ResumeInput["resumeAction"][] {
-  return (run.pause?.resumeActions ?? []).flatMap((action) => {
+function mutableResumeActions(run: RunRecord): ResumeInput["resumeAction"][] {
+  const actions = (run.pause?.resumeActions ?? []).flatMap((action) => {
     const parsed = resumeActionSchema.safeParse(action);
     return parsed.success ? [parsed.data] : [];
   });
-}
-
-function mutableResumeActions(run: RunRecord): ResumeInput["resumeAction"][] {
-  const actions = durableResumeActions(run).filter(
-    (action) => !READ_ONLY_RESUME_ACTIONS.has(action)
-  );
   return actions.length > 0 ? actions : ["cancel"];
 }
 
-function inspectionResumeActions(run: RunRecord): ResumeInput["resumeAction"][] {
-  return durableResumeActions(run).filter((action) => READ_ONLY_RESUME_ACTIONS.has(action));
+function inspectionResumeActions(
+  run: RunRecord
+): Array<ReturnType<typeof reviewTurnInspectionActionSchema.parse>> {
+  return (run.pause?.resumeActions ?? []).flatMap((action) => {
+    const parsed = reviewTurnInspectionActionSchema.safeParse(action);
+    return parsed.success ? [parsed.data] : [];
+  });
 }
 
 function optionDescription(action: string): string {
@@ -135,8 +121,6 @@ function optionDescription(action: string): string {
     inspect_processes: "Inspect the unresolved Pi process containment evidence",
     inspect_recovery: "Inspect the durable recovery evidence",
     inspect_repair_diff: "Inspect the proposed repair task revision",
-    leader_append_repair_tasks: "Inspect the repair-task append guidance",
-    resume: "Resume the paused run",
     resume_review_decision: "Grant another fifteen automatic repair rounds",
     retry_host_review: "Retry review with the same bound Reviewer session",
     retry_publish: "Retry publishing the accepted Candidate",
@@ -611,17 +595,12 @@ export class HostTurnCoordinator {
           previousTurn.turnToken,
           `user-input-r${String(run.revision)}-${run.pause.code}`
         ).replace(/^review-turn-/u, "turn-");
-    const exposedPauseCode = run.pause.code === "LEADER_PAUSED"
-      ? (run.autoRepairRounds ?? 0) >= REPAIR_ROUND_LIMIT
-        ? "AUTOMATIC_REPAIR_LIMIT"
-        : "INVALID_REVIEW"
-      : run.pause.code;
     const turn: HostTurn = {
       stage: "AWAITING_USER_INPUT",
       turnToken,
       hostTurnId: previousTurn?.hostTurnId ?? input.hostTurnId,
       revision,
-      pauseCode: exposedPauseCode,
+      pauseCode: run.pause.code,
       startedAt: new Date().toISOString()
     };
     state = await this.persistHostTurn(

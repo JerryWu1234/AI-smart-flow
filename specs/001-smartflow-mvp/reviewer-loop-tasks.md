@@ -1,6 +1,6 @@
 # Reviewer 会话复用与 Daemon 机械编排核对稿
 
-**状态**：现行设计（SmartFlow 4.1 / 方案 D）
+**状态**：现行设计（SmartFlow 4.1 / Review v2 / 方案 D）
 **范围**：Candidate 形成后的复合 Review turn、Reviewer 往返、自动 repair、用户暂停与 Publish
 **说明**：本文件是行为核对稿，不替代 `tasks.md`；规范接口见 [contracts/review-turn.md](contracts/review-turn.md)。
 
@@ -18,11 +18,13 @@ Host: smartflow_review_turn ── NOT_READY ── bounded poll ──┐
   │
   └─ DONE → terminal result
 
-Daemon after Review:
-  100% valid Review → automatic accept → Publish
-  actionable incomplete Review, rounds < 15 → automatic repair → new Revision
-  invalid/no-guidance Review → durable INVALID_REVIEW pause
-  rounds >= 15 → durable AUTOMATIC_REPAIR_LIMIT pause
+Daemon after a valid Review v2:
+  every Task 100% with issues=[] → ACCEPT → Publish
+  any incomplete Task, rounds < 15 → REPAIR every nested issue → new Revision
+  any incomplete Task, rounds >= 15 → PAUSE_REPAIR_LIMIT → AUTOMATIC_REPAIR_LIMIT
+
+Schema/coverage-invalid Review:
+  reject before Review/Leader artifact or state write → entire Run unchanged
 ```
 
 ## Public MCP Surface
@@ -54,21 +56,23 @@ Host 使用稳定 `hostTurnId` 调用 `smartflow_review_turn`，不携带 contin
 
 ### Review continuation
 
-`REVIEW_REQUIRED` 提供 `turnToken`、`reviewAttemptId`、Task/Candidate Hash、完整 changed paths、`CREATE | RESUME`、Pi session provenance、deadline 和当前 worktree path。Host 提交：
+`REVIEW_REQUIRED` 提供 `turnToken`、`reviewAttemptId`、Task/Candidate Hash、完整 changed paths、`CREATE | RESUME`、Pi session provenance、deadline 和当前 worktree path。绑定 Task manifest 的 `enabledTaskIds` 定义 Reviewer 必须精确覆盖的 Task 集合。Host 提交：
 
 ```ts
 {
   turnToken,
   review: {
     reviewerSessionId,
-    result
+    result: ReviewResult
   }
 }
 ```
 
+Daemon 在任何 durable 写入前校验 strict schema、Task coverage、Reviewer/attempt/Revision 和 evidence bindings。当前 token 上格式或 coverage 非法的 payload 被原子拒绝；`stateVersion`、phase、active `hostTurn`/token、`autoRepairRounds`、Review/Leader artifacts 均不变，Host 可在同一有效 turn 上修正后重交。
+
 ### Failure/answer continuation
 
-- Reviewer callback 不可用或三次格式修正均失败时，Host 以同一 `turnToken` 提交 `reviewUnavailableReason`。
+- Reviewer callback 不可用或三次格式修正均失败时，Host 以同一 `turnToken` 提交 `reviewUnavailableReason`；这表示 callback 不可用，不是提交非法 Review 后的状态转换。
 - `USER_INPUT_REQUIRED` 只能提交响应中列出的 `answer`；需要新 Revision 用户批准时必须完整提交 `tasksPath + approvedSourceHash + approval`。
 - continuation 三者互斥；缺少或过期 token 不产生副作用。
 
@@ -91,31 +95,49 @@ Host 使用稳定 `hostTurnId` 调用 `smartflow_review_turn`，不携带 contin
 
 ### Reviewer output
 
-Reviewer 必须逐 Task 给出 0–100 分；总分是算术平均后四舍五入。Daemon 归一化/校验为：
+Reviewer 只返回当前 `ReviewResult`：
 
 ```ts
-interface ReviewSubmission {
-  verdict: "APPROVE" | "REQUEST_CHANGES" | "BLOCKED";
+interface ReviewResult {
+  tasks: TaskReview[];
+}
+
+interface TaskReview {
+  id: string;
   completionPercentage: number;
-  convergeFindings: Finding[];
-  adversarialFindings: Finding[];
-  pathCoverage: Record<string, "FULL" | "MISSING">;
-  residualRisks: string[];
+  issues: Issue[];
+}
+
+interface Issue {
+  path: string;
+  message: string;
+  suggestedFix?: string;
 }
 ```
 
-所有 changed paths 都必须被覆盖；finding fingerprint 由稳定字段重算；Review attempt、Revision、Task Hash、Candidate Hash 与 Reviewer binding 必须是当前值。
+约束如下：
+
+- `tasks` 中 ID 唯一，且与 bound `manifest.enabledTaskIds` 精确相等；缺失、重复、额外、未知或 disabled Task 均非法。
+- `completionPercentage` 是 0–100 的整数；`completionPercentage === 100` 当且仅当 `issues` 为空，不完整 Task 至少有一个 issue。
+- Issue 是 strict object。Schema 只强制 `path` 非空且通过项目相对路径词法检查，`message` 非空，`suggestedFix` 若存在也非空；它不检查文件存在性/类型/symlink，也不分析自然语言具体程度。Reviewer prompt 另行要求 `message` 说明具体函数/行为、触发条件和影响。
+- 同一 Task 内 issue 按 `path + message` 唯一。Reviewer 不提供任何额外汇总、评分、路径覆盖或风险字段。
+- Review attempt、Revision、`taskSourceHash`、`candidateHash` 与 Reviewer binding 必须是当前值。整体 evidence hashes 保留作完整性绑定，但不作为 no-progress identity。
 
 ## Daemon Decision Matrix
 
-| Review | Durable plan | Host/User role |
-|---|---|---|
-| `APPROVE` + 100% + no blocking finding | `ACCEPT`，自动进入 Publish | 无机械确认 |
-| 有 blocking findings 且 `autoRepairRounds < 15` | `REPAIR`，仅引用当前 finding fingerprints | 无机械确认；Host 下一轮恢复 Reviewer |
-| 不完整但无 actionable blocking finding | `PAUSE_INVALID_REVIEW` | `USER_INPUT_REQUIRED`; 仅 `cancel` |
-| 有 findings 且 `autoRepairRounds >= 15` | `PAUSE_REPAIR_LIMIT` | 用户可选 `resume_review_decision` 或其他已允许动作 |
+只有已通过格式、coverage 与 binding 校验的 Review v2 才进入此表；计划只有三种：
 
-Owning Host 必须把 `resume_review_decision` 作为 `smartflow_review_turn` answer，携带 active `turnToken` 提交。HostTurnCoordinator 随后原子重放 stored Review decision、重置 `autoRepairRounds`，并直接进入 repair 或真实 pause；公开 `smartflow_resume` 是独立 paused-Run recovery API，不能代答 active `hostTurn` 或绕过 ownership。无进展观测不提前终止额度，但也不得绕过无 actionable finding 的 invalid Review 保护。
+| Review v2 | Durable plan | Host/User role |
+|---|---|---|
+| 所有 Task 均为 `completionPercentage === 100` 且 `issues: []` | `ACCEPT`，自动进入 Publish | 无机械确认 |
+| 至少一个 Task 不完整且 `autoRepairRounds < 15` | `REPAIR`，使用当前全部 `tasks[].issues[]` 创建同范围 repair Revision | 无机械确认；Host 下一轮恢复同一 Reviewer |
+| 至少一个 Task 不完整且 `autoRepairRounds >= 15` | `PAUSE_REPAIR_LIMIT`，durable code 为 `AUTOMATIC_REPAIR_LIMIT` | 用户可选 `resume_review_decision` 或其他已允许动作 |
+
+Owning Host 必须把 `resume_review_decision` 作为 `smartflow_review_turn` answer，携带 active `turnToken` 提交。HostTurnCoordinator 校验 durable artifacts 后，以 `repairRounds: 0` 重划 stored v2 Review；若得到 `REPAIR`，持久化 `autoRepairRounds=1`，再由 RepairCoordinator 创建下一 Revision 或进入真实 repair pause。公开 `smartflow_resume` 是独立 paused-Run recovery API，不能代答 active `hostTurn` 或绕过 ownership。
+
+## Repair No-progress
+
+前一轮保存于 `run.recovery.repairRound = { failureIds, tasks, relevantPathHashes }`；hash 来自 Candidate operations 的 `newEntry.sha256` 或 `DELETED`，不重读 Result Snapshot。稳定问题集合是 failure IDs 加唯一 `(task.id, issue.path)`。当前集合是上一轮严格子集，或两轮 Issue path 并集中的任一 relevant hash 改变，才算 progress；否则 `noProgressCount` 加一。首轮初始化为 0，默认阈值为 15，达到时产生 operational `REPAIR_NO_PROGRESS`。`message`、`suggestedFix`、无关路径变化、百分比/顺序和整体 Candidate/evidence hash 都不参与；该 pause 不是第四种 Review decision plan。
 
 ## Durable Checkpoint and Recovery
 
@@ -125,6 +147,8 @@ Owning Host 必须把 `resume_review_decision` 作为 `smartflow_review_turn` an
 - 同一 Run 的 turn 串行执行；Project state mutation 使用 CAS，每个 operation 总计最多尝试四次（含首次，最多三次重试）并在重试前重读。
 - Daemon 重启先恢复 `hostTurn`，随后重读 fresh state；checkpoint 未清除时不得并行启动同一 Run 的一般 Worker/Run recovery。
 - stable child request IDs 与 durable state 防止丢失 begin/finalize 响应造成重复 Review、repair、resume 或 Publish。
+- Durable Review artifact 使用 `schemaVersion: 2`，内含 revision、claim/attempt、Task/Candidate/session bindings、gate/result 与 `reviewHash`；Leader artifact 只含 revision、reviewHash、decision/reason/decidedAt 与 `decisionHash`，不直接保存 Candidate/task-source binding 或 repair issue 列表。
+- Artifact v1 不迁移、不 fallback；strict v2 parse 失败以 `ARTIFACT_SEMANTIC_VALIDATION_FAILED` 暂停或阻塞对应 Run。新 Data Directory 只是部署选择，runtime 没有目录格式 marker/probe；artifact schema 与 Project state schema version 6 相互独立。
 
 ## Acceptance Matrix
 
@@ -138,10 +162,16 @@ Owning Host 必须把 `resume_review_decision` 作为 `smartflow_review_turn` an
 | stale Review/answer/failure | 无副作用的 no-path `NOT_READY` |
 | atomic begin 响应丢失 | 返回同一 owner/token/attempt/path/deadline，不再次 mutation |
 | Daemon 在等待 Reviewer 时重启 | 恢复同一 owner/token/attempt/Reviewer binding/deadline |
-| 100% 有效 Review | 自动 accept/Publish |
-| 不完整且有 findings，低于 15 轮 | 自动 repair，直接创建新 Revision、新 Pi session、同一 Reviewer |
-| 不完整且无 findings | `INVALID_REVIEW`，只允许 cancel |
-| 第 15 轮仍不完整 | `AUTOMATIC_REPAIR_LIMIT`，等待用户选择 |
+| Task IDs 缺失、重复、额外、未知或 disabled | 写 artifact/state 前拒绝；整个 Run 与 active turn 不变 |
+| 100% Task 带 issue，或不完整 Task 无 issue | 写 artifact/state 前拒绝；整个 Run 与 active turn 不变 |
+| Issue path/message 未通过 strict schema、字段多余或 `path + message` 重复 | 写 artifact/state 前拒绝；整个 Run 与 active turn 不变；message 具体程度只由 Reviewer prompt 约束 |
+| v1 Review/Leader artifact | strict v2 parse 失败并暂停/阻塞对应 Run；不转换 artifact，也不声称拒绝整个目录格式 |
+| 所有 enabled Task 均 100% | `ACCEPT`，自动 Publish |
+| 任一 Task 不完整且低于 15 轮 | `REPAIR` 当前全部 nested issues；RepairCoordinator 随后创建新 Revision或按真实条件暂停 |
+| 第 15 轮仍不完整 | `PAUSE_REPAIR_LIMIT` / `AUTOMATIC_REPAIR_LIMIT`，等待用户选择 |
+| 同 scope、相关路径 hash 不变，仅 issue 文案或无关文件变化 | no-progress 累加；默认计数达到 15 后 `REPAIR_NO_PROGRESS` |
+| scope 严格缩小或相关 Candidate operation hash 改变 | 视为 progress，no-progress 计数清零 |
+| Review/Leader evidence | 均为 schemaVersion 2；Review 直接绑定 attempt/Revision/Reviewer/Task/Candidate，Leader 仅经 reviewHash 间接绑定 |
 | 30-minute deadline 到期 | durable Host-review-unavailable pause |
 | Pause/conflict | `USER_INPUT_REQUIRED`，不是 `DONE` |
 | 终态 | `DONE` + canonical result |
@@ -149,14 +179,14 @@ Owning Host 必须把 `resume_review_decision` 作为 `smartflow_review_turn` an
 
 ## Current Implementation Status
 
-The schemas, exact six-tool registry, deterministic decision policy, Host-owner enforcement, atomic begin/finalize, single-deadline restart recovery, self-contained pause protocol, complete Reviewer context, direct repair Revision, production-composition repair scenario, and absence of the five legacy callable Review primitives and `HostActionLoop` symbol are implemented. The remaining evidence items are:
+The strict Review v2 schemas, exact six-tool registry, deterministic three-plan policy, Host-owner enforcement, atomic begin/finalize, single-deadline restart recovery, zero-write invalid-payload boundary, complete Reviewer context, direct repair Revision, production-composition repair scenario, and absence of the five legacy callable Review primitives and `HostActionLoop` symbol are implemented. The remaining evidence items are:
 
 - T208/T209: installed Pi host compatibility and an explicitly authorized, checked-in real-model transcript remain open; the gated real-Pi test was intentionally not run.
 
 ## Non-goals
 
 - 不让 Daemon 启动 Codex CLI、Claude CLI 或任何 Reviewer。
-- 不让 Daemon 解释开放式用户意图、发明 RepairItem 或扩大批准范围。
+- 不让 Daemon 解释开放式用户意图、在当前 `tasks[].issues[]` 之外发明问题或扩大 Task/path 批准范围。
 - 不让五个 legacy Review primitive names 的 public/internal callable symbols、schemas、handlers、registrations、aliases 或 `HostActionLoop` symbol 存在。
 - 不把四个独立 Run management APIs 当作 Review continuation 或第二条 Review 编排路径。
 - 不让 Review 通过代表项目验证命令必然成功；SmartFlow 不新增通用 verify/gate。

@@ -17,10 +17,10 @@
 | 模型配置 | MCP server 环境唯一来源；每实例一个 endpoint/模型；Pi Extension 内存注册；无 `models.json` |
 | 工具 | Pi 官方 read/bash/edit/write/grep/find/ls；无 SmartFlow Broker |
 | 安全边界 | Pi 进程树只能访问当前 isolated workspace 的项目数据；Shell/网络允许 |
-| Review | Host 首轮 CREATE、后续 RESUME 同一 Reviewer；原子持久化 `AWAITING_REVIEW` 后才暴露 worktree |
-| 状态恢复 | schema-v6 durable Host turn + legacy migration + Project-wide CAS |
-| 自动修复 | 每组最多 15 轮；用户通过 `smartflow_review_turn` 的结构化 answer 授予下一组 |
-| 自动写回 | 仅 100% 有效 Review 后；项目级串行 + conflict-checked batch adapter |
+| Review | Host 首轮 CREATE、后续 RESUME 同一 Reviewer；`review.result` 仅使用 ReviewResult；原子持久化 `AWAITING_REVIEW` 后才暴露 worktree |
+| 状态恢复 | Run-state schema-v6 durable Host turn + legacy migration + Project-wide CAS；与 Review/Leader artifact v2 分属不同版本轴 |
+| 自动修复 | 合法且不完整时自动处理全部 Issues；每组最多 15 轮，用户通过 `smartflow_review_turn` 的结构化 answer 授予下一组 |
+| 自动写回 | 仅合法 ReviewResult 的每个 Task 均为 100% 后；项目级串行 + conflict-checked batch adapter |
 | 运行时 Spec Kit 依赖 | 无 |
 
 ## Documentation Map
@@ -58,12 +58,13 @@ Host freezes tasks.md
 → smartflow_review_turn
    ├─ NOT_READY → bounded poll
    ├─ REVIEW_REQUIRED → Host CREATE/RESUME independent Reviewer
-   │                    → submit same turnToken
-   │                    → Daemon automatically:
-   │                       ├─ 100% valid → accept → Publish
-   │                       ├─ actionable incomplete + budget → repair Revision
-   │                       ├─ invalid/no guidance → USER_INPUT_REQUIRED
-   │                       └─ 15 rounds reached → USER_INPUT_REQUIRED
+   │                    → submit same turnToken + reviewerSessionId + ReviewResult
+   │                    → Daemon validates before any artifact/state write:
+   │                       ├─ illegal payload → reject; Run/checkpoint unchanged
+   │                       └─ valid payload → mechanical plan:
+   │                          ├─ every Task 100% → ACCEPT → Publish
+   │                          ├─ incomplete + rounds < 15 → REPAIR all Issues
+   │                          └─ incomplete + rounds >= 15 → PAUSE_REPAIR_LIMIT
    ├─ USER_INPUT_REQUIRED → Host asks user and submits typed answer
    └─ DONE → terminal canonical result
 ```
@@ -79,16 +80,16 @@ Bounded poll、原子 Review begin/finalize、自动 decision 以及 repair/publ
 
 ## Host, Daemon, Reviewer, and Worker Boundary
 
-- **Host/Leader**：批准 Task 意图；持有 SmartFlow MCP；创建/恢复 Reviewer；与用户交互；仅通过 `smartflow_review_turn` 返回 Review 或用户答案。
-- **Daemon**：Run 状态机、Pi 生命周期、bounded poll、原子 Review begin/finalize、确定性 decision、repair budget、普通 Run 恢复和 Publish progression。它不创建 Reviewer、不解释开放式用户意图。
-- **Reviewer**：独立于 Host 与 Pi，重读同步 Task 和最新完整结果，逐 Task 评分并覆盖 cumulative changed paths。
+- **Host/Leader**：批准 Task 意图；持有 SmartFlow MCP；创建/恢复 Reviewer；与用户交互；仅通过 `smartflow_review_turn` 返回 Review 或用户答案，不选择或补充 repair scope。
+- **Daemon**：Run 状态机、Pi 生命周期、bounded poll、原子 Review begin/finalize、确定性 decision、repair budget、全部 Issue 的 repair 派生、普通 Run 恢复和 Publish progression。它不创建 Reviewer、不解释开放式用户意图。
+- **Reviewer**：独立于 Host 与 Pi，重读同步 Task 和最新完整结果，检查 cumulative changed paths，并在 `review.result` 中逐 Task 返回唯一 ReviewResult；changed paths 是输入义务而非结果字段。
 - **Pi Worker**：只实现当前 Revision；不接 SmartFlow MCP，不等待用户，不参与 Review。
 
 Host-only interaction 与 Daemon-owned mechanics 不矛盾：机械策略已由规范冻结，只有 Reviewer 执行和用户选择需要 Host 能力。
 
 ## Composite Review Turn and Durable State
 
-公开输出恰好四态；内部 schema-v6 checkpoint 恰好两阶段：
+公开输出恰好四态；内部 Run-state schema-v6 checkpoint 恰好两阶段：
 
 ```text
 AWAITING_REVIEW
@@ -96,20 +97,33 @@ AWAITING_REVIEW
 AWAITING_USER_INPUT
 ```
 
-每个 checkpoint 绑定 `hostTurnId + turnToken + revision`。Review begin 在一次 Project-wide `stateVersion` CAS 中同时落 `REVIEWING + AWAITING_REVIEW`；Review finalize 在一次 domain operation 中写 Review/decision evidence 并直接落 `READY_TO_PUBLISH | FIXING | PAUSED`。Review deadline 是单一 30 分钟 durable timestamp，不再有短 lease 或 renew loop。Schema-v4 claim 状态在启动时迁移，无法安全证明的 active Review 会暂停。
+每个 checkpoint 绑定 `hostTurnId + turnToken + revision`。Review begin 在一次 Project-wide `stateVersion` CAS 中同时落 `REVIEWING + AWAITING_REVIEW`。Review finalize 先严格验证整个 payload、enabled Task 集合、Issue 不变量以及当前 turn/Revision/Candidate/session 绑定；任何失败都在写 artifact/state 前拒绝，Run 与 active checkpoint 不变，也不产生 decision。只有验证成功后，一次 domain operation 才写 schemaVersion 2 Review/Leader evidence 并直接落 `READY_TO_PUBLISH | FIXING | PAUSED`。Review deadline 是单一 30 分钟 durable timestamp，不再有短 lease 或 renew loop。Schema-v4/schema-v5 Run state 在启动时迁移到 schema-v6，无法安全证明的 active Review 会暂停；此迁移不转换 Review/Leader artifact。
 
 Daemon 重启时先由 Host-turn coordinator 恢复 durable checkpoint，再重读 fresh state。只要 `hostTurn` 存在，ordinary Run recovery 不得并行推进该 Run。
 
 ## Automatic Review Decision
 
-| 当前有效 Review | Daemon 计划 |
-|---|---|
-| `APPROVE` + 100% + no blockers | `ACCEPT` → Publish |
-| 有 actionable blockers 且当前组 `< 15` | `REPAIR`，只引用 current finding fingerprints |
-| 不完整但无 actionable blockers | `PAUSE_INVALID_REVIEW`；仅 cancel |
-| 当前组已达 15 | `PAUSE_REPAIR_LIMIT`；等待用户是否继续下一组 |
+唯一 Review 数据模型是：
 
-Host 不重复提交这些机械决策。每个 repair 使用新 Revision/new Pi session，但复用 bound Reviewer。额度耗尽后，owning Host 携带 active `turnToken`，通过当前 `smartflow_review_turn` 的 `USER_INPUT_REQUIRED` answer 提交 `resume_review_decision`；HostTurnCoordinator 原子重放 stored Review decision，重置 allowance，并直接进入下一 repair Revision 或真实 pause。
+```text
+ReviewResult = { tasks: TaskReview[] }
+TaskReview = { id, completionPercentage, issues }
+Issue = { path, message, suggestedFix? }
+```
+
+`ReviewResult.tasks[].id` 必须唯一且精确覆盖 `manifest.enabledTaskIds`。`completionPercentage` 是 0–100 的整数，并满足 `completionPercentage === 100` 当且仅当 `issues` 为空；不完整 Task 至少有一个 Issue。同一 Task 内的 Issue 按 `(path, message)` 唯一。Strict schema 只要求 Issue `path` 非空且通过项目相对路径的词法安全检查，`message` 非空，`suggestedFix` 若存在也非空；它不检查路径是否存在、是否目录/symlink，也不分析 message 的语义。Reviewer prompt 另行要求 `message` 指出具体函数或行为、触发条件与影响。三层对象均不接受额外 Review 数据字段。
+
+| 合法 ReviewResult 与当前轮次 | Daemon 计划 |
+|---|---|
+| 每个 Task 均为 `100` | `ACCEPT` → Publish |
+| 至少一个 Task 不完整且 `autoRepairRounds < 15` | `REPAIR`，确定性处理每个 `tasks[].issues[]` 条目 |
+| 至少一个 Task 不完整且 `autoRepairRounds >= 15` | `PAUSE_REPAIR_LIMIT`；等待用户是否授予下一组 |
+
+机械计划严格只有 `ACCEPT | REPAIR | PAUSE_REPAIR_LIMIT`。Host/Leader 不得选择 Issue 子集、追加 repair 条目或提交第二套 repair 数据。每个成功准备的 repair 使用新 Revision/new Pi session，但复用 bound Reviewer。额度耗尽后，owning Host 携带 active `turnToken`，通过当前 `smartflow_review_turn` 的 `USER_INPUT_REQUIRED` answer 提交 `resume_review_decision`；HostTurnCoordinator 以 allowance 基数 `0` 重新规划 stored v2 Review。若计划为 `REPAIR`，持久化的 `autoRepairRounds` 为 `1`，随后 `RepairCoordinator.prepare()` 可能创建下一 Revision，也可能因真实 repair 条件暂停；该路径不会重新执行 `manifest.enabledTaskIds` exact-coverage 校验。
+
+跨合法的不完整轮次，`run.recovery.repairRound` 保存 `{ failureIds, tasks, relevantPathHashes }`。no-progress 的稳定问题集合只包含 failure IDs 与 `(TaskReview.id, Issue.path)`；`relevantPathHashes` 来自 Candidate operations 的 `newEntry.sha256` 或删除标记 `DELETED`。当前问题集合严格小于上一轮，或两轮 Issue path 并集中的任一相关 hash 变化，即为 progress 并清零计数；否则计数加一。首轮用 current/current 与已有计数 `-1` 得到 `0`，默认暂停阈值为 15。`message`、`suggestedFix`、完成百分比和数组顺序都不参与身份；实现不重读 Result Snapshot，也不增加第四种 Review decision。
+
+Durable Review 与 Leader artifacts 均为 `schemaVersion: 2`。Review artifact 内含 `revision/claimId/reviewAttemptId/taskSourceHash/candidateHash/reviewerSessionId/piSessionId/gate/reviewHash`；其中 `gate` 保存 `accepted/allowedLeaderDecisions/result`，`reviewHash` 校验不含自身的 canonical body。Leader artifact 仅含 `revision/reviewHash/decision/reason/decidedAt/decisionHash`，通过 `reviewHash` 间接绑定 Candidate 与 task source，不含独立 repair 列表或直接的 Candidate/task-source 字段。Artifact v1 不升级、不按 v2 解释；strict v2 parse 失败会使对应 Run 以 `ARTIFACT_SEMANTIC_VALIDATION_FAILED` 暂停或阻塞。新部署可在运维上选择新 Data Directory，但当前 runtime 仍使用未版本化的 `<user-data>/smartflow`，没有 format marker/probe。
 
 ## Task and Pi Configuration Boundary
 
@@ -142,7 +156,7 @@ Pi child 加载静态 Extension，通过官方 `pi.registerProvider()` 在内存
 
 ## Publish and Evidence Boundary
 
-只有 100% 有效 Review 才能自动 accept/Publish。`PublishCoordinator` 重新验证 Manifest、Candidate、Review、accept decision 与批准源绑定，并从当前 Candidate、同 Revision 的 immutable `REVISION_RESULT` snapshot 以及 Run Git object store 确定性派生 `ApplyOperation[]` 和经 path/hash/size 校验的 blob references；当前流程不另造交付 Artifact。
+只有经过完整校验且每个 Task 都为 100% 的 ReviewResult 才能自动 `ACCEPT`/Publish。`PublishCoordinator` 重新验证 Manifest、Candidate、schemaVersion 2 Review/Leader artifacts 与批准源绑定，并确认 `reviewHash` 证据链中的 `candidateHash` 和 `taskSourceHash`，再从当前 Candidate、同 Revision 的 immutable `REVISION_RESULT` snapshot 以及 Run Git object store 确定性派生 `ApplyOperation[]` 和经 path/hash/size 校验的 blob references；当前流程不另造交付 Artifact。
 
 `PublishService` 以 `projectId + jobId + revision + candidateHash + reviewHash + operationsHash` 派生稳定 `operationId`，在项目级 lease 下执行 adapter capability probe 和全路径 expected-old kind/hash/mode preflight。只有预检全部通过才持久化 `PREPARED`、进入 `PUBLISHING`、提交 adapter apply，并把 `SUBMITTED`、逐路径 `PublishResult` 与最终状态写入 result journal。响应丢失或 Daemon 重启时，以相同 operation identity 重建操作并查询 adapter 结果；不会盲目重放。
 

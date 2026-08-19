@@ -286,8 +286,7 @@ function completeTaskReview(): NonNullable<ReviewTurnInput["review"]> {
   return {
     reviewerSessionId: "reviewer-1",
     result: {
-      completionPercentage: 100,
-      tasks: [{ id: "T001", completionPercentage: 100 }]
+      tasks: [{ id: "T001", completionPercentage: 100, issues: [] }]
     }
   };
 }
@@ -296,12 +295,14 @@ function incompleteTaskReview(): NonNullable<ReviewTurnInput["review"]> {
   return {
     reviewerSessionId: "reviewer-1",
     result: {
-      completionPercentage: 50,
       tasks: [{
         id: "T001",
         completionPercentage: 50,
-        reason: "The requested behavior is incomplete",
-        suggestion: "Implement the remaining behavior"
+        issues: [{
+          path: "src/a.ts",
+          message: "executeTask leaves the requested behavior incomplete",
+          suggestedFix: "Implement the remaining behavior in executeTask"
+        }]
       }]
     }
   };
@@ -441,37 +442,24 @@ describe("HostTurnCoordinator simplified review state machine", () => {
     expect(schedule).toHaveBeenCalledWith(expect.objectContaining({ kind: "pipeline" }));
   });
 
-  it("requires user input for a non-actionable Review without producing LEADER_DECISION", async () => {
+  it("rejects an inconsistent Review without mutating the Run", async () => {
     const { store } = await createStore(reviewRun());
     const coordinator = createCoordinator(createDependencies(store));
     const requested = await beginReview(coordinator);
+    const before = await store.readState();
 
-    const output = await coordinator.turn(initialInput({
+    await expect(coordinator.turn(initialInput({
       requestId: "invalid-review",
       turnToken: requested.turnToken,
       review: {
         reviewerSessionId: "reviewer-1",
         result: {
-          verdict: "REQUEST_CHANGES",
-          completionPercentage: 50,
-          convergeFindings: [],
-          adversarialFindings: [],
-          pathCoverage: { "src/a.ts": "FULL" },
-          residualRisks: []
+          tasks: [{ id: "T001", completionPercentage: 50, issues: [] }]
         }
       }
-    }));
+    }))).rejects.toThrow();
 
-    expect(output).toMatchObject({
-      kind: "USER_INPUT_REQUIRED",
-      pause: { code: "INVALID_REVIEW" },
-      options: [{ answer: "cancel" }]
-    });
-    expect((await store.readState()).runs[jobId]).toMatchObject({
-      phase: "PAUSED",
-      pause: { code: "INVALID_REVIEW" },
-      hostTurn: { stage: "AWAITING_USER_INPUT" }
-    });
+    expect(await store.readState()).toEqual(before);
   });
 
   it("requires user input at the repair limit and can directly restart automatic decision", async () => {

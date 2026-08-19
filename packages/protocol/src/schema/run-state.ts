@@ -87,44 +87,69 @@ export const piWorkerAttemptSchema = z
     }
   });
 
-export const reviewFindingSchema = z
+const reviewIssuePathSchema = z.string().trim().min(1).refine(
+  (value) =>
+    !value.startsWith("/") &&
+    !value.includes("\\") &&
+    !value.split("/").some((segment) => segment === "" || segment === "." || segment === ".."),
+  "expected a safe project-relative path"
+);
+
+export const reviewIssueSchema = z
   .object({
-    fingerprint: bareSha256Schema,
-    code: nonEmptyStringSchema,
-    criterionId: nonEmptyStringSchema.nullable(),
-    path: nonEmptyStringSchema.nullable(),
-    severity: z.enum(["P0", "P1", "P2"]),
-    blocking: z.boolean(),
-    summary: nonEmptyStringSchema,
-    evidence: stringArraySchema.min(1)
+    path: reviewIssuePathSchema,
+    message: z.string().trim().min(1),
+    suggestedFix: z.string().trim().min(1).optional()
   })
   .strict();
 
-const reviewSubmissionPayloadSchema = z.object({
-  verdict: z.enum(["APPROVE", "REQUEST_CHANGES", "BLOCKED"]),
-  completionPercentage: z.number().int().min(0).max(100),
-  convergeFindings: z.array(reviewFindingSchema),
-  adversarialFindings: z.array(reviewFindingSchema),
-  pathCoverage: z.record(z.string(), z.enum(["FULL", "MISSING"])),
-  residualRisks: z.array(z.string())
-}).strict();
+export const taskReviewSchema = z
+  .object({
+    id: z.string().regex(/^T\d{3,}$/u),
+    completionPercentage: z.number().int().min(0).max(100),
+    issues: z.array(reviewIssueSchema)
+  })
+  .strict()
+  .superRefine((task, context) => {
+    const complete = task.completionPercentage === 100;
+    if (complete !== (task.issues.length === 0)) {
+      context.addIssue({
+        code: "custom",
+        path: ["issues"],
+        message: "complete tasks require no issues; incomplete tasks require at least one issue"
+      });
+    }
+    const issueKeys = task.issues.map((issue) => `${issue.path}\u0000${issue.message}`);
+    if (new Set(issueKeys).size !== issueKeys.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["issues"],
+        message: "task issues must be unique by path and message"
+      });
+    }
+  });
+
+export const reviewResultSchema = z
+  .object({
+    tasks: z.array(taskReviewSchema).min(1)
+  })
+  .strict()
+  .superRefine((review, context) => {
+    if (new Set(review.tasks.map((task) => task.id)).size !== review.tasks.length) {
+      context.addIssue({ code: "custom", path: ["tasks"], message: "task ids must be unique" });
+    }
+  });
 
 export const durableReviewGateSchema = z
   .object({
     accepted: z.boolean(),
     allowedLeaderDecisions: z.array(z.enum(["accept", "repair", "pause"])),
-    result: reviewSubmissionPayloadSchema,
-    reasons: z.array(z.enum([
-      "VERDICT_NOT_APPROVE",
-      "PATH_COVERAGE_INCOMPLETE",
-      "BLOCKING_FINDINGS_PRESENT"
-    ]))
+    result: reviewResultSchema
   })
   .strict()
   .superRefine((gate, context) => {
-    const expected = gate.reasons.length === 0
-      ? ["accept", "repair", "pause"]
-      : ["repair", "pause"];
+    const accepted = gate.result.tasks.every((task) => task.completionPercentage === 100);
+    const expected = accepted ? ["accept", "pause"] : ["repair", "pause"];
     if (JSON.stringify(gate.allowedLeaderDecisions) !== JSON.stringify(expected)) {
       context.addIssue({
         code: "custom",
@@ -132,18 +157,18 @@ export const durableReviewGateSchema = z
         message: "allowed Leader decisions do not match the gate outcome"
       });
     }
-    if (gate.accepted !== (gate.reasons.length === 0)) {
+    if (gate.accepted !== accepted) {
       context.addIssue({
         code: "custom",
-        path: ["reasons"],
-        message: "accepted must match the absence of gate reasons"
+        path: ["accepted"],
+        message: "accepted must match complete reviewed tasks"
       });
     }
   });
 
 export const durableReviewDecisionSchema = z
   .object({
-    schemaVersion: z.literal(1),
+    schemaVersion: z.literal(2),
     revision: positiveIntegerSchema,
     claimId: identifierSchema,
     reviewAttemptId: identifierSchema,
@@ -156,73 +181,17 @@ export const durableReviewDecisionSchema = z
   })
   .strict();
 
-const projectRelativeRepairPathSchema = z.string().trim().min(1).refine(
-  (value) =>
-    !value.startsWith("/") &&
-    !value.includes("\\") &&
-    !value.split("/").some((segment) => segment === "" || segment === "." || segment === ".."),
-  "expected a safe project-relative path"
-);
-
-export const repairItemSchema = z.discriminatedUnion("source", [
-  z
-    .object({
-      source: z.literal("reviewer"),
-      findingFingerprint: bareSha256Schema
-    })
-    .strict(),
-  z
-    .object({
-      source: z.literal("leader"),
-      code: z.string().regex(/^[A-Z][A-Z0-9_]*$/u).max(256),
-      taskId: z.string().regex(/^T\d{3,}$/u),
-      path: projectRelativeRepairPathSchema.nullable(),
-      reason: z.string().trim().min(1).max(4_096)
-    })
-    .strict()
-]);
-
-function repairItemKey(item: z.infer<typeof repairItemSchema>): string {
-  return item.source === "reviewer"
-    ? `reviewer:${item.findingFingerprint}`
-    : `leader:${item.code}:${item.taskId}:${item.path ?? ""}`;
-}
-
 export const durableLeaderDecisionSchema = z
   .object({
-    schemaVersion: z.literal(1),
+    schemaVersion: z.literal(2),
     revision: positiveIntegerSchema,
     reviewHash: bareSha256Schema,
     decision: z.enum(["accept", "repair", "pause"]),
-    repairItems: z.array(repairItemSchema),
     reason: z.string().trim().min(1),
     decidedAt: isoDateTimeSchema,
     decisionHash: bareSha256Schema
   })
-  .strict()
-  .superRefine((decision, context) => {
-    if (new Set(decision.repairItems.map(repairItemKey)).size !== decision.repairItems.length) {
-      context.addIssue({
-        code: "custom",
-        path: ["repairItems"],
-        message: "repair items must be unique"
-      });
-    }
-    if (decision.decision === "repair" && decision.repairItems.length === 0) {
-      context.addIssue({
-        code: "custom",
-        path: ["repairItems"],
-        message: "repair requires at least one repair item"
-      });
-    }
-    if (decision.decision !== "repair" && decision.repairItems.length > 0) {
-      context.addIssue({
-        code: "custom",
-        path: ["repairItems"],
-        message: "only repair decisions may contain repair items"
-      });
-    }
-  });
+  .strict();
 
 export const publishPathResultSchema = z
   .object({
@@ -322,11 +291,12 @@ export type RunPhase = z.infer<typeof runPhaseSchema>;
 export type ProcessIdentity = z.infer<typeof processIdentitySchema>;
 export type PiWorkerAttemptStatus = z.infer<typeof piWorkerAttemptStatusSchema>;
 export type PiWorkerAttempt = z.infer<typeof piWorkerAttemptSchema>;
-export type ReviewFinding = z.infer<typeof reviewFindingSchema>;
+export type ReviewIssue = z.infer<typeof reviewIssueSchema>;
+export type TaskReview = z.infer<typeof taskReviewSchema>;
+export type ReviewResult = z.infer<typeof reviewResultSchema>;
 export type DurableReviewGate = z.infer<typeof durableReviewGateSchema>;
 export type DurableReviewDecision = z.infer<typeof durableReviewDecisionSchema>;
 export type DurableLeaderDecision = z.infer<typeof durableLeaderDecisionSchema>;
-export type RepairItem = z.infer<typeof repairItemSchema>;
 export type PublishPathResult = z.infer<typeof publishPathResultSchema>;
 export type PublishResult = z.infer<typeof publishResultSchema>;
 export type HostAction = z.infer<typeof hostActionSchema>;

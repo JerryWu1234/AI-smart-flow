@@ -2,7 +2,7 @@ import {
   reviewTurnInputSchema,
   reviewTurnOutputSchema,
   type ResultOutput,
-  type ReviewSubmission,
+  type ReviewResult,
   type ReviewTurnInput,
   type ReviewTurnOutput
 } from "@smartflow/protocol";
@@ -28,7 +28,7 @@ export interface RepairLimitContext {
   jobId: string;
   revision: number;
   repairRounds: 15;
-  result: ReviewSubmission;
+  result: ReviewResult;
 }
 
 export type UserInputContext = Extract<ReviewTurnOutput, { kind: "USER_INPUT_REQUIRED" }>;
@@ -88,20 +88,17 @@ export async function executeApprovedWorkflow(
     }
     if (turn.kind === "USER_INPUT_REQUIRED") {
       let answer = await callbacks.answerUserInput?.(turn);
-      if (answer === undefined && turn.pause.code === "AUTOMATIC_REPAIR_LIMIT") {
+      if (
+        answer === undefined &&
+        turn.pause.code === "AUTOMATIC_REPAIR_LIMIT" &&
+        turn.review !== undefined
+      ) {
         const continueRepairs = await callbacks.continueAfterRepairLimit?.({
           projectId: turn.projectId,
           jobId: turn.jobId,
           revision: turn.revision,
           repairRounds: 15,
-          result: turn.review ?? {
-            verdict: "REQUEST_CHANGES",
-            completionPercentage: 0,
-            convergeFindings: [],
-            adversarialFindings: [],
-            pathCoverage: {},
-            residualRisks: []
-          }
+          result: turn.review
         }) ?? false;
         if (continueRepairs) answer = "resume_review_decision";
       }

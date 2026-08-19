@@ -30,11 +30,13 @@ class WorkflowGateway implements HostGateway {
     if (toolName === "smartflow_review_turn") {
       const review = request.review as Record<string, unknown> | undefined;
       if (review === undefined) return Promise.resolve(this.reviewRequired());
-      const normalized = this.normalizedReview(review.result);
+      const result = review.result as { tasks?: Array<{ completionPercentage?: unknown }> };
       this.reviewerSessionId = String(review.reviewerSessionId);
       this.reviewNumber += 1;
       this.stateVersion += 1;
-      const incomplete = Number(normalized.completionPercentage) < 100;
+      const incomplete = result.tasks?.some(
+        (task) => Number(task.completionPercentage) < 100
+      ) ?? true;
       if (!incomplete) {
         this.decisions.push("accept");
         this.phase = "COMPLETED";
@@ -55,7 +57,7 @@ class WorkflowGateway implements HostGateway {
             message: "The automatic repair limit of fifteen rounds was reached."
           },
           result: this.result(),
-          review: normalized,
+          review: result,
           inspectionOptions: [],
           options: [
             { answer: "resume_review_decision", description: "Continue repairs" },
@@ -134,31 +136,6 @@ class WorkflowGateway implements HostGateway {
       phase: this.phase
     };
   }
-
-  private normalizedReview(value: unknown): Record<string, unknown> {
-    const review = value as Record<string, unknown>;
-    if (!Array.isArray(review.tasks)) return review;
-    const incomplete = (review.tasks as Array<Record<string, unknown>>).filter(
-      (task) => Number(task.completionPercentage) < 100
-    );
-    return {
-      verdict: incomplete.length === 0 ? "APPROVE" : "REQUEST_CHANGES",
-      completionPercentage: review.completionPercentage,
-      convergeFindings: incomplete.map((task) => ({
-        fingerprint: digest,
-        code: "TASK_INCOMPLETE",
-        criterionId: task.id,
-        path: null,
-        severity: "P1",
-        blocking: true,
-        summary: `Reason: ${String(task.reason)}; Suggestion: ${String(task.suggestion)}`,
-        evidence: [`Task ${String(task.id)} is ${String(task.completionPercentage)}% complete`]
-      })),
-      adversarialFindings: [],
-      pathCoverage: { "src/a.ts": "FULL" },
-      residualRisks: []
-    };
-  }
 }
 
 describe("executeApprovedWorkflow", () => {
@@ -180,15 +157,19 @@ describe("executeApprovedWorkflow", () => {
           const incomplete = reviewerContexts.length === 1;
           return Promise.resolve({
             reviewerSessionId: "reviewer-1",
-            completionPercentage: incomplete ? 50 : 100,
-            tasks: incomplete
-              ? [{
-                  id: "T001",
-                  completionPercentage: 50,
-                  reason: "Task is incomplete",
-                  suggestion: "Complete the missing implementation"
-                }]
-              : [{ id: "T001", completionPercentage: 100 }]
+            result: {
+              tasks: incomplete
+                ? [{
+                    id: "T001",
+                    completionPercentage: 50,
+                    issues: [{
+                      path: "src/a.ts",
+                      message: "executeTask is missing the required implementation",
+                      suggestedFix: "Complete executeTask"
+                    }]
+                  }]
+                : [{ id: "T001", completionPercentage: 100, issues: [] }]
+            }
           });
         }
       }, {
@@ -227,13 +208,17 @@ describe("executeApprovedWorkflow", () => {
           reviewCalls += 1;
           return Promise.resolve({
             reviewerSessionId: "reviewer-1",
-            completionPercentage: 0,
-            tasks: [{
-              id: "T001",
-              completionPercentage: 0,
-              reason: "Task is incomplete",
-              suggestion: "Complete the missing implementation"
-            }]
+            result: {
+              tasks: [{
+                id: "T001",
+                completionPercentage: 0,
+                issues: [{
+                  path: "src/a.ts",
+                  message: "executeTask is missing the required implementation",
+                  suggestedFix: "Complete executeTask"
+                }]
+              }]
+            }
           });
         }
       }, {

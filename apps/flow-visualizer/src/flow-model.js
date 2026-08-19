@@ -194,10 +194,10 @@ const STAGE_LIST = [
     layout: { row: 2, column: 5 },
     actorIds: ["host", "reviewer", "workspace"],
     summary: "首轮 CREATE，后续 Revision RESUME 同一个 Reviewer session。",
-    plainLanguage: "Reviewer 只读任务和 Candidate，给每个 Task 打分并提出可定位 finding；它与写代码的 Pi Worker 是不同会话。",
+    plainLanguage: "Reviewer 只读任务和 Candidate，为每个 Task 提交完成度；未完成 Task 的 issues 只含文件 path、具体问题 message 和可选建议。它与写代码的 Pi Worker 是不同会话。",
     before: { phase: "REVIEWING", reviewer: "CREATE 或 bound session", result: "—" },
-    after: { phase: "REVIEWING", reviewer: "bound reviewerSessionId", result: "every Task scored" },
-    outputs: ["ReviewSubmission", "reviewerSessionId", "findings"],
+    after: { phase: "REVIEWING", reviewer: "bound reviewerSessionId", result: "every Task reviewed" },
+    outputs: ["ReviewResult", "reviewerSessionId", "tasks[].issues[]"],
     sources: [
       source("apps/mcp-server/src/server.ts", "createSmartFlowMcpServer"),
       source("apps/daemon/src/review-coordinator.ts", "assertReviewerContext")
@@ -213,8 +213,8 @@ const STAGE_LIST = [
     tone: "violet",
     layout: { row: 2, column: 4 },
     actorIds: ["daemon", "ledger", "reviewer"],
-    summary: "同一 finalize mutation 写 Review/Decision Artifact 并直接选择发布、修复或暂停。",
-    plainLanguage: "只有 APPROVE、100% 且没有阻塞问题才通过。当前主流程不会先停在 LEADER_DECISION。",
+    summary: "同一 finalize mutation 写 v2 Review/Decision Artifact 并直接选择发布、修复或额度暂停。",
+    plainLanguage: "全部 Task 都是 100% 且 issues 为空才通过；否则在额度内修复全部嵌套 issues。当前主流程不会先停在 LEADER_DECISION。",
     before: { phase: "REVIEWING", review: "submitted", hostTurn: "AWAITING_REVIEW" },
     after: { phase: "READY_TO_PUBLISH / FIXING / PAUSED", hostTurn: "cleared 或 AWAITING_USER_INPUT" },
     outputs: ["DurableReviewDecision", "DurableLeaderDecision", "next phase"],
@@ -350,9 +350,9 @@ const STAGE_LIST = [
     tone: "amber",
     layout: { row: 3, column: 4 },
     actorIds: ["daemon", "ledger", "workspace"],
-    summary: "比较 blocker 与相关路径，追加受原验收范围约束的修复任务。",
-    plainLanguage: "能证明没有扩大范围时自动创建下一 Revision；证明不了就进入 PAUSED 等用户批准。",
-    before: { phase: "FIXING", revision: "N", repairRound: "selected" },
+    summary: "比较未完成 task/path scope 与相关文件内容，追加受原 Task 范围约束的修复任务。",
+    plainLanguage: "未完成范围缩小或相关文件内容变化都算进展；能证明没有扩大范围时自动创建下一 Revision，否则进入 PAUSED 等用户批准。",
+    before: { phase: "FIXING", revision: "N", repairRound: "tasks with issues" },
     after: { phase: "PREPARING 或 PAUSED", revision: "N+1 或 N", approval: "LEADER_REPAIR 或 USER" },
     outputs: ["RepairRound", "scoped task append", "approval envelope"],
     sources: [source("apps/daemon/src/repair-coordinator.ts", "RepairCoordinator.prepare")]
@@ -367,11 +367,11 @@ const STAGE_LIST = [
     tone: "amber",
     layout: { row: 3, column: 5 },
     actorIds: ["daemon", "ledger", "reviewer"],
-    summary: "Review blocker 被选择为 repairItems，自动修复计数增加。",
-    plainLanguage: "修复范围来自 Reviewer 的具体 fingerprint；第 1 到第 15 次可以自动进入，下一次失败会暂停。",
-    before: { phase: "REVIEWING", autoRepairRounds: "n", blockers: "> 0" },
-    after: { phase: "FIXING", autoRepairRounds: "n + 1", blockers: "selected fingerprints" },
-    outputs: ["repair decision", "repairItems", "updated autoRepairRounds"],
+    summary: "Review 中存在未完成 Task 时，全部嵌套 issues 进入修复，自动修复计数增加。",
+    plainLanguage: "Daemon 不选择 Issue 子集，也不生成 Issue ID；第 1 到第 15 次可以自动进入，达到额度后暂停。",
+    before: { phase: "REVIEWING", autoRepairRounds: "n", issues: "> 0" },
+    after: { phase: "FIXING", autoRepairRounds: "n + 1", issues: "all current issues" },
+    outputs: ["repair decision", "tasks[].issues[]", "updated autoRepairRounds"],
     sources: [
       source("packages/review/src/review-decision.ts", "planReviewDecision"),
       source("apps/daemon/src/review-coordinator.ts", "ReviewCoordinator.finalizeReview")
@@ -568,23 +568,23 @@ const MAIN = [
   }),
   transition({
     id: "tr.review.submit", fromStageId: "stage.reviewer.evaluate", toStageId: "stage.review.decision",
-    label: "提交逐项 Review 并执行固定规则", graphLabel: "提交评分", lane: "main", tone: "violet",
-    condition: "turnToken、deadline、revision、hash、reviewAttemptId 与 Reviewer binding 全部匹配。",
-    explanation: "规范化每项 Task，写 Review 和 LeaderDecision Artifact，并在同一 mutation 选择下一 phase。",
+    label: "提交逐 Task Review 并执行固定规则", graphLabel: "提交 Review", lane: "main", tone: "violet",
+    condition: "turnToken、deadline、revision、hash、reviewAttemptId、Reviewer binding 与 enabled Task 覆盖全部匹配。",
+    explanation: "校验唯一 tasks[].issues[] 模型，写 v2 Review 和 LeaderDecision Artifact，并在同一 mutation 选择下一 phase。",
     before: { phase: "REVIEWING", review: "—" }, after: { phase: "REVIEWING → policy output", review: "hash-bound" },
-    actorIds: ["reviewer", "host", "mcp", "daemon", "ledger"], dataDetailIds: ["data.review.submission", "data.review.decision"],
-    payloadExample: "{ reviewerSessionId, result: { tasks[], completionPercentage, verdict, findings[] } }",
+    actorIds: ["reviewer", "host", "mcp", "daemon", "ledger"], dataDetailIds: ["data.review.submission", "data.review.artifact", "data.review.decision"],
+    payloadExample: "{ reviewerSessionId, result: { tasks: [{ id, completionPercentage, issues: [{ path, message, suggestedFix? }] }] } }",
     changes: ["reviewHistory[]: + entry", "review Artifact: — → written", "leaderDecision Artifact: — → written"],
     sources: [source("apps/daemon/src/review-coordinator.ts", "ReviewCoordinator.finalizeReview")]
   }),
   transition({
     id: "tr.review.accept", fromStageId: "stage.review.decision", toStageId: "stage.publish.ready",
-    label: "Accept：APPROVE + 100% + 0 blocker", graphLabel: "ACCEPT", lane: "main", tone: "green",
-    condition: "verdict=APPROVE、completionPercentage=100 且 blockingFindings.length=0。",
+    label: "Accept：全部 Task 100% 且 issues 为空", graphLabel: "ACCEPT", lane: "main", tone: "green",
+    condition: "每个 Task 的 completionPercentage=100；schema 同时保证 issues=[]。",
     explanation: "Review finalize 原子进入 READY_TO_PUBLISH，并调度 publish。",
-    before: { phase: "REVIEWING", gate: "all green" }, after: { phase: "READY_TO_PUBLISH", decision: "accept" },
-    actorIds: ["daemon", "ledger"], dataDetailIds: ["data.review.decision", "data.run.record"],
-    payloadExample: "{ decision: 'accept', reviewHash, blockingFindings: [] }",
+    before: { phase: "REVIEWING", gate: "all tasks complete" }, after: { phase: "READY_TO_PUBLISH", decision: "accept" },
+    actorIds: ["daemon", "ledger"], dataDetailIds: ["data.review.artifact", "data.review.decision", "data.run.record"],
+    payloadExample: "ReviewV2 { gate: { result: { tasks: [{ completionPercentage: 100, issues: [] }] } }, reviewHash } + LeaderV2 { reviewHash, decision: 'accept', reason, decidedAt, decisionHash }",
     changes: ["phase: REVIEWING → READY_TO_PUBLISH", "hostTurn: AWAITING_REVIEW → cleared"],
     sources: [
       source("packages/review/src/review-decision.ts", "planReviewDecision"),
@@ -597,7 +597,7 @@ const MAIN = [
     condition: "Candidate、Review、Decision、revision、REVISION_RESULT 与 approved source binding 全部有效。",
     explanation: "gitPublishOperations 校验 Candidate 与 immutable REVISION_RESULT，并把每个新增/修改内容绑定到 Run Git object store 的 blobRef；随后计算 operationsHash 与稳定 operationId。",
     before: { phase: "READY_TO_PUBLISH", publishAttempt: "—" }, after: { phase: "READY_TO_PUBLISH", publishAttempt: "—", operations: "derived" },
-    actorIds: ["daemon", "ledger", "workspace"], dataDetailIds: ["data.candidate.artifact", "data.workspace.snapshot", "data.review.decision", "data.publish.operations-attempt"],
+    actorIds: ["daemon", "ledger", "workspace"], dataDetailIds: ["data.candidate.artifact", "data.workspace.snapshot", "data.review.artifact", "data.review.decision", "data.publish.operations-attempt"],
     payloadExample: "ApplyOperation { path, expectedOldHash, expectedOldMode, newHash, newMode, blobRef: 'git-object-store/blobs/<id>' }",
     changes: ["phase remains READY_TO_PUBLISH", "ApplyOperation[] + operationsHash + operationId: deterministically derived"],
     sources: [
@@ -649,13 +649,13 @@ const MAIN = [
 const REPAIR = [
   transition({
     id: "tr.review.request-repair", fromStageId: "stage.review.decision", toStageId: "stage.repair.fixing",
-    label: "选择 blocker，进入自动修复", graphLabel: "REPAIR n→n+1", lane: "repair", tone: "amber", bend: -16,
-    condition: "存在 actionable blocking finding，且当前 autoRepairRounds < 15。",
-    explanation: "只选择当前 Review 的 finding fingerprint；决策时把自动修复计数增加 1。",
+    label: "处理全部 issues，进入自动修复", graphLabel: "REPAIR n→n+1", lane: "repair", tone: "amber", bend: -16,
+    condition: "至少一个 Task 未完成并带有 issue，且当前 autoRepairRounds < 15。",
+    explanation: "当前 Review 的全部嵌套 issues 进入 RepairRound；决策时把自动修复计数增加 1。",
     before: { phase: "REVIEWING", autoRepairRounds: "n < 15" }, after: { phase: "FIXING", autoRepairRounds: "n + 1" },
-    actorIds: ["reviewer", "daemon", "ledger"], dataDetailIds: ["data.review.decision", "data.repair.round", "data.run.record"],
-    payloadExample: "{ decision: 'repair', repairItems: [findingFingerprint] }",
-    changes: ["phase: REVIEWING → FIXING", "autoRepairRounds: n → n + 1", "repairItems: — → selected blockers"],
+    actorIds: ["reviewer", "daemon", "ledger"], dataDetailIds: ["data.review.artifact", "data.review.decision", "data.repair.round", "data.run.record"],
+    payloadExample: "ReviewV2 { gate: { result: { tasks: [{ id: 'T001', issues: [{ path, message }] }] } }, reviewHash } + LeaderV2 { reviewHash, decision: 'repair', reason, decidedAt, decisionHash }",
+    changes: ["phase: REVIEWING → FIXING", "autoRepairRounds: n → n + 1", "Repair scope: — → all current task issues"],
     sources: [
       source("packages/review/src/review-decision.ts", "planReviewDecision"),
       source("apps/daemon/src/review-coordinator.ts", "ReviewCoordinator.finalizeReview")
@@ -664,8 +664,8 @@ const REPAIR = [
   transition({
     id: "tr.repair.prepare-draft", fromStageId: "stage.repair.fixing", toStageId: "stage.repair.prepare-revision",
     label: "评估进展并构造受限修复任务", graphLabel: "限定范围", lane: "repair", tone: "amber",
-    condition: "Run 仍为 FIXING，Review/Decision/Candidate binding 可验证。",
-    explanation: "比较 blocker 严格子集和相关路径哈希，生成只覆盖授权 criterion 的追加任务。",
+    condition: "Run 仍为 FIXING，v2 Review/Decision/Candidate binding 可验证。",
+    explanation: "比较未完成 task/path scope 和相关路径哈希，生成只覆盖授权 Task 的追加任务。",
     before: { phase: "FIXING", revision: "N", noProgressCount: "k" }, after: { phase: "FIXING", revisionDraft: "N+1", progress: "assessed" },
     actorIds: ["daemon", "ledger", "workspace"], dataDetailIds: ["data.repair.round", "data.revision.manifest"],
     payloadExample: "RepairRound + parent Manifest → scoped repair task append",
@@ -715,10 +715,10 @@ const BRANCHES = [
     id: "tr.worker.empty-candidate", fromStageId: "stage.worker.running", toStageId: "stage.repair.fixing",
     label: "Worker 完成但 Candidate 为空", graphLabel: "空 Candidate → FIX", lane: "repair", tone: "amber", bend: 34,
     condition: "Worker completed、无 changed Candidate 且 Manifest 不允许 no-change。",
-    explanation: "写入 WORKER_CANDIDATE_EMPTY finding，并复用同一受限 repair machinery。",
+    explanation: "构造 WORKER_CANDIDATE_EMPTY 的嵌套 TaskReview issue，并复用同一受限 repair machinery。",
     before: { phase: "RUNNING", candidate: "empty" }, after: { phase: "FIXING", lastError: "WORKER_CANDIDATE_EMPTY" },
     actorIds: ["worker", "daemon", "ledger"], dataDetailIds: ["data.worker.attempt", "data.candidate.artifact", "data.repair.round"],
-    payloadExample: "empty Candidate evidence → synthetic blocking finding",
+    payloadExample: "empty Candidate evidence → synthetic tasks[].issues[]",
     changes: ["phase: RUNNING → FIXING", "lastError.code: — → WORKER_CANDIDATE_EMPTY"],
     sources: [
       source("apps/daemon/src/worker-runner.ts", "WorkerRunner.captureCandidate"),
@@ -737,23 +737,12 @@ const BRANCHES = [
     sources: [source("apps/daemon/src/worker-runner.ts", "pauseForRuntimeFailure")]
   }),
   transition({
-    id: "tr.review.invalid", fromStageId: "stage.review.decision", toStageId: "stage.pause.awaiting-user",
-    label: "Review 不完整且无可执行 blocker", graphLabel: "INVALID_REVIEW", lane: "pause", tone: "red", bend: -26,
-    condition: "未达到 accept，但没有 actionable blocking finding 可构造 repairItems。",
-    explanation: "当前实现立即暂停，不存在历史 ADR 所述的三次自动 Reviewer 重试。",
-    before: { phase: "REVIEWING", gate: "incomplete + no blocker" }, after: { phase: "PAUSED", pauseCode: "INVALID_REVIEW" },
-    actorIds: ["reviewer", "daemon", "ledger", "host"], dataDetailIds: ["data.review.decision", "data.pause.record"],
-    payloadExample: "USER_INPUT_REQUIRED { pause.code: 'INVALID_REVIEW' }",
-    changes: ["phase: REVIEWING → PAUSED", "hostTurn: AWAITING_REVIEW → AWAITING_USER_INPUT"],
-    sources: [source("packages/review/src/review-decision.ts", "planReviewDecision")]
-  }),
-  transition({
     id: "tr.review.repair-limit", fromStageId: "stage.review.decision", toStageId: "stage.pause.awaiting-user",
     label: "自动修复额度已达 15", graphLabel: "LIMIT 15", lane: "pause", tone: "red", bend: 26,
-    condition: "仍有 blocker，且进入决策时 autoRepairRounds >= 15。",
+    condition: "仍有未完成 Task issue，且进入决策时 autoRepairRounds >= 15。",
     explanation: "不会创建第 16 个自动 Revision；owning Host 可显式给予一组新额度或取消。",
     before: { phase: "REVIEWING", autoRepairRounds: "15" }, after: { phase: "PAUSED", pauseCode: "AUTOMATIC_REPAIR_LIMIT" },
-    actorIds: ["daemon", "ledger", "host"], dataDetailIds: ["data.review.decision", "data.pause.record", "data.run.record"],
+    actorIds: ["daemon", "ledger", "host"], dataDetailIds: ["data.review.artifact", "data.review.decision", "data.pause.record", "data.run.record"],
     payloadExample: "options: ['resume_review_decision', 'cancel']",
     changes: ["phase: REVIEWING → PAUSED", "autoRepairRounds remains 15"],
     sources: [
@@ -789,11 +778,11 @@ const BRANCHES = [
   transition({
     id: "tr.repair.no-progress", fromStageId: "stage.repair.fixing", toStageId: "stage.pause.awaiting-user",
     label: "连续 15 次无法证明修复进展", graphLabel: "NO PROGRESS 15", lane: "pause", tone: "red", bend: -32,
-    condition: "blocker 不是严格子集或相关路径未变化，noProgressCount 达到 15。",
-    explanation: "仅重新运行一轮不算进展；系统展示 fingerprint 与路径证据后暂停。",
+    condition: "未完成 task/path scope 未缩小且相关路径内容未变化，noProgressCount 达到 15。",
+    explanation: "message 改写不算进展；系统展示 Task、文件范围与内容哈希证据后暂停。",
     before: { phase: "FIXING", noProgressCount: "14" }, after: { phase: "PAUSED", pauseCode: "REPAIR_NO_PROGRESS" },
     actorIds: ["daemon", "ledger", "host"], dataDetailIds: ["data.repair.round", "data.pause.record"],
-    payloadExample: "{ findings, relevantPathHashes, noProgressCount: 15 }",
+    payloadExample: "{ tasks, relevantPathHashes, noProgressCount: 15 }",
     changes: ["phase: FIXING → PAUSED", "noProgressCount: 14 → 15"],
     sources: [
       source("packages/review/src/repair-loop.ts", "assessRepairProgress"),
@@ -817,7 +806,7 @@ const BRANCHES = [
     condition: "owning Host 用相同 turnToken 回答 resume_review_decision。",
     explanation: "使用已保存 Review 重新计算，autoRepairRounds 重置后下一次 repair 记为 1。",
     before: { phase: "PAUSED", pauseCode: "AUTOMATIC_REPAIR_LIMIT", autoRepairRounds: "15" }, after: { phase: "FIXING", autoRepairRounds: "1" },
-    actorIds: ["host", "mcp", "daemon", "ledger"], dataDetailIds: ["data.pause.record", "data.review.decision", "data.run.record"],
+    actorIds: ["host", "mcp", "daemon", "ledger"], dataDetailIds: ["data.pause.record", "data.review.artifact", "data.review.decision", "data.run.record"],
     payloadExample: "answer: { action: 'resume_review_decision' }",
     changes: ["phase: PAUSED → FIXING", "autoRepairRounds: 15 → 1", "hostTurn: cleared"],
     sources: [source("apps/daemon/src/host-turn-coordinator.ts", "resumeReviewDecision")]
@@ -1129,7 +1118,7 @@ const CANCEL = ["tr.cancel.request", "tr.cancel.complete"];
 export const SCENARIOS = Object.freeze({
   repair: scenario({
     id: "repair", category: "核心路径", name: "自动修复一轮后成功", shortName: "REPAIR LOOP",
-    description: "第一轮 Review 发现 blocker，创建 Revision 2，回到 PREPARING 并 RESUME 同一 Reviewer。",
+    description: "第一轮 Review 发现未完成 Task issue，创建 Revision 2，回到 PREPARING 并 RESUME 同一 Reviewer。",
     outcome: "COMPLETED · REVISION 2", tone: "amber", repairRounds: 1,
     transitionPath: [
       ...TO_DECISION_CREATE,
@@ -1184,21 +1173,15 @@ export const SCENARIOS = Object.freeze({
   }),
   noProgress: scenario({
     id: "noProgress", category: "安全出口", name: "修复无进展后取消", shortName: "NO PROGRESS",
-    description: "blocker 未严格缩小且相关路径无变化，计数达到 15 后暂停。",
+    description: "未完成 task/path scope 未缩小且相关文件内容未变化，计数达到 15 后暂停。",
     outcome: "PAUSED → CANCELED", tone: "red", repairRounds: 1,
     transitionPath: [
       ...TO_DECISION_CREATE, "tr.review.request-repair", "tr.repair.no-progress", ...CANCEL
     ]
   }),
-  invalidReview: scenario({
-    id: "invalidReview", category: "安全出口", name: "无可执行 blocker 的 Review", shortName: "INVALID REVIEW",
-    description: "Review 未通过但无法安全构造 repairItems，立即暂停而不是猜测。",
-    outcome: "PAUSED → CANCELED", tone: "red", repairRounds: 0,
-    transitionPath: [...TO_DECISION_CREATE, "tr.review.invalid", ...CANCEL]
-  }),
   workerEmpty: scenario({
     id: "workerEmpty", category: "Worker 分支", name: "空 Candidate 自动修复", shortName: "EMPTY CANDIDATE",
-    description: "Worker 没有改动且不允许 no-change，生成 typed finding 并创建下一 Revision。",
+    description: "Worker 没有改动且不允许 no-change，生成 synthetic TaskReview issue 并创建下一 Revision。",
     outcome: "FIXING → REVISION 2 → COMPLETED", tone: "amber", repairRounds: 0,
     transitionPath: [
       "tr.execute.create-run", "tr.pipeline.materialize", "tr.pipeline.start-worker",

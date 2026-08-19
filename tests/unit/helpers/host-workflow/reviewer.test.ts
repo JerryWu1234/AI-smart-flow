@@ -18,67 +18,60 @@ const context: HostReviewContext = {
 };
 
 describe("compact Reviewer completion result", () => {
-  it("passes the compact task result through without path coverage", () => {
+  it("passes the strict nested task result through", () => {
+    const result = {
+      tasks: [
+        {
+          id: "T001",
+          completionPercentage: 50,
+          issues: [{
+            path: "src/a.ts",
+            message: "Required behavior is incomplete",
+            suggestedFix: "Implement the missing behavior"
+          }]
+        },
+        { id: "T002", completionPercentage: 100, issues: [] }
+      ]
+    };
     const output = validateHostReviewOutput(context, {
       reviewerSessionId: "reviewer-1",
-      completionPercentage: 75,
-      tasks: [
-        {
-          id: "T001",
-          completionPercentage: 50,
-          reason: "Required behavior is incomplete",
-          suggestion: "Implement the missing behavior"
-        },
-        { id: "T002", completionPercentage: 100 }
-      ]
+      result
     });
 
-    expect(output.result).toEqual({
-      completionPercentage: 75,
-      tasks: [
-        {
-          id: "T001",
-          completionPercentage: 50,
-          reason: "Required behavior is incomplete",
-          suggestion: "Implement the missing behavior"
-        },
-        { id: "T002", completionPercentage: 100 }
-      ]
-    });
+    expect(output.result).toEqual(result);
   });
 
-  it("rejects an overall percentage that is not the rounded task average", () => {
+  it("rejects unknown top-level keys", () => {
     expect(() => validateHostReviewOutput(context, {
       reviewerSessionId: "reviewer-1",
-      completionPercentage: 74,
-      tasks: [
-        {
-          id: "T001",
-          completionPercentage: 50,
-          reason: "Required behavior is incomplete",
-          suggestion: "Implement the missing behavior"
-        },
-        { id: "T002", completionPercentage: 100 }
-      ]
+      result: {
+        tasks: [{ id: "T001", completionPercentage: 100, issues: [] }]
+      },
+      unexpected: true
     })).toThrow(/HOST_REVIEW_INVALID_OUTPUT/u);
   });
 
-  it("preserves a rounded average of 100 when one task is not complete", () => {
-    const output = validateHostReviewOutput(context, {
-      reviewerSessionId: "reviewer-1",
-      completionPercentage: 100,
+  it("preserves an incomplete Task without aggregating completion", () => {
+    const result = {
       tasks: [
         {
           id: "T001",
           completionPercentage: 99,
-          reason: "One acceptance detail remains",
-          suggestion: "Implement the remaining detail"
+          issues: [{
+            path: "src/a.ts",
+            message: "One acceptance detail remains",
+            suggestedFix: "Implement the remaining detail"
+          }]
         },
-        { id: "T002", completionPercentage: 100 }
+        { id: "T002", completionPercentage: 100, issues: [] }
       ]
+    };
+    const output = validateHostReviewOutput(context, {
+      reviewerSessionId: "reviewer-1",
+      result
     });
 
-    expect(output.result).toMatchObject({ completionPercentage: 100 });
-    expect("tasks" in output.result && output.result.tasks[0]?.completionPercentage).toBe(99);
+    expect(output.result).toEqual(result);
+    expect(output.result.tasks[0]?.completionPercentage).toBe(99);
   });
 });

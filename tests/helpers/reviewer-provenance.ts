@@ -1,47 +1,38 @@
-import type { ReviewSubmission } from "@smartflow/protocol";
+import type { ReviewResult, TaskReview } from "@smartflow/protocol";
 
-export function combineReviewStageResults(
-  paths: string[],
-  converge: ReviewSubmission,
-  adversarial: ReviewSubmission
-): ReviewSubmission {
-  const pathCoverage: Record<string, "FULL" | "MISSING"> = Object.fromEntries(
-    paths.map((path) => [
-      path,
-      converge.pathCoverage[path] === "FULL" && adversarial.pathCoverage[path] === "FULL"
-        ? "FULL"
-        : "MISSING"
-    ])
-  );
-  const convergeFindings = [
-    ...converge.convergeFindings,
-    ...adversarial.convergeFindings
-  ];
-  const adversarialFindings = [
-    ...converge.adversarialFindings,
-    ...adversarial.adversarialFindings
-  ];
-  const hasBlocking = [...convergeFindings, ...adversarialFindings].some(
-    (finding) => finding.blocking
-  );
-  const fullyCovered = Object.values(pathCoverage).every((coverage) => coverage === "FULL");
+function mergeTaskReviews(converge: TaskReview, adversarial: TaskReview): TaskReview {
+  const issues = [...new Map(
+    [...converge.issues, ...adversarial.issues].map((issue) => [
+      `${issue.path}\u0000${issue.message}`,
+      issue
+    ] as const)
+  ).values()];
   return {
-    verdict:
-      converge.verdict === "APPROVE" &&
-      adversarial.verdict === "APPROVE" &&
-      !hasBlocking &&
-      fullyCovered
-        ? "APPROVE"
-        : hasBlocking
-          ? "BLOCKED"
-          : "REQUEST_CHANGES",
+    id: converge.id,
     completionPercentage: Math.min(
       converge.completionPercentage,
       adversarial.completionPercentage
     ),
-    convergeFindings,
-    adversarialFindings,
-    pathCoverage,
-    residualRisks: [...converge.residualRisks, ...adversarial.residualRisks]
+    issues
+  };
+}
+
+export function combineReviewStageResults(
+  converge: ReviewResult,
+  adversarial: ReviewResult
+): ReviewResult {
+  const adversarialTasks = new Map(adversarial.tasks.map((task) => [task.id, task] as const));
+  if (
+    converge.tasks.length !== adversarial.tasks.length ||
+    converge.tasks.some((task) => !adversarialTasks.has(task.id))
+  ) {
+    throw new Error("REVIEW_STAGE_TASK_COVERAGE_MISMATCH");
+  }
+  return {
+    tasks: converge.tasks.map((task) => {
+      const adversarialTask = adversarialTasks.get(task.id);
+      if (adversarialTask === undefined) throw new Error("REVIEW_STAGE_TASK_COVERAGE_MISMATCH");
+      return mergeTaskReviews(task, adversarialTask);
+    })
   };
 }

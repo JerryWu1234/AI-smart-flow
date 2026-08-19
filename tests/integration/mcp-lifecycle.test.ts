@@ -62,7 +62,7 @@ class LifecycleGateway implements HostGateway {
         phase: this.phase,
         status: this.phase === "PAUSED" ? "PAUSED" : "RUNNING",
         artifacts: [],
-        nextActions: this.phase === "PAUSED" ? ["resume"] : []
+        nextActions: this.phase === "PAUSED" ? ["cancel"] : []
       };
     }
     throw new LifecycleError("UNKNOWN_TOOL", toolName);
@@ -218,7 +218,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
               phase: "PAUSED",
               pause: {
                 code: "TEST_PIPELINE_PAUSED",
-                resumeActions: ["resume", "cancel"]
+                resumeActions: ["cancel"]
               },
               updatedAt
             }
@@ -683,8 +683,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         review: {
           reviewerSessionId,
           result: {
-            completionPercentage: 100,
-            tasks: [{ id: "T999", completionPercentage: 100 }]
+            tasks: [{ id: "T999", completionPercentage: 100, issues: [] }]
           }
         }
       }
@@ -702,8 +701,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         review: {
           reviewerSessionId,
           result: {
-            completionPercentage: 100,
-            tasks: [{ id: "T001", completionPercentage: 100 }]
+            tasks: [{ id: "T001", completionPercentage: 100, issues: [] }]
           }
         }
       }
@@ -728,10 +726,11 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     if (reviewed?.review === undefined) throw new Error("Review artifact was not persisted");
     const durableReview = JSON.parse(
       new TextDecoder().decode(await store.readArtifact(reviewed.review))
-    ) as { gate: { result: { pathCoverage: Record<string, string> } } };
-    expect(durableReview.gate.result.pathCoverage).toEqual(
-      Object.fromEntries(requested.changedPaths.map((path) => [path, "FULL"]))
-    );
+    ) as { schemaVersion: number; gate: { result: { tasks: unknown[] } } };
+    expect(durableReview.schemaVersion).toBe(2);
+    expect(durableReview.gate.result.tasks).toEqual([
+      { id: "T001", completionPercentage: 100, issues: [] }
+    ]);
   });
 
   it("pauses the composite Review boundary on approved source drift and replays the owned prompt", async () => {
@@ -1028,7 +1027,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     expect(await store.readState()).toEqual(paused);
   });
 
-  it("keeps informational and illegal pause actions byte-identical", async () => {
+  it("keeps inspection and illegal pause actions byte-identical", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const dataDirectory = resolve(harness.dataDir, "closed-resume-readonly");
@@ -1072,7 +1071,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         expectedRevision: 1,
         expectedStateVersion: paused.stateVersion
       }
-    })).rejects.toMatchObject({ code: "RESUME_ACTION_READ_ONLY" });
+    })).rejects.toMatchObject({ name: "ZodError" });
     expect(await store.readState()).toEqual(paused);
 
     await expect(runtime.handle({
@@ -1221,7 +1220,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
           ...leaderRun,
           phase: "PAUSED",
           autoRepairRounds: 15,
-          pause: { code: "LEADER_PAUSED", resumeActions: ["resume_review_decision", "cancel"] }
+          pause: { code: "AUTOMATIC_REPAIR_LIMIT", resumeActions: ["resume_review_decision", "cancel"] }
         }
       },
       updatedAt: new Date().toISOString()

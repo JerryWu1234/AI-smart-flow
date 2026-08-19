@@ -1,10 +1,9 @@
+import type { TaskReview } from "@smartflow/protocol";
 import type { ManifestTask, TaskManifest } from "@smartflow/task-manifest";
-
-import type { Finding } from "./finding.js";
 
 export interface RepairRound {
   failureIds: string[];
-  findings: Finding[];
+  tasks: TaskReview[];
   relevantPathHashes: Record<string, string>;
 }
 
@@ -31,15 +30,14 @@ export interface DerivedRepairApproval {
 interface RepairBinding {
   parentRevision: number;
   criterionId: string;
-  findingFingerprint: string;
 }
 
 function stableProblems(round: RepairRound): Set<string> {
   return new Set([
     ...round.failureIds.map((id) => `failure:${id}`),
-    ...round.findings
-      .filter((finding) => finding.blocking)
-      .map((finding) => `finding:${finding.fingerprint}`)
+    ...round.tasks.flatMap((task) =>
+      task.issues.map((issue) => `issue:${task.id}:${issue.path}`)
+    )
   ]);
 }
 
@@ -49,41 +47,39 @@ function isStrictSubset(current: Set<string>, previous: Set<string>): boolean {
 
 function relevantPathsChanged(previous: RepairRound, current: RepairRound): boolean {
   const relevant = new Set(
-    [...previous.findings, ...current.findings]
-      .filter((finding) => finding.blocking)
-      .map((finding) => finding.path)
-      .filter((path): path is string => path !== null)
+    [...previous.tasks, ...current.tasks].flatMap((task) =>
+      task.issues.map((issue) => issue.path)
+    )
   );
   return [...relevant].some(
     (path) => previous.relevantPathHashes[path] !== current.relevantPathHashes[path]
   );
 }
 
-function criterionTaskId(criterionId: string): string | undefined {
-  return /^(T\d{3,})/u.exec(criterionId)?.[1];
-}
-
 function taskForCriterion(manifest: TaskManifest, criterionId: string): ManifestTask | undefined {
-  const taskId = criterionTaskId(criterionId);
-  return manifest.tasks.find((task) => task.id === taskId);
+  return manifest.tasks.find((task) => task.id === criterionId);
 }
 
 function safeInline(value: string): string {
-  return value.replace(/[\r\n`]+/gu, " ").replace(/\s+/gu, " ").trim();
+  return value
+    .replace(/[\r\n`]+/gu, " ")
+    .replace(/;/gu, ",")
+    .replace(/\s+/gu, " ")
+    .trim();
 }
 
 function repairTaskLine(
   manifest: TaskManifest,
-  finding: Finding,
+  task: TaskReview,
+  issue: TaskReview["issues"][number],
   taskNumber: number
 ): string {
-  const criterionId = finding.criterionId ?? "UNMAPPED_CRITERION";
-  const parentTask = taskForCriterion(manifest, criterionId) ?? manifest.tasks[0];
+  const parentTask = taskForCriterion(manifest, task.id);
   if (parentTask === undefined) throw new Error("REPAIR_PARENT_TASK_MISSING");
-  const path = finding.path ?? parentTask.filePaths[0];
-  if (path === undefined) throw new Error("REPAIR_TARGET_PATH_MISSING");
-  const tags = `[${parentTask.module}]`;
-  return `- [ ] T${String(taskNumber).padStart(3, "0")} ${tags} Repair \`${safeInline(path)}\` for ${safeInline(finding.code)} — 验收：${safeInline(finding.summary)}; parentRevision=${String(manifest.revision)}; criterionId=${safeInline(criterionId)}; findingFingerprint=${finding.fingerprint}`;
+  const guidance = issue.suggestedFix === undefined
+    ? safeInline(issue.message)
+    : `${safeInline(issue.message)}；建议：${safeInline(issue.suggestedFix)}`;
+  return `- [ ] T${String(taskNumber).padStart(3, "0")} [${parentTask.module}] Repair \`${safeInline(issue.path)}\` — 验收：${guidance}; parentRevision=${String(manifest.revision)}; criterionId=${task.id}`;
 }
 
 export function assessRepairProgress(
@@ -96,23 +92,18 @@ export function assessRepairProgress(
   const previousProblems = stableProblems(previous);
   const problemsReduced = isStrictSubset(currentProblems, previousProblems);
   const pathsChanged = relevantPathsChanged(previous, current);
-  const noBlockingProblems = previousProblems.size === 0 && currentProblems.size === 0;
-  const noProgressCount = noBlockingProblems || (problemsReduced && pathsChanged)
+  const noProgressCount = currentProblems.size === 0 || problemsReduced || pathsChanged
     ? 0
     : existingNoProgressCount + 1;
-  const uniqueFindings = new Map(
-    current.findings
-      .filter((finding) => finding.blocking)
-      .map((finding) => [finding.fingerprint, finding] as const)
+  const issues = current.tasks.flatMap((task) =>
+    task.issues.map((issue) => ({ task, issue }))
   );
   const firstTaskNumber = context.firstTaskNumber ?? 900;
-  const repairTasks = [...uniqueFindings.values()].map((finding, index) =>
-    repairTaskLine(context.parentManifest, finding, firstTaskNumber + index)
+  const repairTasks = issues.map(({ task, issue }, index) =>
+    repairTaskLine(context.parentManifest, task, issue, firstTaskNumber + index)
   );
   const authorizedCriterionIds = [...new Set(
-    [...uniqueFindings.values()]
-      .map((finding) => finding.criterionId)
-      .filter((criterion): criterion is string => criterion !== null)
+    current.tasks.filter((task) => task.issues.length > 0).map((task) => task.id)
   )].sort();
   return {
     noProgressCount,
@@ -126,14 +117,10 @@ function repairBinding(task: ManifestTask): RepairBinding | undefined {
   const text = task.acceptanceCriteria.join("; ");
   const parentRevision = /(?:^|;)\s*parentRevision=(\d+)(?:;|$)/u.exec(text)?.[1];
   const criterionId = /(?:^|;)\s*criterionId=([^;]+)(?:;|$)/u.exec(text)?.[1]?.trim();
-  const findingFingerprint = /(?:^|;)\s*findingFingerprint=([a-f0-9]{64})(?:;|$)/u.exec(text)?.[1];
-  if (parentRevision === undefined || criterionId === undefined || findingFingerprint === undefined) {
-    return undefined;
-  }
+  if (parentRevision === undefined || criterionId === undefined) return undefined;
   return {
     parentRevision: Number.parseInt(parentRevision, 10),
-    criterionId,
-    findingFingerprint
+    criterionId
   };
 }
 

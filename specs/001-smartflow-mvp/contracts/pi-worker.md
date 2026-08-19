@@ -56,10 +56,11 @@
 
 ## Prompt and resource boundary
 
-1. Prompt input comes only from frozen Task/Revision Artifacts and current structured RepairItems.
-2. Pi receives no SmartFlow MCP server and cannot wait for user input.
-3. Host/global Skills are not dynamically injected. Resource discovery is rooted at the isolated workspace and Run-local agent directory; user-level discovery outside containment is disabled, including user-level Pi model configuration.
-4. If Pi cannot continue, it terminates with a structured blocked/failed result for Leader handling.
+1. Initial prompt input comes only from frozen Task/Revision Artifacts. For a repair Revision, the Daemon additionally supplies every issue from the current validated `ReviewResult.tasks[].issues[]`, preserving each owning Task ID and project-relative path; it never selects only a subset or reads a stale Review.
+2. Current `taskSourceHash` and `candidateHash` remain integrity bindings. Repair no-progress is evaluated by the Daemon from `run.recovery.repairRound`: failure/Task/path scope plus Candidate-operation hashes (`newEntry.sha256` or `DELETED`), with default threshold 15. Pi neither generates nor compares a separate issue identity, and Result Snapshots are not reread for this detector.
+3. Pi receives no SmartFlow MCP server and cannot wait for user input.
+4. Host/global Skills are not dynamically injected. Resource discovery is rooted at the isolated workspace and Run-local agent directory; user-level discovery outside containment is disabled, including user-level Pi model configuration.
+5. If Pi cannot continue, it terminates with a structured blocked/failed result for Leader handling.
 
 ## Session rules
 

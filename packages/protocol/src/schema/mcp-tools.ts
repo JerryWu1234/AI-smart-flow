@@ -9,6 +9,7 @@ import {
   structuredErrorSchema
 } from "./common.js";
 import {
+  reviewResultSchema,
   runPhaseSchema,
   runSummarySchema
 } from "./run-state.js";
@@ -63,80 +64,9 @@ export const statusInputSchema = z
   .strict();
 export const statusOutputSchema = runSummarySchema;
 
-const findingSchema = z
-  .object({
-    fingerprint: sha256Schema,
-    code: z.string().min(1),
-    criterionId: z.string().min(1).nullable(),
-    path: z.string().min(1).nullable(),
-    severity: z.enum(["P0", "P1", "P2"]),
-    blocking: z.boolean(),
-    summary: z.string().min(1),
-    evidence: z.array(z.string().min(1)).min(1)
-  })
-  .strict();
-
-export const reviewSubmissionSchema = z
-  .object({
-    verdict: z.enum(["APPROVE", "REQUEST_CHANGES", "BLOCKED"]),
-    completionPercentage: z.number().int().min(0).max(100),
-    convergeFindings: z.array(findingSchema),
-    adversarialFindings: z.array(findingSchema),
-    pathCoverage: z.record(z.string(), z.enum(["FULL", "MISSING"])),
-    residualRisks: z.array(z.string())
-  })
-  .strict();
-
-const taskCompletionSchema = z
-  .object({
-    id: z.string().regex(/^T\d{3,}$/u),
-    completionPercentage: z.number().int().min(0).max(100),
-    reason: z.string().trim().min(1).optional(),
-    suggestion: z.string().trim().min(1).optional()
-  })
-  .strict()
-  .superRefine((task, context) => {
-    const hasGuidance = task.reason !== undefined && task.suggestion !== undefined;
-    if ((task.completionPercentage === 100) === hasGuidance) {
-      context.addIssue({
-        code: "custom",
-        message: "incomplete tasks require reason and suggestion; complete tasks require neither"
-      });
-    }
-  });
-
-export const taskCompletionReviewSchema = z
-  .object({
-    completionPercentage: z.number().int().min(0).max(100),
-    tasks: z.array(taskCompletionSchema).min(1)
-  })
-  .strict()
-  .superRefine((review, context) => {
-    if (new Set(review.tasks.map((task) => task.id)).size !== review.tasks.length) {
-      context.addIssue({ code: "custom", path: ["tasks"], message: "task ids must be unique" });
-    }
-    const average = Math.round(
-      review.tasks.reduce((total, task) => total + task.completionPercentage, 0) /
-        review.tasks.length
-    );
-    if (review.completionPercentage !== average) {
-      context.addIssue({
-        code: "custom",
-        path: ["completionPercentage"],
-        message: "completionPercentage must be the rounded task average"
-      });
-    }
-  });
-
-export const reviewSubmissionInputSchema = z.union([
-  reviewSubmissionSchema,
-  taskCompletionReviewSchema
-]);
-
 export const resumeActionSchema = z.enum([
   "approve_new_manifest_revision",
   "cancel",
-  "resume",
   "retry_provider_probe",
   "retry_git_probe",
   "retry_provider",
@@ -146,17 +76,10 @@ export const resumeActionSchema = z.enum([
   "retry_cancel",
   "retry",
   "restore_approved_tasks",
-  "leader_append_repair_tasks",
-  "inspect_processes",
-  "inspect_recovery",
-  "inspect_conflict",
-  "inspect_repair_diff",
-  "inspect_no_progress",
   "confirm_manual_publish"
 ]);
 
-const reviewTurnInspectionActionSchema = z.enum([
-  "leader_append_repair_tasks",
+export const reviewTurnInspectionActionSchema = z.enum([
   "inspect_processes",
   "inspect_recovery",
   "inspect_conflict",
@@ -164,14 +87,7 @@ const reviewTurnInspectionActionSchema = z.enum([
   "inspect_no_progress"
 ]);
 
-const reviewTurnMutableActionSchema = resumeActionSchema.exclude([
-  "leader_append_repair_tasks",
-  "inspect_processes",
-  "inspect_recovery",
-  "inspect_conflict",
-  "inspect_repair_diff",
-  "inspect_no_progress"
-]);
+const reviewTurnMutableActionSchema = resumeActionSchema;
 
 export const revisionApprovalSchema = z
   .object({
@@ -276,7 +192,7 @@ export const resultOutputSchema = z
 const reviewTurnReviewSchema = z
   .object({
     reviewerSessionId: identifierSchema,
-    result: reviewSubmissionInputSchema
+    result: reviewResultSchema
   })
   .strict();
 
@@ -400,7 +316,7 @@ const reviewTurnUserInputRequiredSchema = reviewTurnIdentitySchema.extend({
     .strict(),
   result: resultOutputSchema,
   worktreePath: z.string().min(1).optional(),
-  review: reviewSubmissionSchema.optional(),
+  review: reviewResultSchema.optional(),
   repairDraft: repairDraftSchema.optional(),
   requiredInput: reviewTurnRevisionApprovalRequiredInputSchema.optional(),
   inspectionOptions: z.array(z.object({
@@ -452,8 +368,6 @@ export type ExecuteInput = z.infer<typeof executeInputSchema>;
 export type ExecuteOutput = z.infer<typeof executeOutputSchema>;
 export type StatusInput = z.infer<typeof statusInputSchema>;
 export type StatusOutput = z.infer<typeof statusOutputSchema>;
-export type ReviewSubmission = z.infer<typeof reviewSubmissionSchema>;
-export type TaskCompletionReview = z.infer<typeof taskCompletionReviewSchema>;
 export type ResumeInput = z.infer<typeof resumeInputSchema>;
 export type ResumeOutput = z.infer<typeof resumeOutputSchema>;
 export type CancelInput = z.infer<typeof cancelInputSchema>;

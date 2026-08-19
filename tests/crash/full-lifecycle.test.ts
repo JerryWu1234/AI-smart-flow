@@ -260,7 +260,6 @@ describe("phase-complete crash recovery", () => {
     delete decisionBody.decisionHash;
     decisionBody.decision = "pause";
     decisionBody.reason = "leader paused before publish";
-    decisionBody.repairItems = [];
     const pausedDecision = {
       ...decisionBody,
       decisionHash: canonicalHash(decisionBody)
@@ -300,13 +299,20 @@ describe("phase-complete crash recovery", () => {
     const reviewAttemptId = reviewBody.reviewAttemptId;
     delete reviewBody.reviewHash;
     const gate = reviewBody.gate as Record<string, unknown>;
-    const result = gate.result as Record<string, unknown>;
     reviewBody.gate = {
       ...gate,
       accepted: false,
       allowedLeaderDecisions: ["repair", "pause"],
-      result: { ...result, verdict: "REQUEST_CHANGES" },
-      reasons: ["VERDICT_NOT_APPROVE"]
+      result: {
+        tasks: [{
+          id: "T001",
+          completionPercentage: 50,
+          issues: [{
+            path: "sum.js",
+            message: "sum does not implement the requested review change"
+          }]
+        }]
+      }
     };
     const repairReview = { ...reviewBody, reviewHash: canonicalHash(reviewBody) };
     const repairReviewRef = await store.writeArtifact(
@@ -317,13 +323,6 @@ describe("phase-complete crash recovery", () => {
     delete leaderBody.decisionHash;
     leaderBody.reviewHash = repairReview.reviewHash;
     leaderBody.decision = "repair";
-    leaderBody.repairItems = [{
-      source: "leader",
-      code: "REPAIR_REQUIRED",
-      taskId: "T001",
-      path: "sum.js",
-      reason: "address the requested review change"
-    }];
     leaderBody.reason = "repair before another review";
     const repairDecision = { ...leaderBody, decisionHash: canonicalHash(leaderBody) };
     const repairDecisionRef = await store.writeArtifact(

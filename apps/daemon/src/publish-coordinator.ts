@@ -3,6 +3,10 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import {
+  durableLeaderDecisionSchema,
+  durableReviewDecisionSchema
+} from "@smartflow/protocol";
+import {
   PublishService,
   FilesystemWorkspaceApplyAdapter,
   observeTargetState,
@@ -401,32 +405,29 @@ export class PublishCoordinator {
     ) as GitWorkspaceSnapshot;
     const baselineHash = baseline.snapshotHash;
     const source = await this.gitSource(run);
-    const reviewDecision = JSON.parse(
+    const reviewValue: unknown = JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(run.review))
-    ) as Record<string, unknown>;
-    const leaderDecision = JSON.parse(
+    );
+    const leaderValue: unknown = JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(run.leaderDecision))
-    ) as Record<string, unknown>;
+    );
+    const reviewDecision = durableReviewDecisionSchema.parse(reviewValue);
+    const leaderDecision = durableLeaderDecisionSchema.parse(leaderValue);
     const reviewHash = reviewDecision.reviewHash;
     const reviewHistoryEntry = [...(run.reviewHistory ?? [])].reverse().find(
       (entry) => entry.reviewAttemptId === reviewDecision.reviewAttemptId
     );
-    const allowedLeaderDecisions = (
-      reviewDecision.gate as { allowedLeaderDecisions?: unknown } | undefined
-    )?.allowedLeaderDecisions;
     const candidateHash = getCandidateHash(source.candidate);
     if (
       manifest.revision !== run.revision ||
       !verifyCandidate(source.candidate) ||
       getCandidateBaselineHash(source.candidate) !== baselineHash ||
-      !semanticHash(reviewDecision, "reviewHash") ||
+      !semanticHash(reviewValue as Record<string, unknown>, "reviewHash") ||
       reviewHistoryEntry?.taskSourceHash !== reviewDecision.taskSourceHash ||
-      reviewHistoryEntry?.candidateHash !== candidateHash ||
+      reviewHistoryEntry.candidateHash !== candidateHash ||
       reviewDecision.candidateHash !== candidateHash ||
-      !Array.isArray(allowedLeaderDecisions) ||
-      !allowedLeaderDecisions.includes("accept") ||
-      typeof reviewHash !== "string" ||
-      !semanticHash(leaderDecision, "decisionHash") ||
+      !reviewDecision.gate.allowedLeaderDecisions.includes("accept") ||
+      !semanticHash(leaderValue as Record<string, unknown>, "decisionHash") ||
       leaderDecision.reviewHash !== reviewHash ||
       leaderDecision.decision !== "accept"
     ) {

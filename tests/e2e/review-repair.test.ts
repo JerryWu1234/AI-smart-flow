@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   assessRepairProgress,
   deriveRepairApproval,
-  normalizeFinding,
   type RepairRound
 } from "@smartflow/review";
 import {
@@ -29,20 +28,18 @@ function parentManifest(): TaskManifest {
   return compileTaskManifest(createTasksSource(), { ...baseOptions, revision: 1 }).manifest;
 }
 
-function round(hash: string): RepairRound {
+function round(hash: string, message = "runBuild still returns success after compilation fails"): RepairRound {
   return {
     failureIds: ["REVIEW_BLOCKER"],
-    findings: [
-      normalizeFinding({
-        code: "TEST_FAILURE",
-        criterionId: "T001",
+    tasks: [{
+      id: "T001",
+      completionPercentage: 50,
+      issues: [{
         path: "packages/core/src/index.ts",
-        severity: "P1",
-        blocking: true,
-        summary: "test still fails",
-        evidence: ["Reviewer observed the behavior in the Candidate"]
-      })
-    ],
+        message,
+        suggestedFix: "Propagate the compilation failure from runBuild"
+      }]
+    }],
     relevantPathHashes: { "packages/core/src/index.ts": hash }
   };
 }
@@ -56,7 +53,8 @@ describe("review repair loop", () => {
     const parent = parentManifest();
     const first = assessRepairProgress(round("a"), round("a"), 0, { parentManifest: parent });
     expect(first).toMatchObject({ noProgressCount: 1, pauseRequired: false });
-    expect(first.repairTasks[0]).toMatch(/\[M01\].*parentRevision=1.*criterionId=T001.*findingFingerprint=/u);
+    expect(first.repairTasks[0]).toMatch(/\[M01\].*parentRevision=1.*criterionId=T001/u);
+    expect(first.repairTasks[0]).not.toContain("fingerprint");
     const fourteenth = assessRepairProgress(round("a"), round("a"), 13, {
       parentManifest: parent
     });
@@ -87,64 +85,61 @@ describe("review repair loop", () => {
     });
   });
 
-  it("counts no progress when the same findings remain despite relevant path changes", () => {
+  it("resets no progress when a relevant Candidate file changes", () => {
     expect(
       assessRepairProgress(round("a"), round("b"), 1, { parentManifest: parentManifest() })
-    ).toMatchObject({ noProgressCount: 2, pauseRequired: false });
-  });
-
-  it("counts no progress when problems reduce without a relevant path change", () => {
-    const previous = { ...round("a"), failureIds: ["REVIEW_BLOCKER", "REVIEW_SCOPE"] };
-    expect(
-      assessRepairProgress(previous, round("a"), 1, { parentManifest: parentManifest() })
-    ).toMatchObject({ noProgressCount: 2, pauseRequired: false });
-  });
-
-  it("resets no progress only when problems reduce and a relevant path changes", () => {
-    const previous = { ...round("a"), failureIds: ["REVIEW_BLOCKER", "REVIEW_SCOPE"] };
-    expect(
-      assessRepairProgress(previous, round("b"), 1, { parentManifest: parentManifest() })
     ).toMatchObject({ noProgressCount: 0, pauseRequired: false });
   });
 
-  it("treats a blocker becoming non-blocking as resolved and emits no forced repair task", () => {
-    const previous = { ...round("a"), failureIds: [] };
-    const resolved = {
-      failureIds: [],
-      findings: previous.findings.map((finding) => ({ ...finding, blocking: false })),
-      relevantPathHashes: { "packages/core/src/index.ts": "b" }
-    };
-    const result = assessRepairProgress(previous, resolved, 1, { parentManifest: parentManifest() });
-    expect(result).toMatchObject({ noProgressCount: 0, pauseRequired: false, repairTasks: [] });
+  it("resets no progress when the unfinished task/path scope shrinks", () => {
+    const previous = { ...round("a"), failureIds: ["REVIEW_BLOCKER", "REVIEW_SCOPE"] };
+    expect(
+      assessRepairProgress(previous, round("a"), 1, { parentManifest: parentManifest() })
+    ).toMatchObject({ noProgressCount: 0, pauseRequired: false });
   });
 
-  it("counts a blocker becoming non-blocking without a relevant path change as no progress", () => {
+  it("does not treat message-only wording changes as progress", () => {
+    expect(
+      assessRepairProgress(
+        round("a", "runBuild fails to propagate compilation errors"),
+        round("a", "Compilation failures are swallowed inside runBuild"),
+        1,
+        { parentManifest: parentManifest() }
+      )
+    ).toMatchObject({ noProgressCount: 2, pauseRequired: false });
+  });
+
+  it("treats all issues being resolved as progress and emits no repair task", () => {
     const previous = { ...round("a"), failureIds: [] };
-    const resolved = {
+    const resolved: RepairRound = {
       failureIds: [],
-      findings: previous.findings.map((finding) => ({ ...finding, blocking: false })),
+      tasks: [],
       relevantPathHashes: { "packages/core/src/index.ts": "a" }
     };
     const result = assessRepairProgress(previous, resolved, 1, { parentManifest: parentManifest() });
-    expect(result).toMatchObject({ noProgressCount: 2, pauseRequired: false, repairTasks: [] });
-  });
-
-  it("ignores purely non-blocking findings for progress, paths, and repair tasks", () => {
-    const nonBlocking = {
-      failureIds: [],
-      findings: round("a").findings.map((finding) => ({
-        ...finding,
-        blocking: false,
-        summary: "residual risk only"
-      })),
-      relevantPathHashes: { "packages/core/src/index.ts": "a" }
-    };
-    const result = assessRepairProgress(nonBlocking, {
-      ...nonBlocking,
-      relevantPathHashes: { "packages/core/src/index.ts": "b" }
-    }, 1, { parentManifest: parentManifest() });
     expect(result).toMatchObject({ noProgressCount: 0, pauseRequired: false, repairTasks: [] });
     expect(result.authorizedCriterionIds).toEqual([]);
+  });
+
+  it("emits every nested issue while authorizing its parent Task once", () => {
+    const current = round("a");
+    current.tasks[0]?.issues.push({
+      path: "packages/core/src/index.ts",
+      message: "formatResult omits the failed-build diagnostic"
+    });
+    const result = assessRepairProgress(round("a"), current, 0, {
+      parentManifest: parentManifest()
+    });
+    expect(result.repairTasks).toHaveLength(2);
+    expect(result.authorizedCriterionIds).toEqual(["T001"]);
+    expect(result.repairTasks.join("\n")).not.toContain("fingerprint");
+  });
+
+  it("keeps accumulating no progress when task/path scope and file content are unchanged", () => {
+    const result = assessRepairProgress(round("a"), round("a"), 1, {
+      parentManifest: parentManifest()
+    });
+    expect(result).toMatchObject({ noProgressCount: 2, pauseRequired: false });
   });
 
   it("derives authorization from immutable Manifest diffs, ignoring a forged approval label", () => {

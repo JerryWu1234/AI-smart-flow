@@ -3,12 +3,13 @@
 - 版本变更：4.1.0 -> 5.0.0
 - 修改原则：
   - CP-001：保留 Leader-only user interaction，并明确 Host 只通过复合 Review turn 返回 Reviewer 结果或用户答案；wait、claim/renew、Review submission、Leader decision 与 repair/publish progression 是 Daemon 内部 mechanics。
-  - CP-008：Review 仍是发布门槛；满足门槛后的 accept/publish 与不满足时的 repair/pause 继续由 Daemon 按冻结策略推进。
-  - CP-009：公开 Review 编排收敛为 `smartflow_execute → smartflow_review_turn*`；其余四个公开工具是独立 Run 管理 API，不是 Review continuation 或第二条 Review 编排路径。
-  - CP-011：将 Host-turn coordinator 与 ordinary Run recovery 的互斥关系写为当前恢复契约。
+  - CP-008：将发布门槛迁移为唯一 ReviewResult/TaskReview/Issue 模型、enabled Task 精确覆盖、三态机械计划、全量 Issue repair、no-progress 身份与 schemaVersion 2 Review/Leader evidence。
+  - CP-009：Review payload 的 schema/binding 校验前移到任何 artifact/state mutation 之前；拒绝不改变 Run，也不产生额外 decision。
+  - CP-011：保留 Host-turn coordinator 与 ordinary Run recovery 的互斥恢复契约。
 - 保留原则：CP-002–CP-007、CP-010
 - 新增原则：无
 - 删除原则：无
+- 不兼容性：Review/Leader artifact v1 不升级、不按 v2 解释；严格 v2 解析失败时对应 Run 安全暂停或阻塞。新部署可在运维上选择新的 Data Directory，但当前 runtime 没有目录格式版本 marker/probe。
 - 公开面事实：`HostActionLoop` symbol 与五个 manual Review orchestration MCP names 的公开 symbols、schemas、handlers、registrations、aliases 均不存在；对应 Review mechanics 仅存在于 Daemon 内部。
 - 模板检查：
   - ✅ .specify/templates/spec-template.md：无需结构变更
@@ -16,7 +17,7 @@
   - ✅ .specify/templates/tasks-template.md：无需结构变更
   - ✅ .specify/templates/checklist-template.md：无需结构变更
 - 通用 Spec Kit 配置：✅ feature/init/integration、workflow registry/YAML、templates 与 scripts 均不变
-- 运行设计文档：✅ 已同步 SmartFlow-Spec-Kit-R5.md；其余设计文档由对应追踪任务维护
+- 运行设计文档：✅ 已同步 SmartFlow-Spec-Kit-R5.md、current/historical Review ADR、research 与 glossary
 - 后续 TODO：真实 pinned Pi SDK/RPC 兼容与可审计 real-model 两工具 E2E 证据仍保持开放
 -->
 
@@ -66,15 +67,20 @@
 - Publish MUST 基于已审查的 Candidate、预期 HEAD 与目标分支执行；冲突 MUST 进入显式状态，MUST NOT 静默覆盖。
 
 ### CP-008：Review 是发布前门槛（强制）
-- Reviewer MUST 输出结构化 Review Artifact，覆盖每个批准 Task、全部 changed paths、completion percentage、findings 与 Candidate 绑定。
-- 只有所有 Task 为 100%、verdict 为 `APPROVE`、路径覆盖完整且无 blocking finding 时，Daemon MAY 按冻结策略自动 accept 并 Publish。
-- 存在可执行 blocking finding 时，Daemon MUST 只把当前 finding fingerprints 转换为同一 Task 范围内的 repair；不得要求 Host 重做机械决策。
-- 无可执行 finding 的不完整/无效 Review、自动修复额度耗尽、Reviewer 不可用或无法证明安全状态时 MUST durable pause，并通过 `USER_INPUT_REQUIRED` 或终态暴露。
+- Reviewer MUST 在 `review.result` 中仅输出 `ReviewResult = { tasks: TaskReview[] }`；`TaskReview` MUST 严格为 `{ id, completionPercentage, issues }`，Issue MUST 严格为 `{ path, message, suggestedFix? }`，不得存在第二套 Review 数据。
+- Review Task IDs MUST 唯一且精确覆盖 `manifest.enabledTaskIds`。`completionPercentage` MUST 为 0–100 的整数，且 `completionPercentage === 100` 当且仅当 `issues` 为空；不完整 Task MUST 至少包含一个 Issue，同一 Task 的 Issue MUST 按 `(path, message)` 唯一。
+- Issue schema MUST 只强制 `path` trim 后非空、不得以 `/` 开头、不得包含反斜杠或空/`.`/`..` slash-delimited segment，以及 `message` 与可选 `suggestedFix` 非空；它不另行识别 drive-qualified 形式，也不检查文件存在性、文件类型或 message 的自然语言具体程度。Reviewer prompt MUST 要求 `message` 描述具体函数或行为、触发条件和影响。Reviewer MUST 检查全部 cumulative changed paths，但该列表只是 Review 输入义务，不是 ReviewResult 属性或额外接受谓词。
+- `planReviewDecision()` MUST 只产生 `ACCEPT | REPAIR | PAUSE_REPAIR_LIMIT`：每个 Task 均为 100% 时 MUST `ACCEPT`；否则 `autoRepairRounds < 15` 时 MUST `REPAIR`；否则 MUST `PAUSE_REPAIR_LIMIT`。
+- `REPAIR` MUST 由 Daemon 从每个不完整 Task 的全部 `issues` 确定性派生；Host/Leader MUST NOT 选择子集、追加 repair 条目或提交独立 repair 数据。
+- no-progress 比较 MUST 使用 `run.recovery.repairRound = { failureIds, tasks, relevantPathHashes }`：稳定问题集合仅由 failure IDs 与 `(TaskReview.id, Issue.path)` 组成；相关 Issue path 的 Candidate operation hash 变化（删除为 `DELETED`）或当前问题集合严格缩小 MUST 视为 progress。`message` 与 `suggestedFix` MUST NOT 参与身份。默认 `noProgressCount` 暂停阈值 MUST 为 15，且该 operational pause 不增加第四种 Review decision。
+- Durable Review 与 Leader artifacts MUST 均使用 `schemaVersion: 2`。Review artifact MUST 内含 `reviewHash`，并直接保存 `candidateHash`、`taskSourceHash` 与 `gate.result`；Leader artifact MUST 仅通过 `reviewHash` 绑定 Review，且不得直接保存 Candidate/task-source binding 或独立 repair 列表。Artifact v1 MUST NOT 升级或按 v2 解释；strict v2 parse 失败 MUST 使对应 Run 安全暂停或阻塞。
+- Reviewer 不可用、deadline、Publish conflict 或无法证明安全恢复的状态 MAY 作为 operational durable pause 暴露，但 MUST NOT 成为额外 Review decision。
 - SmartFlow 不设置独立的通用 verify/gate 阶段；Pi MAY 在 isolated workspace 中按 Task 需要运行项目命令。
 
 ### CP-009：Single-Writer、CAS 与 Host-turn Ownership（强制）
 - 单个 Project MUST 由唯一有效 writer lease 保护共享运行状态与 Publish；所有 mutation MUST 使用 Project-wide revision/CAS 语义。
 - 同一 `projectId + jobId` 的复合 Review turn MUST 串行化；不同 Run MAY 并行，但共享 `state.sqlite` 的每次提交都必须重新校验 stateVersion。
+- Daemon MUST 在任何 Review/Leader artifact 或 Run-state mutation 之前完成整个 payload 的 strict schema、enabled Task 覆盖以及 Reviewer/turn/Revision/Candidate/session binding 校验。Reviewer prompt 的 message 内容规范不得被描述为 runtime 自然语言校验。任何校验失败 MUST 拒绝提交、保持 Run 与 active checkpoint 不变，并且不得生成 Review decision。
 - claim intent、claimed review、等待用户输入和自动修复额度 MUST durable-first 持久化；每个 active Host turn MUST 绑定稳定 `hostTurnId + turnToken + revision`。
 - 自动重试 MUST 使用稳定派生的 child request IDs；CAS mismatch、重启或重复请求不得重复 claim、Review submission、repair 或 Publish。
 - 失去 lease、Host-turn ownership 或当前 Revision/Candidate 绑定的进程 MUST 停止写入；stale continuation 只能获得无敏感路径的当前状态。
@@ -107,10 +113,10 @@
 1. 冻结 Task Revision 与 Pi runtime config hash，并调用 `smartflow_execute`。
 2. Daemon 创建/恢复 isolated Git workspace，在 Sandbox 内执行 Pi，生成不可变 Candidate 与 Review Action。
 3. Host 反复调用 `smartflow_review_turn`；`NOT_READY` 按 `retryAfterMs` bounded poll，任何其他公开 Run API 都不得充当 Review continuation。
-4. 收到 `REVIEW_REQUIRED` 后，Host 按 `CREATE` 或 `RESUME` 执行独立 Reviewer，并用相同 `turnToken` 通过 `smartflow_review_turn` 返回 Review；Daemon 内部负责 wait、claim/renew、Review submission、Leader decision、repair/pause 和 Publish progression。
-5. 收到 `USER_INPUT_REQUIRED` 后，只有 Host 与用户交互，并用相同 `turnToken` 通过 `smartflow_review_turn` 提交列出的合法 answer；`DONE` 必须只对应终态 `result`。
+4. 收到 `REVIEW_REQUIRED` 后，Host 按 `CREATE` 或 `RESUME` 执行独立 Reviewer，并用相同 `turnToken` 通过 `smartflow_review_turn` 返回 Reviewer session 与唯一 `review.result`；Daemon 先完成无副作用校验，再原子写入 schemaVersion 2 Review/Leader evidence，并按三态计划推进全部 Issue repair、额度暂停或 Publish。
+5. 收到 repair-limit 或 operational `USER_INPUT_REQUIRED` 后，只有 Host 与用户交互，并用相同 `turnToken` 通过 `smartflow_review_turn` 提交列出的合法 answer；Review payload 校验失败不进入该状态，`DONE` 必须只对应终态 `result`。
 6. Publish 使用预期 HEAD 和原子 Git 操作写回原始项目；冲突和恢复阻塞必须 durable pause。
-7. 契约测试 MUST 覆盖四公开状态、路径保护、恰好六个公开工具、Host-turn ownership、restart/CAS/renew/deadline、15 轮额度和两工具 production composition。
+7. 契约测试 MUST 覆盖唯一 ReviewResult 模型、enabled Task 精确覆盖、三态决策、全量 Issue repair、预写入拒绝、四公开状态、路径保护、恰好六个公开工具、Host-turn ownership、restart/CAS/renew/deadline、15 轮额度和两工具 production composition。
 8. Mocked Pi Extension/RPC 测试不能替代真实 pinned SDK 兼容和经用户授权的 real-model E2E 证据；未验证项必须保持开放。
 
 ## Governance
@@ -120,7 +126,7 @@
 - 版本规则：移除或不兼容地重定义原则为 MAJOR；新增原则或实质扩展为 MINOR；措辞澄清为 PATCH。
 - 4.0.0 明确废弃 OpenCode/Claude Worker、ToolExecutionBroker、工具效果账本、Worker 工具审批流及其持久化状态；旧状态不保证原地兼容。
 - 4.1.0 明确采用 Daemon-owned mechanical orchestration、单一复合 Review turn、Host-only Reviewer/user boundary 与 durable Host-turn ownership。
-- 5.0.0 的公开 MCP surface 恰好为六个工具；`HostActionLoop` symbol 与五个 manual Review orchestration MCP names 的公开 symbols、schemas、handlers、registrations、aliases 均不存在，对应 Review mechanics 仅为 Daemon internal。
+- 5.0.0 的公开 MCP surface 恰好为六个工具；`HostActionLoop` symbol 与五个 manual Review orchestration MCP names 的公开 symbols、schemas、handlers、registrations、aliases 均不存在，对应 Review mechanics 仅为 Daemon internal；唯一 ReviewResult 与 schemaVersion 2 Review/Leader artifacts 作为同一现行契约维护，不另行虚构 Data Directory format。
 - 合并前 MUST 运行 Spec Kit 一致性分析；若 Constitution 与实现计划冲突，以 Constitution 为准并阻止实现。
 
 **Version**: 5.0.0 | **Ratified**: 2026-07-20 | **Last Amended**: 2026-08-12

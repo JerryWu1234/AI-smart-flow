@@ -8,7 +8,8 @@ import {
   mcpToolSchemas,
   piWorkerAttemptSchema,
   publishResultSchema,
-  reviewSubmissionSchema,
+  resumeInputSchema,
+  reviewResultSchema,
   reviewTurnInputSchema,
   reviewTurnOutputSchema,
   runPhaseSchema,
@@ -174,6 +175,41 @@ describe("smartflow.v5 protocol schemas", () => {
       ...genericApproval,
       options: [{ answer: "inspect_conflict", description: "Inspect" }]
     }).success).toBe(false);
+    const inspectionActions = [
+      "inspect_processes",
+      "inspect_recovery",
+      "inspect_conflict",
+      "inspect_repair_diff",
+      "inspect_no_progress"
+    ] as const;
+    expect(reviewTurnOutputSchema.safeParse({
+      ...genericApproval,
+      inspectionOptions: inspectionActions.map((action) => ({
+        action,
+        description: `Inspect with ${action}`
+      }))
+    }).success).toBe(true);
+    const resumeInput = {
+      requestId: "resume-request-1",
+      projectId: "project-1",
+      jobId: "job-1",
+      expectedRevision: 1,
+      expectedStateVersion: 3
+    };
+    expect(resumeInputSchema.safeParse({
+      ...resumeInput,
+      resumeAction: "cancel"
+    }).success).toBe(true);
+    for (const resumeAction of [
+      "resume",
+      "leader_append_repair_tasks",
+      ...inspectionActions
+    ]) {
+      expect(resumeInputSchema.safeParse({
+        ...resumeInput,
+        resumeAction
+      }).success).toBe(false);
+    }
     const baseInput = {
       requestId: "review-turn-request-1",
       projectId: "project-1",
@@ -186,8 +222,7 @@ describe("smartflow.v5 protocol schemas", () => {
       review: {
         reviewerSessionId: "reviewer-1",
         result: {
-          completionPercentage: 100,
-          tasks: [{ id: "T001", completionPercentage: 100 }]
+          tasks: [{ id: "T001", completionPercentage: 100, issues: [] }]
         }
       }
     }).success).toBe(true);
@@ -300,48 +335,51 @@ describe("smartflow.v5 protocol schemas", () => {
     }).success).toBe(false);
   });
 
-  it("accepts structured Host review results and rejects removed execution evidence", () => {
-    const finding = {
-      fingerprint: digest,
-      code: "BLOCKER",
-      criterionId: "T001",
-      path: "src/a.ts",
-      severity: "P1",
-      blocking: true,
-      summary: "blocking review finding",
-      evidence: ["review evidence"]
-    };
+  it("accepts nested Task issues and enforces completion consistency", () => {
     const review = {
-      verdict: "REQUEST_CHANGES",
-      completionPercentage: 75,
-      convergeFindings: [finding],
-      adversarialFindings: [],
-      pathCoverage: { "src/a.ts": "FULL" },
-      residualRisks: []
+      tasks: [{
+        id: "T001",
+        completionPercentage: 75,
+        issues: [{
+          path: "src/a.ts",
+          message: "parseInput fails to reject an empty value",
+          suggestedFix: "Add the missing guard in parseInput"
+        }]
+      }]
     };
-    expect(reviewSubmissionSchema.safeParse(review).success).toBe(true);
-    expect(reviewSubmissionSchema.safeParse({
-      ...review,
-      completionPercentage: 101
+    expect(reviewResultSchema.safeParse(review).success).toBe(true);
+    expect(reviewResultSchema.safeParse({
+      tasks: [{ ...review.tasks[0], completionPercentage: 101 }]
     }).success).toBe(false);
-    expect(reviewSubmissionSchema.safeParse({
-      ...review,
-      completionPercentage: 75.5
+    expect(reviewResultSchema.safeParse({
+      tasks: [{ ...review.tasks[0], completionPercentage: 75.5 }]
     }).success).toBe(false);
-    const reviewWithoutCompletion: Record<string, unknown> = { ...review };
-    delete reviewWithoutCompletion.completionPercentage;
-    expect(reviewSubmissionSchema.safeParse(reviewWithoutCompletion).success).toBe(false);
-    expect(reviewSubmissionSchema.safeParse({
-      ...review,
-      convergeFindings: [{ ...finding, severity: "P9" }]
+    expect(reviewResultSchema.safeParse({
+      tasks: [{ id: "T001", completionPercentage: 100, issues: review.tasks[0]?.issues }]
     }).success).toBe(false);
-    expect(reviewSubmissionSchema.safeParse({
-      ...review,
-      convergeFindings: [{ ...finding, blocking: "false" }]
+    expect(reviewResultSchema.safeParse({
+      tasks: [{ id: "T001", completionPercentage: 75, issues: [] }]
     }).success).toBe(false);
-    expect(reviewSubmissionSchema.safeParse({
-      ...review,
-      convergeFindings: [{ ...finding, evidence: [] }]
+    expect(reviewResultSchema.safeParse({
+      tasks: [{
+        ...review.tasks[0],
+        issues: [{ ...review.tasks[0]?.issues[0], path: "../src/a.ts" }]
+      }]
+    }).success).toBe(false);
+    expect(reviewResultSchema.safeParse({
+      tasks: [{
+        ...review.tasks[0],
+        issues: [
+          review.tasks[0]?.issues[0],
+          review.tasks[0]?.issues[0]
+        ]
+      }]
+    }).success).toBe(false);
+    expect(reviewResultSchema.safeParse({
+      tasks: [{
+        ...review.tasks[0],
+        issues: [{ ...review.tasks[0]?.issues[0], unexpected: digest }]
+      }]
     }).success).toBe(false);
   });
 
@@ -375,7 +413,7 @@ describe("smartflow.v5 protocol schemas", () => {
 
   it("strictly models durable Review, Leader, and Publish evidence", () => {
     const review = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       revision: 1,
       claimId: "claim-1",
       reviewAttemptId: "review-1",
@@ -385,16 +423,10 @@ describe("smartflow.v5 protocol schemas", () => {
       piSessionId: "pi-session-1",
       gate: {
         accepted: true,
-        allowedLeaderDecisions: ["accept", "repair", "pause"],
+        allowedLeaderDecisions: ["accept", "pause"],
         result: {
-          verdict: "APPROVE",
-          completionPercentage: 100,
-          convergeFindings: [],
-          adversarialFindings: [],
-          pathCoverage: { "src/a.ts": "FULL" },
-          residualRisks: []
-        },
-        reasons: []
+          tasks: [{ id: "T001", completionPercentage: 100, issues: [] }]
+        }
       },
       reviewHash: "b".repeat(64)
     };
@@ -407,19 +439,33 @@ describe("smartflow.v5 protocol schemas", () => {
       ...review,
       gate: {
         ...review.gate,
-        result: { ...review.gate.result, completionPercentage: 101 }
+        result: {
+          tasks: [{
+            id: "T001",
+            completionPercentage: 50,
+            issues: [{ path: "src/a.ts", message: "parseInput is incomplete" }]
+          }]
+        }
       }
     }).success).toBe(false);
     expect(durableLeaderDecisionSchema.parse({
-      schemaVersion: 1,
+      schemaVersion: 2,
       revision: 1,
       reviewHash: review.reviewHash,
       decision: "accept",
-      repairItems: [],
       reason: "review accepted",
       decidedAt: "2026-07-21T10:00:00+08:00",
       decisionHash: "c".repeat(64)
     })).toBeDefined();
+    expect(durableLeaderDecisionSchema.safeParse({
+      schemaVersion: 1,
+      revision: 1,
+      reviewHash: review.reviewHash,
+      decision: "repair",
+      reason: "legacy leader artifact",
+      decidedAt: "2026-07-21T10:00:00+08:00",
+      decisionHash: "c".repeat(64)
+    }).success).toBe(false);
     expect(publishResultSchema.parse({
       operationId: "publish-1",
       operationsHash: "d".repeat(64),

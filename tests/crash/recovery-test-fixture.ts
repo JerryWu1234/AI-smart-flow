@@ -201,20 +201,14 @@ export async function createLifecycleStore(
     {
       reviewAttemptId: "review-attempt-1",
       reviewerSessionId: "reviewer-session-1",
-      piSessionId: "pi-session-old",
-      changedPaths: ["sum.js"]
+      piSessionId: "pi-session-old"
     },
     {
-      verdict: "APPROVE",
-      completionPercentage: 100,
-      convergeFindings: [],
-      adversarialFindings: [],
-      pathCoverage: { "sum.js": "FULL" },
-      residualRisks: []
+      tasks: [{ id: "T001", completionPercentage: 100, issues: [] }]
     }
   );
   const reviewBody = {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     revision: 1,
     claimId: "claim-old",
     reviewAttemptId: "review-attempt-1",
@@ -230,11 +224,10 @@ export async function createLifecycleStore(
     Buffer.from(JSON.stringify(reviewDecision), "utf8")
   );
   const leaderBody = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: 1,
     reviewHash: reviewDecision.reviewHash,
     decision: "accept",
-    repairItems: [],
     reason: "recovery fixture accepted",
     decidedAt: "2026-07-20T00:00:00.000Z"
   };
@@ -373,7 +366,7 @@ export async function createLifecycleStore(
         }
       : {}),
     ...(phase === "PAUSED"
-      ? { pause: { code: "USER_INPUT_REQUIRED", resumeActions: ["resume", "cancel"] } }
+      ? { pause: { code: "USER_INPUT_REQUIRED", resumeActions: ["cancel"] } }
       : {}),
     ...(phase === "CANCELING"
       ? { cancellation: { reason: "user", status: "REQUESTED" } }
