@@ -11,8 +11,7 @@ import {
 import {
   reviewResultSchema,
   runPhaseSchema,
-  runSummarySchema,
-  taskIdSchema
+  runSummarySchema
 } from "./run-state.js";
 
 const stateMutationSchema = z
@@ -188,13 +187,6 @@ export const resultOutputSchema = z
   })
   .strict();
 
-const reviewTurnReviewSchema = z
-  .object({
-    reviewerSessionId: identifierSchema,
-    result: reviewResultSchema
-  })
-  .strict();
-
 const reviewTurnRevisionApprovalAnswerSchema = z.object({
   action: z.literal("approve_new_manifest_revision"),
   tasksPath: tasksPathSchema,
@@ -233,63 +225,24 @@ export const reviewTurnInputSchema = z
     jobId: identifierSchema,
     hostTurnId: identifierSchema,
     turnToken: identifierSchema.optional(),
-    review: reviewTurnReviewSchema.optional(),
-    answer: reviewTurnAnswerSchema.optional(),
-    reviewUnavailableReason: z.string().trim().min(1).optional()
+    answer: reviewTurnAnswerSchema.optional()
   })
   .strict()
   .superRefine((input, context) => {
-    const submissions = [
-      input.review !== undefined,
-      input.answer !== undefined,
-      input.reviewUnavailableReason !== undefined
-    ].filter(Boolean).length;
-    if (submissions > 1) {
-      context.addIssue({
-        code: "custom",
-        message: "review, answer, and reviewUnavailableReason are mutually exclusive"
-      });
-    }
-    if (submissions > 0 && input.turnToken === undefined) {
+    if (input.answer !== undefined && input.turnToken === undefined) {
       context.addIssue({
         code: "custom",
         path: ["turnToken"],
-        message: "turnToken is required when submitting a review, answer, or failure"
+        message: "turnToken is required when submitting an answer"
       });
     }
   });
 
-// The Host-visible review turn carries only what a caller can act on. Run
-// identity it already supplied, Revision/stateVersion CAS bookkeeping, Review
-// attempt identity, source/Candidate hashes, and Provider session identity all
-// stay inside the Daemon and its durable evidence. REVIEW_REQUIRED does name the
-// approved Task source and Task IDs, because the caller cannot satisfy the exact
-// Task coverage the Daemon enforces without them.
+// The Host only polls daemon-owned stages and answers explicit user-input turns.
+// Review identity, sessions, deadlines, and results remain internal to the Daemon.
 const reviewTurnNotReadySchema = z.object({
   kind: z.literal("NOT_READY"),
   retryAfterMs: z.number().int().min(1).max(30_000)
-}).strict();
-
-const reviewerSessionRequestSchema = z.discriminatedUnion("mode", [
-  z.object({ mode: z.literal("CREATE") }).strict(),
-  z.object({
-    mode: z.literal("RESUME"),
-    reviewerSessionId: identifierSchema
-  }).strict()
-]);
-
-const reviewTurnReviewRequiredSchema = z.object({
-  kind: z.literal("REVIEW_REQUIRED"),
-  turnToken: identifierSchema,
-  reviewerSession: reviewerSessionRequestSchema,
-  worktreePath: z.string().min(1),
-  tasksPath: tasksPathSchema,
-  taskIds: z.array(taskIdSchema).min(1).refine(
-    (ids) => new Set(ids).size === ids.length,
-    { message: "task ids must be unique" }
-  ),
-  changedPaths: z.array(z.string().min(1)),
-  deadlineAt: z.iso.datetime({ offset: true })
 }).strict();
 
 const reviewTurnUserInputRequiredSchema = z.object({
@@ -319,7 +272,6 @@ const reviewTurnDoneSchema = z
 
 export const reviewTurnOutputSchema = z.discriminatedUnion("kind", [
   reviewTurnNotReadySchema,
-  reviewTurnReviewRequiredSchema,
   reviewTurnUserInputRequiredSchema,
   reviewTurnDoneSchema
 ]).superRefine((output, context) => {

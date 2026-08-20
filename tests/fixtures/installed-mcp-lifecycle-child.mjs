@@ -12,7 +12,6 @@ if (smartflowBin === undefined || projectRoot === undefined || daemonRoot === un
   throw new Error("installed MCP lifecycle child requires bin, project, and daemon paths");
 }
 
-const MAX_REVIEW_CALLS = 3;
 const TASKS_PATH = "tasks.md";
 
 function asRecord(value, context) {
@@ -25,13 +24,6 @@ function asRecord(value, context) {
 function asString(value, context) {
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`${context} did not return a string`);
-  }
-  return value;
-}
-
-function asStringArray(value, context) {
-  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
-    throw new Error(`${context} did not return a string array`);
   }
   return value;
 }
@@ -125,13 +117,6 @@ try {
   const tasks = await readFile(resolve(projectRoot, TASKS_PATH));
   const approvedSourceHash = createHash("sha256").update(tasks).digest("hex");
   const workflowToolNames = [];
-  const reviewerModes = [];
-  const reviewChangedPaths = [];
-  let reviewCalls = 0;
-  let secondExecute;
-  let secondCanceled;
-  let repairMarker;
-  let reviewerSessionId;
 
   stage = "execute";
   workflowToolNames.push("smartflow_execute");
@@ -150,10 +135,12 @@ try {
     throw new Error("smartflow_execute omitted its revision");
   }
 
+  stage = "secondary-run";
+  const secondary = await executeAndCancelSecondary(client, scope);
+
   stage = "review-turn-loop";
   const hostTurnId = `host-turn-${randomUUID()}`;
   let sequence = 0;
-  let continuation = {};
   let result;
   while (result === undefined) {
     sequence += 1;
@@ -161,10 +148,8 @@ try {
     const turn = await callMcp(client, "smartflow_review_turn", {
       requestId: `review-turn-${String(sequence)}-${randomUUID()}`,
       ...scope,
-      hostTurnId,
-      ...continuation
+      hostTurnId
     });
-    continuation = {};
 
     if (turn.kind === "NOT_READY") {
       const retryAfterMs = Number(turn.retryAfterMs);
@@ -178,117 +163,20 @@ try {
       result = asRecord(turn.result, "smartflow_review_turn DONE result");
       break;
     }
-    if (turn.kind !== "REVIEW_REQUIRED") {
-      throw new Error(`Installed lifecycle requires unexpected Host input: ${JSON.stringify(turn)}`);
-    }
-
-    reviewCalls += 1;
-    if (reviewCalls > MAX_REVIEW_CALLS) {
-      throw new Error(`Installed Reviewer exceeded ${String(MAX_REVIEW_CALLS)} calls`);
-    }
-
-    const reviewerSession = asRecord(turn.reviewerSession, "Reviewer session request");
-    const reviewerMode = asString(reviewerSession.mode, "Reviewer session mode");
-    if (reviewerMode === "CREATE") {
-      if (reviewCalls !== 1 || reviewerSessionId !== undefined) {
-        throw new Error("Installed Reviewer received CREATE after its first turn");
-      }
-      reviewerSessionId = `reviewer-${randomUUID()}`;
-    } else if (reviewerMode === "RESUME") {
-      if (
-        reviewerSessionId === undefined ||
-        reviewerSession.reviewerSessionId !== reviewerSessionId
-      ) {
-        throw new Error("Installed Reviewer did not RESUME its original session");
-      }
-    } else {
-      throw new Error(`Installed Reviewer received unsupported mode ${reviewerMode}`);
-    }
-    reviewerModes.push({ mode: reviewerMode, reviewerSessionId });
-
-    const worktreePath = asString(turn.worktreePath, "Reviewer worktree path");
-    const tasksSource = await readFile(resolve(worktreePath, TASKS_PATH));
-    const enabledTaskIds = [...new Set(
-      [...tasksSource.toString("utf8").matchAll(/^\s*-\s+\[\s\]\s+(T\d{3,})\b/gmu)]
-        .map((match) => match[1])
-    )];
-    if (!enabledTaskIds.includes("T057")) {
-      throw new Error(`Installed Reviewer could not find T057: ${JSON.stringify(enabledTaskIds)}`);
-    }
-
-    const changedPaths = asStringArray(turn.changedPaths, "Reviewer changed paths");
-    reviewChangedPaths.push([...changedPaths]);
-    let sumSource;
-    for (const changedPath of changedPaths) {
-      const source = await readFile(resolve(worktreePath, changedPath), "utf8");
-      if (changedPath.replaceAll("\\", "/") === "sum.js") sumSource = source;
-    }
-    if (sumSource === undefined) {
-      throw new Error(`Installed Reviewer did not receive sum.js: ${JSON.stringify(changedPaths)}`);
-    }
-
-    if (reviewCalls === 1) {
-      repairMarker = `// SMARTFLOW_DYNAMIC_REPAIR_${createHash("sha256")
-        .update(asString(turn.turnToken, "Review turn token"))
-        .digest("hex")
-        .slice(0, 20)}`;
-      if (sumSource.includes(repairMarker)) {
-        throw new Error("Dynamic repair marker existed before the Reviewer created it");
-      }
-      const secondary = await executeAndCancelSecondary(client, scope);
-      secondExecute = secondary.secondExecute;
-      secondCanceled = secondary.secondCanceled;
-    }
-    if (repairMarker === undefined || reviewerSessionId === undefined) {
-      throw new Error("Installed Reviewer state was not initialized");
-    }
-
-    const markerPresent = sumSource.includes(repairMarker);
-    if (!markerPresent && reviewCalls >= MAX_REVIEW_CALLS) {
-      throw new Error("Installed automatic repair did not add the dynamic marker in time");
-    }
-    const reason = `The authorized dynamic repair marker is missing from sum.js: ${repairMarker}`;
-    const suggestion = `Add this exact standalone comment to sum.js: ${repairMarker}`;
-    const completionPercentage = markerPresent ? 100 : 50;
-    continuation = {
-      turnToken: asString(turn.turnToken, "Review turn token"),
-      review: {
-        reviewerSessionId,
-        result: {
-          completionPercentage,
-          tasks: enabledTaskIds.map((id) => markerPresent
-            ? { id, completionPercentage: 100 }
-            : { id, completionPercentage: 50, reason, suggestion })
-        }
-      }
-    };
+    throw new Error(`Installed lifecycle requires unexpected Host input: ${JSON.stringify(turn)}`);
   }
 
-  if (
-    secondExecute === undefined ||
-    secondCanceled === undefined ||
-    repairMarker === undefined
-  ) {
-    throw new Error("Installed MCP workflow omitted required lifecycle evidence");
-  }
   if (result.phase !== "COMPLETED" || result.status !== "COMMITTED") {
     throw new Error(`Installed MCP workflow failed closed: ${JSON.stringify(result)}`);
-  }
-  if (reviewCalls < 2) {
-    throw new Error("Installed MCP workflow did not perform an automatic repair review");
   }
 
   process.stdout.write(`${JSON.stringify({
     publicToolNames,
     scope,
-    secondExecute,
-    secondCanceled,
+    secondExecute: secondary.secondExecute,
+    secondCanceled: secondary.secondCanceled,
     result,
-    workflowToolNames,
-    reviewerModes,
-    reviewChangedPaths,
-    repairMarker,
-    reviewCalls
+    workflowToolNames
   })}\n`);
 } catch (error) {
   throw new Error(

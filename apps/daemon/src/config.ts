@@ -5,14 +5,27 @@ import { parse } from "yaml";
 export interface SmartFlowConfig {
   version: 5;
   workspace: { mode: "git-tree" };
-  review: { strategy: "host-subagent"; onUnavailable: "pause"; noProgressThreshold: 15 };
+  review: {
+    strategy: "daemon-codex";
+    onUnavailable: "pause";
+    noProgressThreshold: 15;
+    model?: string;
+    deadlineMs: number;
+    maxAttempts: number;
+  };
   publish: { mode: "auto-after-review"; onConflict: "pause" };
 }
 
 export const defaultSmartFlowConfig: SmartFlowConfig = {
   version: 5,
   workspace: { mode: "git-tree" },
-  review: { strategy: "host-subagent", onUnavailable: "pause", noProgressThreshold: 15 },
+  review: {
+    strategy: "daemon-codex",
+    onUnavailable: "pause",
+    noProgressThreshold: 15,
+    deadlineMs: 45 * 60_000,
+    maxAttempts: 3
+  },
   publish: { mode: "auto-after-review", onConflict: "pause" }
 };
 
@@ -35,25 +48,41 @@ export function parseSmartFlowConfig(value: unknown): SmartFlowConfig {
     throw new Error("SmartFlow configuration sections must be objects");
   }
   exactKeys(workspace, ["mode"], "workspace");
-  exactKeys(review, ["strategy", "onUnavailable", "noProgressThreshold"], "review");
+  exactKeys(
+    review,
+    ["strategy", "onUnavailable", "noProgressThreshold", "model", "deadlineMs", "maxAttempts"],
+    "review"
+  );
   exactKeys(publish, ["mode", "onConflict"], "publish");
   const version = value.version ?? 5;
   const workspaceMode = workspace.mode ?? "git-tree";
-  const reviewStrategy = review.strategy ?? "host-subagent";
+  const reviewStrategy = review.strategy ?? "daemon-codex";
   const reviewUnavailable = review.onUnavailable ?? "pause";
   const noProgressThreshold = review.noProgressThreshold ?? 15;
+  const model = review.model;
+  const deadlineMs = review.deadlineMs ?? 45 * 60_000;
+  const maxAttempts = review.maxAttempts ?? 3;
   const publishMode = publish.mode ?? "auto-after-review";
   const publishConflict = publish.onConflict ?? "pause";
   if (
     version !== 5 ||
     workspaceMode !== "git-tree" ||
-    reviewStrategy !== "host-subagent" ||
+    reviewStrategy !== "daemon-codex" ||
     reviewUnavailable !== "pause" ||
     noProgressThreshold !== 15 ||
+    (model !== undefined && (typeof model !== "string" || model.trim().length === 0)) ||
+    typeof deadlineMs !== "number" ||
+    !Number.isSafeInteger(deadlineMs) ||
+    deadlineMs < 30_000 ||
+    deadlineMs > 3_600_000 ||
+    typeof maxAttempts !== "number" ||
+    !Number.isSafeInteger(maxAttempts) ||
+    maxAttempts < 1 ||
+    maxAttempts > 10 ||
     publishMode !== "auto-after-review" ||
     publishConflict !== "pause"
   ) {
-    throw new Error("SmartFlow configuration contains unsupported V1 values");
+    throw new Error("SmartFlow configuration contains unsupported V5 values");
   }
   return {
     version,
@@ -61,7 +90,10 @@ export function parseSmartFlowConfig(value: unknown): SmartFlowConfig {
     review: {
       strategy: reviewStrategy,
       onUnavailable: reviewUnavailable,
-      noProgressThreshold
+      noProgressThreshold,
+      ...(model === undefined ? {} : { model: model.trim() }),
+      deadlineMs,
+      maxAttempts
     },
     publish: { mode: publishMode, onConflict: publishConflict }
   };

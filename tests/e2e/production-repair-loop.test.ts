@@ -2,20 +2,14 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   ProductionRuntimeComposition,
-  ProjectRuntime
+  ProjectRuntime,
+  DAEMON_REVIEWER_HOST_TURN_ID
 } from "@smartflow/daemon";
-import {
-  type HostActionCallbacks,
-  type ReviewActionResult
-} from "../helpers/host-workflow/index.js";
-import type {
-  ReviewResult,
-  ReviewTurnOutput
-} from "@smartflow/protocol";
+import type { ReviewResult, ReviewTurnOutput } from "@smartflow/protocol";
 import type {
   CancelReceipt,
   ProviderProbeResult,
@@ -23,10 +17,15 @@ import type {
   WorkerProvider,
   WorkerStartInput
 } from "@smartflow/provider-core";
+import type {
+  AgentAdapter,
+  AgentProbe,
+  AgentRunOutcome,
+  AgentRunRequest
+} from "@smartflow/review";
 import { StateStore, type ProjectState } from "@smartflow/state-store";
 import { hashCanonical, taskManifestSchema } from "@smartflow/task-manifest";
 import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
-import { combineReviewStageResults } from "../helpers/reviewer-provenance.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 
 const activeHarnesses: RuntimeHarness[] = [];
@@ -97,7 +96,12 @@ class RepairLoopProvider implements WorkerProvider {
       processStartToken: identity.processStartToken
     };
     const callId = `write-r${String(input.revision)}`;
-    yield { type: "TOOL_STARTED", attemptId: input.attemptId, toolName: "smartflow_write_file", callId };
+    yield {
+      type: "TOOL_STARTED",
+      attemptId: input.attemptId,
+      toolName: "smartflow_write_file",
+      callId
+    };
     await writeFile(
       resolve(input.workspaceDir, "sum.js"),
       [
@@ -154,144 +158,170 @@ async function enabledTaskIdsForRun(store: StateStore, jobId: string): Promise<s
   return manifest.enabledTaskIds;
 }
 
-function createReviewCallback(
-  plans: Map<number, {
-    verdict: "APPROVE" | "REQUEST_CHANGES";
-    findingCodes: string[];
-  }>,
-  loadEnabledTaskIds: () => Promise<readonly string[]>
-): {
-  review: NonNullable<HostActionCallbacks["review"]>;
-  observations: Array<{
-    tasksSource: string;
-    implementationSource: string;
-    sessionMode: "CREATE" | "RESUME";
-  }>;
-} {
-  const reviewerSessionId = "reviewer-session-s1";
-  const observations: Array<{
-    tasksSource: string;
-    implementationSource: string;
-    sessionMode: "CREATE" | "RESUME";
-  }> = [];
-  return {
-    observations,
-    review: async (context): Promise<ReviewActionResult> => {
-      const revision = observations.length + 1;
-      if (revision === 1 && context.reviewerSession.mode !== "CREATE") {
-        throw new Error("first review must create the reviewer session");
-      }
-      if (
-        revision > 1 &&
-        (context.reviewerSession.mode !== "RESUME" ||
-          context.reviewerSession.reviewerSessionId !== reviewerSessionId)
-      ) {
-        throw new Error("later reviews must resume the original reviewer session");
-      }
-      const tasksSource = await readFile(resolve(context.worktreePath, "tasks.md"), "utf8");
-      const implementationSource = await readFile(resolve(context.worktreePath, "sum.js"), "utf8");
-      observations.push({
-        tasksSource,
-        implementationSource,
-        sessionMode: context.reviewerSession.mode
-      });
-      const plan = plans.get(revision) ?? {
-        verdict: "REQUEST_CHANGES" as const,
-        findingCodes: ["REPAIR_REQUIRED"]
-      };
-      const taskIds = [...await loadEnabledTaskIds()];
-      const targetTaskId = taskIds[0];
-      if (targetTaskId === undefined) throw new Error("review source has no enabled tasks");
-      const issues = plan.findingCodes.map((code) => ({
-        path: "sum.js",
-        message: `sum requires corrective implementation for ${code}`,
-        suggestedFix: `Update sum to satisfy ${code}`
-      }));
-      const approval: ReviewResult = {
-        tasks: taskIds.map((id) => ({ id, completionPercentage: 100, issues: [] }))
-      };
-      const incomplete: ReviewResult = {
-        tasks: taskIds.map((id) => id === targetTaskId
-          ? { id, completionPercentage: 0, issues }
-          : { id, completionPercentage: 100, issues: [] })
-      };
-      const converge = plan.verdict === "APPROVE" ? approval : incomplete;
-      const adversarial = plan.verdict === "APPROVE" ? approval : incomplete;
-      return {
-        reviewerSessionId,
-        result: combineReviewStageResults(converge, adversarial)
-      };
+interface ReviewPlan {
+  verdict: "APPROVE" | "REQUEST_CHANGES";
+  findingCodes?: readonly string[];
+}
+
+interface RecordedReviewCall {
+  mode: "CREATE" | "RESUME";
+  request: AgentRunRequest;
+  sessionId?: string;
+  tasksSource: string;
+  implementationSource: string;
+}
+
+class ScriptedReviewAdapter implements AgentAdapter {
+  public readonly id = "scripted-reviewer";
+  public readonly calls: RecordedReviewCall[] = [];
+  private readonly releases = new Map<number, () => void>();
+
+  public constructor(
+    private readonly plans: ReadonlyMap<number, ReviewPlan>,
+    private readonly loadTaskIds: () => Promise<readonly string[]>,
+    private readonly blockedCalls: ReadonlySet<number> = new Set(),
+    private readonly defaultPlan: ReviewPlan = {
+      verdict: "REQUEST_CHANGES",
+      findingCodes: ["REPAIR_REQUIRED"]
     }
-  };
+  ) {}
+
+  public probe(): Promise<AgentProbe> {
+    return Promise.resolve({ available: true, agentId: this.id, version: "test" });
+  }
+
+  public createSession(request: AgentRunRequest): Promise<AgentRunOutcome> {
+    return this.run("CREATE", request);
+  }
+
+  public resume(sessionId: string, request: AgentRunRequest): Promise<AgentRunOutcome> {
+    if (sessionId !== "reviewer-session-s1") {
+      return Promise.reject(new Error(`unexpected Reviewer session: ${sessionId}`));
+    }
+    return this.run("RESUME", request, sessionId);
+  }
+
+  public cancel(): Promise<boolean> {
+    for (const release of this.releases.values()) release();
+    this.releases.clear();
+    return Promise.resolve(true);
+  }
+
+  public async waitForCalls(count: number, timeoutMs = 8_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.calls.length < count && Date.now() < deadline) {
+      await new Promise<void>((settle) => setTimeout(settle, 20));
+    }
+    if (this.calls.length < count) {
+      throw new Error(`Timed out waiting for Review call ${String(count)}`);
+    }
+  }
+
+  public release(callNumber: number): void {
+    const release = this.releases.get(callNumber);
+    if (release === undefined) throw new Error(`Review call ${String(callNumber)} is not blocked`);
+    this.releases.delete(callNumber);
+    release();
+  }
+
+  private async run(
+    mode: "CREATE" | "RESUME",
+    request: AgentRunRequest,
+    sessionId?: string
+  ): Promise<AgentRunOutcome> {
+    const callNumber = this.calls.length + 1;
+    const call: RecordedReviewCall = {
+      mode,
+      request,
+      ...(sessionId === undefined ? {} : { sessionId }),
+      tasksSource: await readFile(resolve(request.cwd, "tasks.md"), "utf8"),
+      implementationSource: await readFile(resolve(request.cwd, "sum.js"), "utf8")
+    };
+    this.calls.push(call);
+    if (this.blockedCalls.has(callNumber)) {
+      await new Promise<void>((settle) => this.releases.set(callNumber, settle));
+    }
+
+    const plan = this.plans.get(callNumber) ?? this.defaultPlan;
+    const taskIds = [...await this.loadTaskIds()];
+    const targetTaskId = taskIds[0];
+    if (targetTaskId === undefined) throw new Error("review source has no enabled tasks");
+    const findingCodes = plan.findingCodes ?? ["REPAIR_REQUIRED"];
+    const issues = findingCodes.map((code) => ({
+      path: "sum.js",
+      message: `sum requires corrective implementation for ${code}`,
+      suggestedFix: `Update sum to satisfy ${code}`
+    }));
+    const result: ReviewResult = {
+      tasks: taskIds.map((id) => plan.verdict === "APPROVE" || id !== targetTaskId
+        ? { id, completionPercentage: 100, issues: [] }
+        : { id, completionPercentage: 0, issues })
+    };
+    return {
+      kind: "COMPLETED",
+      sessionId: "reviewer-session-s1",
+      finalResponse: result
+    };
+  }
 }
 
-type ReviewRequiredTurn = Extract<ReviewTurnOutput, { kind: "REVIEW_REQUIRED" }>;
-// The Revision under review is Daemon state, not Host-visible wire data.
-async function runRevision(store: StateStore, jobId: string): Promise<number | undefined> {
-  return (await store.readState()).runs[jobId]?.revision;
+function compositionFor(
+  harness: RuntimeHarness,
+  provider: WorkerProvider,
+  adapter: AgentAdapter
+): ProductionRuntimeComposition {
+  return new ProductionRuntimeComposition(
+    harness.dataDir,
+    undefined,
+    undefined,
+    provider,
+    Object.freeze({}),
+    undefined,
+    adapter,
+    { deadlineMs: 60_000, maxAttempts: 3 }
+  );
 }
-type ReviewTurnDriver = (
-  continuation?: Record<string, unknown>
-) => Promise<ReviewTurnOutput>;
 
-function createReviewTurnDriver(
+function runtimeFor(
+  harness: RuntimeHarness,
+  composition: ProductionRuntimeComposition
+): ProjectRuntime {
+  return new ProjectRuntime({
+    dataDirectory: harness.dataDir,
+    runPipeline: composition.runPipeline,
+    review: composition.review,
+    recover: composition.recover,
+    cancel: composition.cancel,
+    publish: composition.publish
+  });
+}
+
+async function pollReviewTurn(
   runtime: ProjectRuntime,
   scope: { projectId: string; jobId: string },
-  hostTurnId: string,
-  requestPrefix: string
-): ReviewTurnDriver {
-  let sequence = 0;
-  return async (continuation = {}): Promise<ReviewTurnOutput> => {
-    let next = continuation;
-    for (;;) {
-      sequence += 1;
-      const requestId = `${requestPrefix}-${String(sequence)}`;
-      const turn = await runtime.handle({
-        id: requestId,
-        method: "smartflow_review_turn",
-        payload: {
-          requestId,
-          projectId: scope.projectId,
-          jobId: scope.jobId,
-          hostTurnId,
-          ...next
-        }
-      }) as ReviewTurnOutput;
-      if (turn.kind !== "NOT_READY") return turn;
-      await new Promise<void>((settle) => setTimeout(settle, 20));
-      next = {};
-    }
-  };
-}
-
-async function submitReviewerResult(
-  nextTurn: ReviewTurnDriver,
-  turn: ReviewRequiredTurn,
-  review: NonNullable<HostActionCallbacks["review"]>
+  requestId: string,
+  continuation: Record<string, unknown> = {}
 ): Promise<ReviewTurnOutput> {
-  const output = await review({
-    worktreePath: turn.worktreePath,
-    changedPaths: [...turn.changedPaths],
-    reviewerSession: { ...turn.reviewerSession }
-  });
-  return nextTurn({
-    turnToken: turn.turnToken,
-    review: {
-      reviewerSessionId: output.reviewerSessionId,
-      result: output.result
+  return runtime.handle({
+    id: requestId,
+    method: "smartflow_review_turn",
+    payload: {
+      requestId,
+      projectId: scope.projectId,
+      jobId: scope.jobId,
+      hostTurnId: "host-turn-e2e",
+      ...continuation
     }
-  });
+  }) as Promise<ReviewTurnOutput>;
 }
 
-describe("production review repair loop", () => {
-  it("creates Revision N+1 through review_turn, invalidates evidence, and reruns", async () => {
+describe("production daemon Review repair loop", () => {
+  it("creates Revision N+1, invalidates evidence, and resumes one Reviewer session", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const tasksPath = resolve(harness.projectDir, "tasks.md");
     const tasksSource = createTasksSource({
-      tasks: `## M01 · Core
-
-- [ ] T001 Edit \`sum.js\` — 验收：Reviewer confirms the requested behavior`
+      tasks: "## M01 · Core\n\n- [ ] T001 Edit `sum.js` — 验收：Reviewer confirms the requested behavior"
     });
     await writeFile(tasksPath, tasksSource, "utf8");
 
@@ -312,33 +342,24 @@ describe("production review repair loop", () => {
         }
       }
     );
-    const composition = new ProductionRuntimeComposition(
-      harness.dataDir,
-      undefined,
-      undefined,
-      provider
-    );
-    const reviewPlans = new Map<number, {
-      verdict: "APPROVE" | "REQUEST_CHANGES";
-      findingCodes: string[];
-    }>([
-      [1, {
-        verdict: "REQUEST_CHANGES",
-        findingCodes: ["LEADER_EXPECTATION_MISSED"]
-      }],
-      [2, { verdict: "REQUEST_CHANGES", findingCodes: ["REPAIR_REQUIRED"] }],
-      [3, {
-        verdict: "REQUEST_CHANGES",
-        findingCodes: ["REPAIR_REQUIRED"]
-      }]
-    ]);
-    const runtime = new ProjectRuntime({
-      dataDirectory: harness.dataDir,
-      runPipeline: composition.runPipeline,
-      recover: composition.recover,
-      cancel: composition.cancel,
-      publish: composition.publish
+    let resolveScope!: (scope: { store: StateStore; jobId: string }) => void;
+    const scopeReady = new Promise<{ store: StateStore; jobId: string }>((settle) => {
+      resolveScope = settle;
     });
+    const adapter = new ScriptedReviewAdapter(
+      new Map([
+        [1, { verdict: "REQUEST_CHANGES", findingCodes: ["LEADER_EXPECTATION_MISSED"] }],
+        [2, { verdict: "REQUEST_CHANGES", findingCodes: ["REPAIR_REQUIRED"] }],
+        [3, { verdict: "APPROVE" }]
+      ]),
+      async () => {
+        const scope = await scopeReady;
+        return enabledTaskIdsForRun(scope.store, scope.jobId);
+      },
+      new Set([1, 2, 3])
+    );
+    const composition = compositionFor(harness, provider, adapter);
+    const runtime = runtimeFor(harness, composition);
     const execute = await runtime.handle({
       id: "execute-r1",
       method: "smartflow_execute",
@@ -349,25 +370,21 @@ describe("production review repair loop", () => {
         approvedSourceHash: sha256(tasksSource)
       }
     }) as { projectId: string; jobId: string };
-    const nextTurn = createReviewTurnDriver(
-      runtime,
-      execute,
-      "host-turn-repair-e2e",
-      "repair-turn"
-    );
     const store = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
-    const reviewer = createReviewCallback(
-      reviewPlans,
-      () => enabledTaskIdsForRun(store, execute.jobId)
-    );
+    resolveScope({ store, jobId: execute.jobId });
 
-    const firstReviewPending = await waitForState(
-      store,
-      execute.jobId,
-      (state) => state.runs[execute.jobId]?.phase === "REVIEW_PENDING"
-    );
-    const firstRun = firstReviewPending.runs[execute.jobId];
+    await adapter.waitForCalls(1);
+    const firstState = await store.readState();
+    const firstRun = firstState.runs[execute.jobId];
     if (firstRun === undefined) throw new Error("first revision missing");
+    expect(firstRun).toMatchObject({
+      revision: 1,
+      phase: "REVIEWING",
+      hostTurn: {
+        stage: "AWAITING_REVIEW",
+        hostTurnId: DAEMON_REVIEWER_HOST_TURN_ID
+      }
+    });
     const firstEvidence = {
       taskManifest: firstRun.taskManifest,
       candidate: firstRun.candidate,
@@ -375,538 +392,350 @@ describe("production review repair loop", () => {
       attemptId: firstRun.workerAttempts.at(-1)?.attemptId,
       sessionId: firstRun.workerAttempts.at(-1)?.piSessionId
     };
-    expect(firstEvidence.candidate).toBeDefined();
-    expect(firstEvidence.candidateHash).toBeDefined();
+    expect(await pollReviewTurn(runtime, execute, "poll-reviewing-r1"))
+      .toEqual({ kind: "NOT_READY", retryAfterMs: 30_000 });
 
-    const firstTurn = await nextTurn();
-    if (firstTurn.kind !== "REVIEW_REQUIRED") {
-      throw new Error("first revision did not request Review");
-    }
-    const secondTurnPromise = submitReviewerResult(nextTurn, firstTurn, reviewer.review);
-    expect(await readFile(tasksPath, "utf8")).toBe(tasksSource);
+    adapter.release(1);
     await revision2Scheduled;
-
     const cleanRevision = await store.readState();
     const cleanRun = cleanRevision.runs[execute.jobId];
-    if (cleanRun === undefined) throw new Error("second revision missing");
     expect(cleanRun).toMatchObject({ revision: 2, phase: "RUNNING" });
-    expect(cleanRun.taskManifest.sha256).not.toBe(firstEvidence.taskManifest.sha256);
-    expect(cleanRun.candidate).toBeUndefined();
-    expect(cleanRun.review).toBeUndefined();
-    expect(cleanRun.leaderDecision).toBeUndefined();
-    expect(cleanRun.pendingAction).toBeUndefined();
+    expect(cleanRun?.taskManifest.sha256).not.toBe(firstEvidence.taskManifest.sha256);
+    expect(cleanRun?.candidate).toBeUndefined();
+    expect(cleanRun?.review).toBeUndefined();
+    expect(cleanRun?.leaderDecision).toBeUndefined();
+    expect(cleanRun?.pendingAction).toBeUndefined();
 
     releaseRevision2();
-    const secondTurn = await secondTurnPromise;
-    if (
-      secondTurn.kind !== "REVIEW_REQUIRED" ||
-      await runRevision(store, execute.jobId) !== 2
-    ) {
-      throw new Error("second revision did not request Review");
-    }
-    const secondReviewPending = await store.readState();
-    const secondRun = secondReviewPending.runs[execute.jobId];
-    if (secondRun === undefined) throw new Error("second review revision missing");
-    expect(secondRun.candidate?.sha256).not.toBe(firstEvidence.candidate?.sha256);
-    expect(secondRun.pendingAction?.candidateHash).not.toBe(firstEvidence.candidateHash);
-    expect(secondRun.workerAttempts.at(-1)?.attemptId).not.toBe(firstEvidence.attemptId);
-    expect(secondRun.workerAttempts.at(-1)?.piSessionId).not.toBe(firstEvidence.sessionId);
-    expect(provider.starts.map((start) => start.revision)).toEqual([1, 2]);
+    await adapter.waitForCalls(2);
+    const secondRun = (await store.readState()).runs[execute.jobId];
+    expect(secondRun).toMatchObject({ revision: 2, phase: "REVIEWING" });
+    expect(secondRun?.candidate?.sha256).not.toBe(firstEvidence.candidate?.sha256);
+    expect(secondRun?.pendingAction?.candidateHash).not.toBe(firstEvidence.candidateHash);
+    expect(secondRun?.workerAttempts.at(-1)?.attemptId).not.toBe(firstEvidence.attemptId);
+    expect(secondRun?.workerAttempts.at(-1)?.piSessionId).not.toBe(firstEvidence.sessionId);
 
-    const thirdTurn = await submitReviewerResult(nextTurn, secondTurn, reviewer.review);
-    if (
-      thirdTurn.kind !== "REVIEW_REQUIRED" ||
-      await runRevision(store, execute.jobId) !== 3
-    ) {
-      throw new Error("third revision did not request Review");
-    }
-    await new Promise<void>((settle) => setTimeout(settle, 100));
-    const finalRun = (await store.readState()).runs[execute.jobId];
-    expect(finalRun).toMatchObject({
-      revision: 3,
-      phase: "REVIEWING",
-      noProgressCount: 0,
-      hostTurn: { stage: "AWAITING_REVIEW" }
-    });
-    expect(finalRun?.pendingAction).not.toHaveProperty("claimId");
-    expect(finalRun?.pendingAction).not.toHaveProperty("claimExpiresAt");
-    expect(provider.starts.map((start) => start.revision)).toEqual([1, 2, 3]);
-    expect(finalRun?.reviewHistory?.map((entry) => entry.reviewerSessionId))
+    adapter.release(2);
+    await adapter.waitForCalls(3);
+    const thirdRun = (await store.readState()).runs[execute.jobId];
+    expect(thirdRun).toMatchObject({ revision: 3, phase: "REVIEWING" });
+    expect(thirdRun?.pendingAction).not.toHaveProperty("claimId");
+    expect(thirdRun?.pendingAction).not.toHaveProperty("claimExpiresAt");
+    expect(thirdRun?.reviewHistory?.map((entry) => entry.reviewerSessionId))
       .toEqual(["reviewer-session-s1", "reviewer-session-s1"]);
-    expect(reviewer.observations.map((observation) => observation.sessionMode))
-      .toEqual(["CREATE", "RESUME"]);
-    expect(reviewer.observations[0]?.tasksSource).toBe(tasksSource);
-    expect(reviewer.observations[1]?.tasksSource).toBe(tasksSource);
-    expect(reviewer.observations[0]?.implementationSource)
-      .toContain('implementedRevision = "1"');
-    expect(reviewer.observations[1]?.implementationSource)
-      .toContain('implementedRevision = "stable"');
-  }, 30_000);
+    expect(adapter.calls.map((call) => call.mode)).toEqual(["CREATE", "RESUME", "RESUME"]);
+    expect(adapter.calls[0]?.tasksSource).toBe(tasksSource);
+    expect(adapter.calls[1]?.tasksSource).toBe(tasksSource);
+    expect(adapter.calls[0]?.implementationSource).toContain('implementedRevision = "1"');
+    expect(adapter.calls[1]?.implementationSource).toContain('implementedRevision = "stable"');
 
-  it("ignores issue wording/count changes and resets no-progress when the Candidate path changes", async () => {
-    const harness = await createRuntimeHarness();
-    activeHarnesses.push(harness);
-    const tasksPath = resolve(harness.projectDir, "tasks.md");
-    const tasksSource = createTasksSource({
-      tasks: `## M01 · Core
-
-- [ ] T001 Edit \`sum.js\` — 验收：Reviewer confirms the requested behavior`
-    });
-    await writeFile(tasksPath, tasksSource, "utf8");
-    const provider = new RepairLoopProvider((revision) => revision <= 2 ? "stable" : "changed");
-    const composition = new ProductionRuntimeComposition(
-      harness.dataDir,
-      undefined,
-      undefined,
-      provider
-    );
-    const reviewPlans = new Map<number, {
-      verdict: "APPROVE" | "REQUEST_CHANGES";
-      findingCodes: string[];
-    }>();
-    const runtime = new ProjectRuntime({
-      dataDirectory: harness.dataDir,
-      runPipeline: composition.runPipeline,
-      recover: composition.recover,
-      cancel: composition.cancel,
-      publish: composition.publish
-    });
-    const execute = await runtime.handle({
-      id: "execute-mixed-progress",
-      method: "smartflow_execute",
-      payload: {
-        requestId: "execute-mixed-progress",
-        projectRoot: harness.projectDir,
-        tasksPath: "tasks.md",
-        approvedSourceHash: sha256(tasksSource)
-      }
-    }) as { projectId: string; jobId: string };
-    const nextTurn = createReviewTurnDriver(
-      runtime,
-      execute,
-      "host-turn-mixed-progress",
-      "mixed-progress-turn"
-    );
-    const store = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
-    const reviewer = createReviewCallback(
-      reviewPlans,
-      () => enabledTaskIdsForRun(store, execute.jobId)
-    );
-    const candidateHashes = new Map<number, string>();
-
-    const completeRound = async (
-      revision: number,
-      findingCodes: string[],
-      expectedCount: number,
-      expectedOutcome: "NEXT_REVISION" | "REPAIR_NO_PROGRESS",
-      requestedTurn?: ReviewRequiredTurn
-    ): Promise<void> => {
-      reviewPlans.set(revision, { verdict: "REQUEST_CHANGES", findingCodes });
-      const requested = requestedTurn ?? await nextTurn();
-      if (
-        requested.kind !== "REVIEW_REQUIRED" ||
-        await runRevision(store, execute.jobId) !== revision
-      ) {
-        throw new Error(`revision ${String(revision)} did not request Review`);
-      }
-      const run = (await store.readState()).runs[execute.jobId];
-      if (run?.candidate === undefined) throw new Error("candidate missing from repair round");
-      const candidate = JSON.parse(
-        new TextDecoder().decode(await store.readArtifact(run.candidate))
-      ) as { operations: Array<{ newEntry?: { sha256: string } }> };
-      const relevantPathHash = candidate.operations[0]?.newEntry?.sha256;
-      if (relevantPathHash === undefined) throw new Error("candidate path hash missing");
-      candidateHashes.set(revision, relevantPathHash);
-
-      const response = await submitReviewerResult(nextTurn, requested, reviewer.review);
-      const afterReview = (await store.readState()).runs[execute.jobId];
-      expect(afterReview?.noProgressCount).toBe(expectedCount);
-      if (expectedOutcome === "REPAIR_NO_PROGRESS") {
-        expect(response).toMatchObject({
-          kind: "USER_INPUT_REQUIRED",
-          pause: { code: "REPAIR_NO_PROGRESS" }
-        });
-        return;
-      }
-      expect(response).toMatchObject({ kind: "REVIEW_REQUIRED" });
-      expect(await runRevision(store, execute.jobId)).toBe(revision + 1);
-    };
-
-    await completeRound(1, ["A", "B", "C"], 0, "NEXT_REVISION");
-    await completeRound(2, ["A", "B"], 1, "NEXT_REVISION");
-    expect(candidateHashes.get(2)).toBe(candidateHashes.get(1));
-    await completeRound(3, ["A"], 0, "NEXT_REVISION");
-    expect(candidateHashes.get(3)).not.toBe(candidateHashes.get(2));
-    for (let revision = 4; revision < 16; revision += 1) {
-      await completeRound(revision, ["A"], revision - 3, "NEXT_REVISION");
-    }
-
-    reviewPlans.set(16, { verdict: "REQUEST_CHANGES", findingCodes: ["A"] });
-    const limitedReview = await nextTurn();
-    if (
-      limitedReview.kind !== "REVIEW_REQUIRED" ||
-      await runRevision(store, execute.jobId) !== 16
-    ) {
-      throw new Error("revision 16 did not request Review");
-    }
-    const limitPause = await submitReviewerResult(nextTurn, limitedReview, reviewer.review);
-    expect((await store.readState()).runs[execute.jobId]?.noProgressCount).toBe(12);
-    expect(limitPause).toMatchObject({
-      kind: "USER_INPUT_REQUIRED",
-      pause: { code: "AUTOMATIC_REPAIR_LIMIT" }
-    });
-    if (limitPause.kind !== "USER_INPUT_REQUIRED") {
-      throw new Error("automatic repair limit did not require user input");
-    }
-    expect(limitPause.options.map((option) => option.answer))
-      .toContain("resume_review_decision");
-
-    const revision17 = await nextTurn({
-      turnToken: limitPause.turnToken,
-      answer: "resume_review_decision"
-    });
-    expect((await store.readState()).runs[execute.jobId]?.noProgressCount).toBe(13);
-    if (
-      revision17.kind !== "REVIEW_REQUIRED" ||
-      await runRevision(store, execute.jobId) !== 17
-    ) {
-      throw new Error("revision 17 did not request Review after the repair-limit pause");
-    }
-    await completeRound(17, ["A"], 14, "NEXT_REVISION", revision17);
-    await completeRound(18, ["A"], 15, "REPAIR_NO_PROGRESS");
-    await new Promise<void>((settle) => setTimeout(settle, 100));
-    const finalRun = (await store.readState()).runs[execute.jobId];
-    expect(finalRun?.recovery?.repairDraft).toBeUndefined();
-    expect(finalRun?.pendingAction).toBeUndefined();
-    expect(provider.starts.map((start) => start.revision))
-      .toEqual(Array.from({ length: 18 }, (_, index) => index + 1));
-    expect(reviewer.observations.map((observation) => observation.sessionMode))
-      .toEqual(["CREATE", ...Array.from({ length: 17 }, () => "RESUME")]);
-  }, 60_000);
-
-  it("keeps the durable Host-turn deadline authoritative across restart", async () => {
-    const harness = await createRuntimeHarness();
-    activeHarnesses.push(harness);
-    const tasksSource = createTasksSource({
-      tasks: `## M01 · Core
-
-- [ ] T001 Edit \`sum.js\` — 验收：Reviewer confirms the requested behavior`
-    });
-    await writeFile(resolve(harness.projectDir, "tasks.md"), tasksSource, "utf8");
-    const provider = new RepairLoopProvider();
-    const composition = new ProductionRuntimeComposition(
-      harness.dataDir,
-      undefined,
-      undefined,
-      provider
-    );
-    let runtime = new ProjectRuntime({
-      dataDirectory: harness.dataDir,
-      runPipeline: composition.runPipeline,
-      recover: composition.recover,
-      cancel: composition.cancel,
-      publish: composition.publish
-    });
-    const execute = await runtime.handle({
-      id: "host-recovery-execute",
-      method: "smartflow_execute",
-      payload: {
-        requestId: "host-recovery-execute",
-        projectRoot: harness.projectDir,
-        tasksPath: "tasks.md",
-        approvedSourceHash: sha256(tasksSource)
-      }
-    }) as { projectId: string; jobId: string };
-    const store = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
+    adapter.release(3);
     await waitForState(
       store,
       execute.jobId,
-      (state) => state.runs[execute.jobId]?.phase === "REVIEW_PENDING"
+      (state) => state.runs[execute.jobId]?.phase === "COMPLETED",
+      15_000
     );
-    const requested = await runtime.handle({
-      id: "host-recovery-begin",
-      method: "smartflow_review_turn",
-      payload: {
-        requestId: "host-recovery-begin",
-        projectId: execute.projectId,
-        jobId: execute.jobId,
-        hostTurnId: "host-recovery-owner"
-      }
-    }) as ReviewTurnOutput;
-    expect(requested.kind).toBe("REVIEW_REQUIRED");
-
-    const reviewingState = await store.readState();
-    const reviewingRun = reviewingState.runs[execute.jobId];
-    if (reviewingRun?.hostTurn?.stage !== "AWAITING_REVIEW") {
-      throw new Error("durable review turn fixture missing");
-    }
-    expect(reviewingRun.pendingAction).not.toHaveProperty("claimId");
-    expect(reviewingRun.pendingAction).not.toHaveProperty("claimExpiresAt");
-    const expiredAt = new Date(Date.now() - 1).toISOString();
-    await store.writeState({
-      ...reviewingState,
-      stateVersion: reviewingState.stateVersion + 1,
-      runs: {
-        ...reviewingState.runs,
-        [execute.jobId]: {
-          ...reviewingRun,
-          hostTurn: {
-            ...reviewingRun.hostTurn,
-            deadlineAt: expiredAt
-          },
-          updatedAt: expiredAt
-        }
-      },
-      updatedAt: expiredAt
-    });
-    runtime.dispose();
-
-    const legacyRecover = vi.fn(composition.recover);
-    runtime = new ProjectRuntime({
-      dataDirectory: harness.dataDir,
-      runPipeline: composition.runPipeline,
-      recover: legacyRecover,
-      cancel: composition.cancel,
-      publish: composition.publish
-    });
-
-    await expect(runtime.recover()).resolves.toBeUndefined();
-    expect((await store.readState()).runs[execute.jobId]).toMatchObject({
-      phase: "PAUSED",
-      pause: { code: "HOST_REVIEW_UNAVAILABLE" },
-      hostTurn: {
-        stage: "AWAITING_USER_INPUT",
-        hostTurnId: "host-recovery-owner"
-      }
-    });
-    expect(legacyRecover).not.toHaveBeenCalled();
-    runtime.dispose();
+    expect(provider.starts.map((start) => start.revision)).toEqual([1, 2, 3]);
   }, 30_000);
 
-  it("drives repair and publish using only execute plus review_turn", async () => {
+  it("pauses at the repair limit and later detects no progress", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const tasksSource = createTasksSource({
-      tasks: `## M01 · Core
-
-- [ ] T001 Edit \`sum.js\` — 验收：Reviewer confirms the requested behavior`
+      tasks: "## M01 · Core\n\n- [ ] T001 Edit `sum.js` — 验收：Reviewer confirms the requested behavior"
     });
     await writeFile(resolve(harness.projectDir, "tasks.md"), tasksSource, "utf8");
-    const provider = new RepairLoopProvider((revision) => revision === 1 ? "1" : "stable");
-    const composition = new ProductionRuntimeComposition(
-      harness.dataDir,
-      undefined,
-      undefined,
-      provider
-    );
-    let runtime = new ProjectRuntime({
-      dataDirectory: harness.dataDir,
-      runPipeline: composition.runPipeline,
-      recover: composition.recover,
-      cancel: composition.cancel,
-      publish: composition.publish
+    const provider = new RepairLoopProvider((revision) => revision <= 2 ? "stable" : "changed");
+    // The adapter is constructed before the Run exists, so it reads the Run
+    // identity through a holder that the execute call fills in later.
+    const reviewRef: { store?: StateStore; jobId?: string } = {};
+    const adapter = new ScriptedReviewAdapter(new Map(), async () => {
+      if (reviewRef.store === undefined || reviewRef.jobId === undefined) {
+        await new Promise<void>((settle) => setTimeout(settle, 0));
+      }
+      const { store: reviewStore, jobId: reviewJobId } = reviewRef;
+      if (reviewStore === undefined || reviewJobId === undefined) {
+        throw new Error("review store not ready");
+      }
+      return enabledTaskIdsForRun(reviewStore, reviewJobId);
     });
+    const composition = compositionFor(harness, provider, adapter);
+    const runtime = runtimeFor(harness, composition);
     const execute = await runtime.handle({
-      id: "review-turn-execute",
+      id: "execute-no-progress",
       method: "smartflow_execute",
       payload: {
-        requestId: "review-turn-execute",
+        requestId: "execute-no-progress",
         projectRoot: harness.projectDir,
         tasksPath: "tasks.md",
         approvedSourceHash: sha256(tasksSource)
       }
     }) as { projectId: string; jobId: string };
-    const turnStore = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
-    let sequence = 0;
-    const nextTurn = async (
-      continuation: Record<string, unknown> = {}
-    ): Promise<ReviewTurnOutput> => {
-      let next = continuation;
-      for (;;) {
-        sequence += 1;
-        const turn = await runtime.handle({
-          id: `review-turn-${String(sequence)}`,
-          method: "smartflow_review_turn",
-          payload: {
-            requestId: `review-turn-${String(sequence)}`,
-            projectId: execute.projectId,
-            jobId: execute.jobId,
-            hostTurnId: "host-turn-e2e",
-            ...next
-          }
-        }) as ReviewTurnOutput;
-        if (turn.kind !== "NOT_READY") return turn;
-        await new Promise<void>((settle) => setTimeout(settle, 20));
-        next = {};
-      }
-    };
+    const jobId = execute.jobId;
+    const store = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
+    reviewRef.jobId = jobId;
+    reviewRef.store = store;
 
-    const first = await nextTurn();
-    expect(first).toMatchObject({
-      kind: "REVIEW_REQUIRED",
-      reviewerSession: { mode: "CREATE" }
-    });
-    if (first.kind !== "REVIEW_REQUIRED") throw new Error("first review was not requested");
-    runtime.dispose();
-    runtime = new ProjectRuntime({
-      dataDirectory: harness.dataDir,
-      runPipeline: composition.runPipeline,
-      recover: composition.recover,
-      cancel: composition.cancel,
-      publish: composition.publish
-    });
-    let recovered!: ReviewTurnOutput;
-    let stateVersionAfterRecovery: number | undefined;
-    let stateVersionAfterOneMinute: number | undefined;
-    let pendingActionAfterOneMinute: Record<string, unknown> | undefined;
-    vi.useFakeTimers();
-    try {
-      await runtime.recover();
-      recovered = await nextTurn();
-      stateVersionAfterRecovery = (await turnStore.readState()).stateVersion;
-      await vi.advanceTimersByTimeAsync(60_000);
-      const afterOneMinute = await turnStore.readState();
-      stateVersionAfterOneMinute = afterOneMinute.stateVersion;
-      pendingActionAfterOneMinute = afterOneMinute.runs[execute.jobId]?.pendingAction;
-    } finally {
-      vi.useRealTimers();
-    }
-    expect(stateVersionAfterOneMinute).toBe(stateVersionAfterRecovery);
-    expect(pendingActionAfterOneMinute).toBeDefined();
-    expect(pendingActionAfterOneMinute).not.toHaveProperty("claimId");
-    expect(pendingActionAfterOneMinute).not.toHaveProperty("claimExpiresAt");
-    expect(recovered).toMatchObject({
-      kind: "REVIEW_REQUIRED",
-      turnToken: first.turnToken,
-      reviewerSession: { mode: "CREATE" }
-    });
-    if (recovered.kind !== "REVIEW_REQUIRED") {
-      throw new Error("review turn was not recovered after daemon restart");
-    }
-    const beforeTimeout = await turnStore.readState();
-    const timeoutRun = beforeTimeout.runs[execute.jobId];
-    if (timeoutRun?.hostTurn?.stage !== "AWAITING_REVIEW") {
-      throw new Error("recovered Host turn is not awaiting review");
-    }
-    const timeoutAt = new Date().toISOString();
-    await turnStore.writeState({
-      ...beforeTimeout,
-      stateVersion: beforeTimeout.stateVersion + 1,
-      runs: {
-        ...beforeTimeout.runs,
-        [execute.jobId]: {
-          ...timeoutRun,
-          hostTurn: {
-            ...timeoutRun.hostTurn,
-            deadlineAt: new Date(Date.now() - 1).toISOString()
-          },
-          updatedAt: timeoutAt
-        }
-      },
-      updatedAt: timeoutAt
-    });
-    const timedOut = await nextTurn();
-    expect(timedOut).toMatchObject({
+    await waitForState(
+      store,
+      jobId,
+      (state) => state.runs[jobId]?.pause?.code === "AUTOMATIC_REPAIR_LIMIT",
+      40_000
+    );
+    const limited = await pollReviewTurn(runtime, execute, "repair-limit-prompt");
+    expect(limited).toMatchObject({
       kind: "USER_INPUT_REQUIRED",
-      pause: { code: "HOST_REVIEW_UNAVAILABLE" }
+      pause: { code: "AUTOMATIC_REPAIR_LIMIT" }
     });
-    if (timedOut.kind !== "USER_INPUT_REQUIRED") {
-      throw new Error("expired review turn did not require user input");
-    }
-    expect(timedOut.options.map((option) => option.answer)).toContain("retry_host_review");
-    const retried = await nextTurn({
-      turnToken: timedOut.turnToken,
-      answer: "retry_host_review"
+    if (limited.kind !== "USER_INPUT_REQUIRED") throw new Error("repair limit prompt missing");
+    expect(limited.options.map((option) => option.answer)).toContain("resume_review_decision");
+
+    expect(await pollReviewTurn(runtime, execute, "repair-limit-resume", {
+      turnToken: limited.turnToken,
+      answer: "resume_review_decision"
+    })).toEqual({ kind: "NOT_READY", retryAfterMs: 30_000 });
+
+    const noProgress = await waitForState(
+      store,
+      jobId,
+      (state) => state.runs[jobId]?.pause?.code === "REPAIR_NO_PROGRESS",
+      40_000
+    );
+    expect(noProgress.runs[jobId]).toMatchObject({
+      phase: "PAUSED",
+      noProgressCount: 15,
+      pause: { code: "REPAIR_NO_PROGRESS" }
     });
-    expect(retried).toMatchObject({
-      kind: "REVIEW_REQUIRED",
-      reviewerSession: { mode: "CREATE" }
+    expect(noProgress.runs[jobId]?.hostTurn).toBeUndefined();
+    expect(noProgress.runs[jobId]?.pendingAction).toBeUndefined();
+    expect(adapter.calls.map((call) => call.mode)).toEqual([
+      "CREATE",
+      ...Array.from({ length: adapter.calls.length - 1 }, () => "RESUME" as const)
+    ]);
+    expect(adapter.calls).toHaveLength(18);
+    expect(provider.starts.map((start) => start.revision))
+      .toEqual(Array.from({ length: 18 }, (_, index) => index + 1));
+  }, 90_000);
+
+  it("uses only execute plus review_turn while daemon Review repairs and publishes", async () => {
+    const harness = await createRuntimeHarness();
+    activeHarnesses.push(harness);
+    const tasksSource = createTasksSource({
+      tasks: "## M01 · Core\n\n- [ ] T001 Edit `sum.js` — 验收：Reviewer confirms the requested behavior"
     });
-    if (retried.kind !== "REVIEW_REQUIRED") {
-      throw new Error("expired review turn was not reissued");
-    }
-    expect(retried.turnToken).not.toBe(first.turnToken);
-    const incompleteIssue = {
-      path: "sum.js",
-      message: "sum in the first revision needs a corrective implementation",
-      suggestedFix: "Update sum to satisfy the approved task"
-    };
-    const beforeLimit = await turnStore.readState();
-    const limitedRun = beforeLimit.runs[execute.jobId];
-    if (limitedRun === undefined) throw new Error("run missing before repair-limit test");
-    const limitedAt = new Date().toISOString();
-    await turnStore.writeState({
-      ...beforeLimit,
-      stateVersion: beforeLimit.stateVersion + 1,
-      runs: {
-        ...beforeLimit.runs,
-        [execute.jobId]: {
-          ...limitedRun,
-          autoRepairRounds: 15,
-          updatedAt: limitedAt
+    await writeFile(resolve(harness.projectDir, "tasks.md"), tasksSource, "utf8");
+    const provider = new RepairLoopProvider((revision) => revision === 1 ? "1" : "stable");
+    // The adapter is constructed before the Run exists, so it reads the Run
+    // identity through a holder that the execute call fills in later.
+    const reviewRef: { store?: StateStore; jobId?: string } = {};
+    const adapter = new ScriptedReviewAdapter(
+      new Map([
+        [1, { verdict: "REQUEST_CHANGES", findingCodes: ["FIRST_REVISION_INCOMPLETE"] }],
+        [2, { verdict: "APPROVE" }]
+      ]),
+      async () => {
+        if (reviewRef.store === undefined || reviewRef.jobId === undefined) {
+          await new Promise<void>((settle) => setTimeout(settle, 0));
         }
+        const { store: reviewStore, jobId: reviewJobId } = reviewRef;
+        if (reviewStore === undefined || reviewJobId === undefined) {
+          throw new Error("review store not ready");
+        }
+        return enabledTaskIdsForRun(reviewStore, reviewJobId);
       },
-      updatedAt: limitedAt
+      new Set([1, 2])
+    );
+    const composition = compositionFor(harness, provider, adapter);
+    const runtime = runtimeFor(harness, composition);
+    const toolNames: string[] = [];
+    const call = async (method: "smartflow_execute" | "smartflow_review_turn", payload: unknown): Promise<unknown> => {
+      toolNames.push(method);
+      return runtime.handle({ id: `${method}-${String(toolNames.length)}`, method, payload });
+    };
+    const execute = await call("smartflow_execute", {
+      requestId: "review-turn-execute",
+      projectRoot: harness.projectDir,
+      tasksPath: "tasks.md",
+      approvedSourceHash: sha256(tasksSource)
+    }) as { projectId: string; jobId: string };
+    const jobId = execute.jobId;
+    const store = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
+    reviewRef.jobId = jobId;
+    reviewRef.store = store;
+
+    await adapter.waitForCalls(1);
+    const firstReviewing = await store.readState();
+    const firstRun = firstReviewing.runs[jobId];
+    if (firstRun === undefined) throw new Error("first review run missing");
+    await store.writeState({
+      ...firstReviewing,
+      stateVersion: firstReviewing.stateVersion + 1,
+      runs: {
+        ...firstReviewing.runs,
+        [jobId]: { ...firstRun, autoRepairRounds: 15, updatedAt: new Date().toISOString() }
+      },
+      updatedAt: new Date().toISOString()
     });
-    const paused = await nextTurn({
-      turnToken: retried.turnToken,
-      review: {
-        reviewerSessionId: "reviewer-session-review-turn",
-        result: {
-          tasks: [{
-            id: "T001",
-            completionPercentage: 50,
-            issues: [incompleteIssue]
-          }]
-        }
-      }
-    });
+    const firstPoll = await call("smartflow_review_turn", {
+      requestId: "review-turn-poll-1",
+      projectId: execute.projectId,
+      jobId,
+      hostTurnId: "host-turn-e2e"
+    }) as ReviewTurnOutput;
+    expect(firstPoll).toEqual({ kind: "NOT_READY", retryAfterMs: 30_000 });
+
+    adapter.release(1);
+    await waitForState(
+      store,
+      jobId,
+      (state) => state.runs[jobId]?.pause?.code === "AUTOMATIC_REPAIR_LIMIT",
+      15_000
+    );
+    const paused = await call("smartflow_review_turn", {
+      requestId: "review-turn-limit",
+      projectId: execute.projectId,
+      jobId,
+      hostTurnId: "host-turn-e2e"
+    }) as ReviewTurnOutput;
     expect(paused).toMatchObject({
       kind: "USER_INPUT_REQUIRED",
       pause: { code: "AUTOMATIC_REPAIR_LIMIT" },
       result: {
         review: {
-          tasks: [{ id: "T001", completionPercentage: 50 }]
+          tasks: [{ id: "T001", completionPercentage: 0 }]
         }
       }
     });
-    expect(JSON.stringify(paused)).not.toContain(first.worktreePath);
-    if (paused.kind !== "USER_INPUT_REQUIRED") {
-      throw new Error("repair limit did not require user input");
-    }
-    expect(paused.options.map((option) => option.answer)).toContain("resume_review_decision");
-    const second = await nextTurn({
+    expect(JSON.stringify(paused)).not.toContain(adapter.calls[0]?.request.cwd);
+    if (paused.kind !== "USER_INPUT_REQUIRED") throw new Error("repair limit prompt missing");
+
+    const resumed = await call("smartflow_review_turn", {
+      requestId: "review-turn-resume",
+      projectId: execute.projectId,
+      jobId,
+      hostTurnId: "host-turn-e2e",
       turnToken: paused.turnToken,
       answer: "resume_review_decision"
+    }) as ReviewTurnOutput;
+    expect(resumed).toEqual({ kind: "NOT_READY", retryAfterMs: 30_000 });
+    await adapter.waitForCalls(2);
+    expect(adapter.calls[1]).toMatchObject({
+      mode: "RESUME",
+      sessionId: "reviewer-session-s1"
     });
-    expect(second).toMatchObject({
-      kind: "REVIEW_REQUIRED",
-      reviewerSession: {
-        mode: "RESUME",
-        reviewerSessionId: "reviewer-session-review-turn"
-      }
-    });
-    if (second.kind !== "REVIEW_REQUIRED") throw new Error("second review was not requested");
-    const completedTaskIds = await enabledTaskIdsForRun(turnStore, execute.jobId);
-    const completed = await nextTurn({
-      turnToken: second.turnToken,
-      review: {
-        reviewerSessionId: "reviewer-session-review-turn",
-        result: {
-          tasks: completedTaskIds.map((id) => ({ id, completionPercentage: 100, issues: [] }))
-        }
-      }
-    });
-    expect(completed).toMatchObject({
+    expect(await call("smartflow_review_turn", {
+      requestId: "review-turn-poll-2",
+      projectId: execute.projectId,
+      jobId,
+      hostTurnId: "host-turn-e2e"
+    })).toEqual({ kind: "NOT_READY", retryAfterMs: 30_000 });
+
+    adapter.release(2);
+    await waitForState(
+      store,
+      jobId,
+      (state) => state.runs[jobId]?.phase === "COMPLETED",
+      15_000
+    );
+    const done = await call("smartflow_review_turn", {
+      requestId: "review-turn-done",
+      projectId: execute.projectId,
+      jobId,
+      hostTurnId: "host-turn-e2e"
+    }) as ReviewTurnOutput;
+    expect(done).toMatchObject({
       kind: "DONE",
-      result: { phase: "COMPLETED", status: "COMMITTED" }
+      result: {
+        phase: "COMPLETED",
+        status: "COMMITTED"
+      }
     });
+    if (done.kind !== "DONE") throw new Error("completed run did not return DONE");
+    expect(done.result.review?.tasks.every(
+      (task) => task.completionPercentage === 100 && task.issues.length === 0
+    )).toBe(true);
     expect(await readFile(resolve(harness.projectDir, "sum.js"), "utf8"))
       .toContain('implementedRevision = "stable"');
-    const finalRun = (await turnStore.readState()).runs[execute.jobId];
-    expect(finalRun?.autoRepairRounds).toBe(1);
-    expect(finalRun?.hostTurn).toBeUndefined();
     expect(provider.starts).toHaveLength(2);
-    runtime.dispose();
+    expect(new Set(toolNames)).toEqual(new Set([
+      "smartflow_execute",
+      "smartflow_review_turn"
+    ]));
   }, 60_000);
+
+  it("cancels daemon-owned Review while the Reviewer is running", async () => {
+    const harness = await createRuntimeHarness();
+    activeHarnesses.push(harness);
+    const tasksSource = createTasksSource({
+      tasks: "## M01 · Core\n\n- [ ] T001 Edit `sum.js` — 验收：Reviewer confirms the requested behavior"
+    });
+    await writeFile(resolve(harness.projectDir, "tasks.md"), tasksSource, "utf8");
+    const provider = new RepairLoopProvider();
+    const reviewRef: { store?: StateStore; jobId?: string } = {};
+    const adapter = new ScriptedReviewAdapter(
+      new Map([[1, { verdict: "APPROVE" }]]),
+      async () => {
+        if (reviewRef.store === undefined || reviewRef.jobId === undefined) {
+          await new Promise<void>((settle) => setTimeout(settle, 0));
+        }
+        const { store: reviewStore, jobId: reviewJobId } = reviewRef;
+        if (reviewStore === undefined || reviewJobId === undefined) {
+          throw new Error("review store not ready");
+        }
+        return enabledTaskIdsForRun(reviewStore, reviewJobId);
+      },
+      new Set([1])
+    );
+    const composition = compositionFor(harness, provider, adapter);
+    const runtime = runtimeFor(harness, composition);
+    const execute = await runtime.handle({
+      id: "execute-cancel-review",
+      method: "smartflow_execute",
+      payload: {
+        requestId: "execute-cancel-review",
+        projectRoot: harness.projectDir,
+        tasksPath: "tasks.md",
+        approvedSourceHash: sha256(tasksSource)
+      }
+    }) as { projectId: string; jobId: string };
+    const store = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
+    reviewRef.store = store;
+    reviewRef.jobId = execute.jobId;
+
+    await adapter.waitForCalls(1);
+    const reviewing = await store.readState();
+    const reviewingRun = reviewing.runs[execute.jobId];
+    expect(reviewingRun).toMatchObject({
+      phase: "REVIEWING",
+      hostTurn: { hostTurnId: DAEMON_REVIEWER_HOST_TURN_ID }
+    });
+    if (reviewingRun === undefined) throw new Error("reviewing run missing");
+
+    await expect(runtime.handle({
+      id: "cancel-running-review",
+      method: "smartflow_cancel",
+      payload: {
+        requestId: "cancel-running-review",
+        projectId: execute.projectId,
+        jobId: execute.jobId,
+        reason: "user canceled daemon review",
+        expectedRevision: reviewingRun.revision,
+        expectedStateVersion: reviewing.stateVersion
+      }
+    })).resolves.toMatchObject({ phase: "CANCELING" });
+
+    const canceled = await waitForState(
+      store,
+      execute.jobId,
+      (state) => state.runs[execute.jobId]?.phase === "CANCELED",
+      15_000
+    );
+    const canceledRun = canceled.runs[execute.jobId];
+    expect(canceledRun).toMatchObject({
+      phase: "CANCELED",
+      cancellation: { status: "COMPLETED" }
+    });
+    expect(canceledRun).not.toHaveProperty("hostTurn");
+  }, 30_000);
 });

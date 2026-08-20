@@ -18,6 +18,14 @@ import {
 import { StateStore, type HostTurn, type ProjectState, type RunRecord } from "@smartflow/state-store";
 import { taskManifestSchema } from "@smartflow/task-manifest";
 
+export const DAEMON_REVIEWER_HOST_TURN_ID = "daemon-reviewer";
+
+export function isDaemonReviewerHostTurn(
+  turn: HostTurn | undefined
+): turn is HostTurn & { hostTurnId: typeof DAEMON_REVIEWER_HOST_TURN_ID } {
+  return turn?.hostTurnId === DAEMON_REVIEWER_HOST_TURN_ID;
+}
+
 export interface ReviewMutation<T> {
   nextState: ProjectState;
   response: T;
@@ -73,7 +81,10 @@ function verifyDurableDecision(decision: DurableReviewDecision): boolean {
   return hash(body) === reviewHash;
 }
 
-function assertTaskCoverage(expectedTaskIds: readonly string[], result: ReviewResult): void {
+export function assertReviewTaskCoverage(
+  expectedTaskIds: readonly string[],
+  result: ReviewResult
+): void {
   const reviewedTaskIds = new Set(result.tasks.map((task) => task.id));
   if (
     reviewedTaskIds.size !== expectedTaskIds.length ||
@@ -244,7 +255,7 @@ export class ReviewCoordinator {
       new TextDecoder().decode(await this.store.readArtifact(run.taskManifest))
     ));
     const reviewResult = reviewResultSchema.parse(input.result);
-    assertTaskCoverage(manifest.enabledTaskIds, reviewResult);
+    assertReviewTaskCoverage(manifest.enabledTaskIds, reviewResult);
     const gate = evaluateReviewGate(
       {
         reviewAttemptId: action.reviewAttemptId,

@@ -1,0 +1,72 @@
+#!/usr/bin/env node
+
+import { randomUUID } from "node:crypto";
+import { appendFile, readFile, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+
+const argv = process.argv.slice(2);
+if (argv.length === 1 && argv[0] === "--version") {
+  process.stdout.write("codex-cli smartflow-installed-test\n");
+  process.exit(0);
+}
+if (argv[0] !== "exec") throw new Error(`Unsupported fake Codex argv: ${JSON.stringify(argv)}`);
+
+function option(name) {
+  const index = argv.indexOf(name);
+  const value = index < 0 ? undefined : argv[index + 1];
+  if (value === undefined) throw new Error(`Fake Codex requires ${name}`);
+  return value;
+}
+
+const resume = argv[1] === "resume";
+const sessionId = resume ? argv[2] : `installed-review-${randomUUID()}`;
+if (sessionId === undefined || sessionId.length === 0) {
+  throw new Error("Fake Codex resume requires a session ID");
+}
+const cwd = option("--cd");
+const outputPath = option("--output-last-message");
+const prompt = argv.at(-1);
+if (prompt === undefined) throw new Error("Fake Codex requires a prompt");
+const marker = process.env.SMARTFLOW_TEST_REPAIR_MARKER;
+if (marker === undefined || marker.length === 0) {
+  throw new Error("SMARTFLOW_TEST_REPAIR_MARKER is required");
+}
+
+const taskIds = [...new Set(
+  [...prompt.matchAll(/"id":\s*"(T\d{3,})"/gu)].map((match) => match[1])
+)];
+if (taskIds.length === 0 || taskIds.some((taskId) => taskId === undefined)) {
+  throw new Error("Fake Codex could not read approved Task IDs from the prompt");
+}
+const reviewsPrimaryTask = taskIds.includes("T057");
+const source = reviewsPrimaryTask ? await readFile(resolve(cwd, "sum.js"), "utf8") : "";
+const markerPresent = !reviewsPrimaryTask || source.includes(marker);
+const issue = {
+  path: "sum.js",
+  message: `The authorized dynamic repair marker is missing from sum.js: ${marker}`,
+  suggestedFix: `Add this exact standalone comment to sum.js: ${marker}`
+};
+const result = {
+  tasks: taskIds.map((id) => markerPresent
+    ? { id, completionPercentage: 100, issues: [] }
+    : { id, completionPercentage: 50, issues: [issue] })
+};
+await writeFile(outputPath, JSON.stringify(result), "utf8");
+
+const tracePath = process.env.SMARTFLOW_TEST_CODEX_TRACE;
+if (tracePath !== undefined && tracePath.length > 0) {
+  await appendFile(tracePath, `${JSON.stringify({
+    mode: resume ? "RESUME" : "CREATE",
+    sessionId,
+    cwd,
+    outputPath,
+    taskIds,
+    markerPresent
+  })}\n`, "utf8");
+}
+
+process.stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: sessionId })}\n`);
+process.stdout.write(`${JSON.stringify({
+  type: "turn.completed",
+  usage: { input_tokens: 1, output_tokens: 1 }
+})}\n`);

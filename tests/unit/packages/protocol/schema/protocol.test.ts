@@ -18,7 +18,7 @@ import {
 
 const digest = "a".repeat(64);
 
-describe("smartflow.v5 protocol schemas", () => {
+describe("smartflow.v6 protocol schemas", () => {
   it("defines exactly the six public MCP tools without manual Review primitives", () => {
     expect(Object.keys(mcpToolSchemas).sort()).toEqual([
       "smartflow_cancel",
@@ -43,7 +43,7 @@ describe("smartflow.v5 protocol schemas", () => {
 
     const notReady = {
       kind: "NOT_READY" as const,
-      retryAfterMs: 1_000
+      retryAfterMs: 30_000
     };
     expect(reviewTurnOutputSchema.parse(notReady)).toEqual(notReady);
     expect(reviewTurnOutputSchema.safeParse({
@@ -51,22 +51,17 @@ describe("smartflow.v5 protocol schemas", () => {
       worktreePath: "/private/run-worktree"
     }).success).toBe(false);
 
-    const reviewRequired = {
-      kind: "REVIEW_REQUIRED" as const,
+    expect(reviewTurnOutputSchema.safeParse({
+      kind: "REVIEW_REQUIRED",
       turnToken: "turn-1",
-      reviewerSession: { mode: "CREATE" as const },
+      reviewerSession: { mode: "CREATE" },
       worktreePath: "/private/run-worktree",
       tasksPath: "specs/tasks.md",
       taskIds: ["T001", "T002"],
       changedPaths: ["src/a.ts"],
       deadlineAt: "2026-08-11T12:30:00+00:00"
-    };
-    expect(reviewTurnOutputSchema.parse(reviewRequired)).toEqual(reviewRequired);
-    expect(reviewTurnOutputSchema.parse({
-      ...reviewRequired,
-      reviewerSession: { mode: "RESUME", reviewerSessionId: "reviewer-1" }
-    })).toBeDefined();
-    // Daemon bookkeeping must not reappear on the Host-visible wire.
+    }).success).toBe(false);
+    // Daemon bookkeeping and Reviewer identity must not appear on the Host-visible wire.
     for (const leak of [
       { projectId: "project-1" },
       { jobId: "job-1" },
@@ -75,23 +70,11 @@ describe("smartflow.v5 protocol schemas", () => {
       { reviewAttemptId: "review-attempt-1" },
       { taskSourceHash: digest },
       { candidateHash: digest },
-      { piSessionId: "pi-session-1" }
+      { piSessionId: "pi-session-1" },
+      { reviewerSession: { mode: "CREATE" } },
+      { worktreePath: "/private/run-worktree" }
     ]) {
-      expect(reviewTurnOutputSchema.safeParse({ ...reviewRequired, ...leak }).success).toBe(false);
       expect(reviewTurnOutputSchema.safeParse({ ...notReady, ...leak }).success).toBe(false);
-    }
-    // REVIEW_REQUIRED must name the reviewable Task set unambiguously, because the
-    // Daemon rejects any Review that does not cover exactly those Task IDs.
-    for (const invalid of [
-      { tasksPath: "/absolute/tasks.md" },
-      { tasksPath: "../outside/tasks.md" },
-      { taskIds: [] },
-      { taskIds: ["T001", "T001"] },
-      { taskIds: ["task-1"] }
-    ]) {
-      expect(
-        reviewTurnOutputSchema.safeParse({ ...reviewRequired, ...invalid }).success
-      ).toBe(false);
     }
 
     const userInput = {
@@ -111,7 +94,13 @@ describe("smartflow.v5 protocol schemas", () => {
       ...userInput,
       result: {
         ...pausedResult,
-        review: { tasks: [{ id: "T001", completionPercentage: 40, issues: [{ path: "src/a.ts", message: "unmet" }] }] }
+        review: {
+          tasks: [{
+            id: "T001",
+            completionPercentage: 40,
+            issues: [{ path: "src/a.ts", message: "unmet", suggestedFix: null }]
+          }]
+        }
       }
     };
     expect(reviewTurnOutputSchema.parse(reviewedPause)).toEqual(reviewedPause);
@@ -265,7 +254,7 @@ describe("smartflow.v5 protocol schemas", () => {
           tasks: [{ id: "T001", completionPercentage: 100, issues: [] }]
         }
       }
-    }).success).toBe(true);
+    }).success).toBe(false);
     expect(reviewTurnInputSchema.safeParse({
       ...baseInput,
       answer: "approve_new_manifest_revision"

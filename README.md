@@ -17,12 +17,11 @@ Run `smartflow doctor --json` to verify Node, Pi, sandbox, model registration, s
 
 ## MCP workflow
 
-The public MCP surface contains exactly six tools. The only public Review orchestration path is to call `smartflow_execute` once for an approved task source and then call `smartflow_review_turn` until it returns `DONE`. The turn API returns one of four states:
+The public MCP surface contains exactly six tools. Call `smartflow_execute` once for an approved task source, then call `smartflow_review_turn` until it returns `DONE`. Review runs inside the Daemon; the Host only polls and answers explicit user-input checkpoints. The turn API returns one of three states:
 
-- `NOT_READY`: wait for `retryAfterMs` and call it again.
-- `REVIEW_REQUIRED`: create or resume the specified independent Reviewer session in `worktreePath`, then return every task's completion score with the unchanged `turnToken`.
+- `NOT_READY`: wait for `retryAfterMs` and call it again. This includes Daemon-owned Review and repair work.
 - `USER_INPUT_REQUIRED`: present the message and available actions to the user, then return the selected action with the unchanged `turnToken`.
-- `DONE`: the run reached a terminal result.
+- `DONE`: the run reached a terminal result; the latest validated Review is available in `result.review` when one was recorded.
 
 `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result` are separate APIs for Run inspection, paused-Run recovery, cancellation, and result management; they are not Review continuations or a second Review orchestration path. While an active `hostTurn` owns `USER_INPUT_REQUIRED`, the owning Host must submit the answer through `smartflow_review_turn` with the same `turnToken`; the public `smartflow_resume` API cannot answer or bypass that checkpoint.
 

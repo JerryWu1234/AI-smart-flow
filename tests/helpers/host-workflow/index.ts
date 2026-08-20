@@ -1,5 +1,4 @@
-/** Test-only helpers that simulate Host-owned planning, approval, and review behavior. */
+/** Test-only helpers that simulate Host-owned planning, approval, polling, and user input. */
 export * from "./approval.js";
 export * from "./planner.js";
-export * from "./reviewer.js";
 export * from "./workflow.js";

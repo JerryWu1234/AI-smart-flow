@@ -1,7 +1,8 @@
 import { execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { delimiter, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
@@ -182,6 +183,12 @@ describe("installed SmartFlow package", () => {
     const dataRoot = resolve(root, "data");
     const cacheRoot = resolve(root, "npm-cache");
     const daemonRoot = resolve(dataRoot, "daemon");
+    const smartFlowConfigPath = resolve(root, "smartflow.yml");
+    const codexTracePath = resolve(root, "codex-trace.jsonl");
+    const fakeCodexBin = resolve(process.cwd(), "tests", "fixtures", "bin");
+    const repairMarker = `// SMARTFLOW_DYNAMIC_REPAIR_${randomUUID()
+      .replaceAll("-", "")
+      .slice(0, 20)}`;
     let lifecycleStage = "pack";
     await Promise.all([mkdir(installRoot), mkdir(projectRoot), mkdir(dataRoot), mkdir(cacheRoot)]);
     try {
@@ -219,6 +226,21 @@ describe("installed SmartFlow package", () => {
         "dist",
         "smartflow.mjs"
       );
+      await writeFile(smartFlowConfigPath, [
+        "version: 5",
+        "workspace:",
+        "  mode: git-tree",
+        "review:",
+        "  strategy: daemon-codex",
+        "  onUnavailable: pause",
+        "  noProgressThreshold: 15",
+        "  deadlineMs: 300000",
+        "  maxAttempts: 3",
+        "publish:",
+        "  mode: auto-after-review",
+        "  onConflict: pause",
+        ""
+      ].join("\n"), "utf8");
       const environment = {
         ...Object.fromEntries(
           Object.entries(process.env).filter(
@@ -228,6 +250,8 @@ describe("installed SmartFlow package", () => {
               !new Set(["NODE_CHANNEL_FD", "NODE_OPTIONS", "NODE_UNIQUE_ID", "JEST_WORKER_ID"]).has(key)
           )
         ),
+        PATH: `${fakeCodexBin}${delimiter}${process.env.PATH ?? ""}`,
+        SMARTFLOW_CONFIG: smartFlowConfigPath,
         SMARTFLOW_DATA_HOME: dataRoot,
         XDG_DATA_HOME: resolve(dataRoot, "xdg"),
         SMARTFLOW_PI_API: process.env.SMARTFLOW_PI_API ?? "",
@@ -238,6 +262,8 @@ describe("installed SmartFlow package", () => {
         SMARTFLOW_PI_MAX_TOKENS: process.env.SMARTFLOW_PI_MAX_TOKENS ?? "384000",
         SMARTFLOW_PI_THINKING: process.env.SMARTFLOW_PI_THINKING ?? "high",
         SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: process.env.SMARTFLOW_PI_ATTEMPT_DEADLINE_MS ?? "300000",
+        SMARTFLOW_TEST_REPAIR_MARKER: repairMarker,
+        SMARTFLOW_TEST_CODEX_TRACE: codexTracePath,
         SMARTFLOW_TEST_TOKEN: "never-log-this-token",
         SMARTFLOW_TEST_PASSWORD: "never-log-this-password"
       };
@@ -311,23 +337,20 @@ describe("installed SmartFlow package", () => {
         lifecycle.workflowToolNames,
         "installed workflow tool names"
       );
-      const reviewerModes = asArray(lifecycle.reviewerModes, "installed reviewer modes")
-        .map((value, index) => asRecord(value, `installed reviewer mode ${String(index)}`));
-      const reviewChangedPaths = asArray(
-        lifecycle.reviewChangedPaths,
-        "installed review changed paths"
-      ).map((value, index) => asStringArray(
-        value,
-        `installed review changed paths ${String(index)}`
-      ));
-      if (typeof lifecycle.repairMarker !== "string") {
-        throw new Error("Installed lifecycle omitted its dynamic repair marker");
-      }
-      const repairMarker = lifecycle.repairMarker;
-      if (typeof lifecycle.reviewCalls !== "number" || !Number.isInteger(lifecycle.reviewCalls)) {
-        throw new Error("Installed lifecycle omitted its Reviewer call count");
-      }
-      const reviewCalls = lifecycle.reviewCalls;
+      const codexTrace = (await readFile(codexTracePath, "utf8"))
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .map((line, index) => asRecord(
+          JSON.parse(line) as unknown,
+          `installed Codex trace ${String(index)}`
+        ));
+      const mainReviewTrace = codexTrace.filter((entry) =>
+        typeof entry.outputPath === "string" &&
+        entry.outputPath.replaceAll("\\", "/").includes(
+          `/runs/${String(result.jobId)}/`
+        )
+      );
 
       expect(publicToolNames).toEqual([
         "smartflow_cancel",
@@ -368,22 +391,47 @@ describe("installed SmartFlow package", () => {
         expect(workflowToolNames).not.toContain(forbidden);
       }
 
-      expect(reviewCalls).toBe(reviewerModes.length);
-      expect(reviewCalls).toBeGreaterThanOrEqual(2);
-      expect(reviewCalls).toBeLessThanOrEqual(3);
-      const firstReviewerMode = reviewerModes[0];
-      if (firstReviewerMode === undefined) throw new Error("Installed Reviewer was not called");
-      expect(firstReviewerMode.mode).toBe("CREATE");
-      if (typeof firstReviewerMode.reviewerSessionId !== "string") {
-        throw new Error("Installed Reviewer CREATE omitted its session ID");
+      expect(lifecycle).not.toHaveProperty("reviewerModes");
+      expect(lifecycle).not.toHaveProperty("reviewChangedPaths");
+      expect(lifecycle).not.toHaveProperty("reviewCalls");
+      expect(lifecycle).not.toHaveProperty("repairMarker");
+
+      expect(mainReviewTrace.length).toBeGreaterThanOrEqual(2);
+      const firstReview = mainReviewTrace[0];
+      const finalReviewTrace = mainReviewTrace.at(-1);
+      if (firstReview === undefined || finalReviewTrace === undefined) {
+        throw new Error("Installed Daemon did not invoke its Reviewer");
       }
-      const reviewerSessionId = firstReviewerMode.reviewerSessionId;
-      for (const reviewerMode of reviewerModes.slice(1)) {
-        expect(reviewerMode).toEqual({ mode: "RESUME", reviewerSessionId });
+      if (typeof firstReview.sessionId !== "string") {
+        throw new Error("Installed Daemon Reviewer omitted its session ID");
       }
-      expect(reviewChangedPaths).toHaveLength(reviewCalls);
-      expect(reviewChangedPaths.every((paths) => paths.includes("sum.js"))).toBe(true);
+      const reviewerSessionId = firstReview.sessionId;
+      expect(firstReview).toMatchObject({ mode: "CREATE", markerPresent: false });
+      expect(finalReviewTrace).toMatchObject({ mode: "RESUME", markerPresent: true });
+      for (const [index, reviewTrace] of mainReviewTrace.entries()) {
+        expect(reviewTrace.mode).toBe(index === 0 ? "CREATE" : "RESUME");
+        expect(reviewTrace.sessionId).toBe(reviewerSessionId);
+        expect(asStringArray(
+          reviewTrace.taskIds,
+          `installed Daemon Review task IDs ${String(index)}`
+        )).toContain("T057");
+      }
+      const reviewOutputPaths = mainReviewTrace.map((entry) =>
+        String(entry.outputPath).replaceAll("\\", "/")
+      );
+      expect(reviewOutputPaths.some((path) => path.includes("/revision-1/reviews/"))).toBe(true);
+      expect(reviewOutputPaths.some((path) => path.includes("/revision-2/reviews/"))).toBe(true);
       expect(repairMarker).toMatch(/^\/\/ SMARTFLOW_DYNAMIC_REPAIR_[0-9a-f]{20}$/u);
+
+      const finalReview = asRecord(result.review, "installed final Review");
+      const finalReviewTasks = asArray(finalReview.tasks, "installed final Review tasks")
+        .map((task, index) => asRecord(task, `installed final Review task ${String(index)}`));
+      expect(finalReviewTasks.length).toBeGreaterThan(0);
+      expect(finalReviewTasks.every((task) =>
+        task.completionPercentage === 100 &&
+        Array.isArray(task.issues) &&
+        task.issues.length === 0
+      )).toBe(true);
 
       const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
       // The Revision counter is Daemon state, so the durable artifact layout is the

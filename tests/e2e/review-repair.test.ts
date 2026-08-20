@@ -125,7 +125,8 @@ describe("review repair loop", () => {
     const current = round("a");
     current.tasks[0]?.issues.push({
       path: "packages/core/src/index.ts",
-      message: "formatResult omits the failed-build diagnostic"
+      message: "formatResult omits the failed-build diagnostic",
+      suggestedFix: null
     });
     const result = assessRepairProgress(round("a"), current, 0, {
       parentManifest: parentManifest()

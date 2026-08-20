@@ -33,6 +33,7 @@ import {
 
 import { gitPublishOperations } from "./git-publish-source.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
+import { isDaemonReviewerHostTurn } from "./review-coordinator.js";
 
 const terminalPhases = new Set<RunPhase>(["COMPLETED", "CANCELED", "FAILED"]);
 
@@ -42,6 +43,7 @@ export type RecoveryAction =
   | "RESUME_WORKER"
   | "START_NEW_WORKER_ATTEMPT"
   | "PREPARE_REPAIR"
+  | "RUN_REVIEW"
   | "WAIT_FOR_HOST"
   | "WAIT_FOR_LEADER"
   | "RECHECK_PUBLISH_READINESS"
@@ -346,11 +348,16 @@ export class RecoveryManager {
       case "FIXING":
         return this.result(state, run, "PREPARE_REPAIR");
       case "REVIEW_PENDING":
-        return this.result(state, run, "WAIT_FOR_HOST");
+        return this.result(state, run, "RUN_REVIEW");
       case "REVIEWING":
-        return run.hostTurn?.stage === "AWAITING_REVIEW"
-          ? this.result(state, run, "WAIT_FOR_HOST")
-          : this.pause(state, run, "HOST_REVIEW_UNAVAILABLE:REVIEW_TURN_STATE_MISSING");
+        if (run.hostTurn?.stage !== "AWAITING_REVIEW") {
+          return this.pause(state, run, "HOST_REVIEW_UNAVAILABLE:REVIEW_TURN_STATE_MISSING");
+        }
+        return this.result(
+          state,
+          run,
+          isDaemonReviewerHostTurn(run.hostTurn) ? "RUN_REVIEW" : "WAIT_FOR_HOST"
+        );
       case "LEADER_DECISION":
         return this.result(state, run, "WAIT_FOR_LEADER");
       case "READY_TO_PUBLISH":

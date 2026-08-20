@@ -14,5 +14,6 @@ export * from "./repair-coordinator.js";
 export * from "./runtime-composition.js";
 export * from "./recovery-manager.js";
 export * from "./review-coordinator.js";
+export * from "./review-runner.js";
 export * from "./worker-runner.js";
 export * from "./worker-config.js";

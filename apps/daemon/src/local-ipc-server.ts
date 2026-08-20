@@ -7,7 +7,7 @@ import { createInterface } from "node:readline";
 import { ProjectLock } from "@smartflow/state-store";
 import { redactSensitive } from "@smartflow/observability";
 
-export const SMARTFLOW_IPC_PROTOCOL = "smartflow.v5";
+export const SMARTFLOW_IPC_PROTOCOL = "smartflow.v6";
 
 export interface IpcRequest {
   id: string;

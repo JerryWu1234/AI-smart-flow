@@ -99,7 +99,7 @@ export const reviewIssueSchema = z
   .object({
     path: reviewIssuePathSchema,
     message: z.string().trim().min(1),
-    suggestedFix: z.string().trim().min(1).optional()
+    suggestedFix: z.string().trim().min(1).nullable()
   })
   .strict();
 

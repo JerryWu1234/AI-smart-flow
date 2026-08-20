@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 import { MetricsRegistry, StructuredLogger } from "@smartflow/observability";
 import type { WorkspaceApplyAdapter } from "@smartflow/publish";
+import { CodexAdapter, type AgentAdapter } from "@smartflow/review";
 
 import { loadSmartFlowConfig, type SmartFlowConfig } from "./config.js";
 import { resolveInstallationDataDirectory } from "./data-dir.js";
@@ -24,6 +25,7 @@ export interface SmartFlowDaemonOptions {
   metrics?: MetricsRegistry;
   workspaceApplyAdapter?: WorkspaceApplyAdapter;
   workerLaunchConfiguration?: ResolvedWorkerLaunchConfiguration;
+  reviewAdapter?: AgentAdapter;
 }
 
 export interface SmartFlowDaemonController {
@@ -52,17 +54,25 @@ export async function startSmartFlowDaemon(
     options.dataDirectory ?? resolve(resolveInstallationDataDirectory(), "daemon")
   );
   await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
+  const reviewAdapter = options.reviewAdapter ?? new CodexAdapter();
   const composition = new ProductionRuntimeComposition(
     dataDirectory,
     logger,
     options.workspaceApplyAdapter,
     initialProviderRuntime.provider,
     providerRuntimeConfig,
-    providers.resolve.bind(providers)
+    providers.resolve.bind(providers),
+    reviewAdapter,
+    {
+      ...(config.review.model === undefined ? {} : { model: config.review.model }),
+      deadlineMs: config.review.deadlineMs,
+      maxAttempts: config.review.maxAttempts
+    }
   );
   const projectRuntime = new ProjectRuntime({
     dataDirectory,
     runPipeline: composition.runPipeline,
+    review: composition.review,
     publish: composition.publish,
     cancel: composition.cancel,
     recover: composition.recover,
@@ -102,7 +112,6 @@ export async function startSmartFlowDaemon(
       }
     });
   } catch (error) {
-    projectRuntime.dispose();
     await server.close().catch(() => undefined);
     const durationMs = performance.now() - timer;
     metrics.recordStage("daemon.start", durationMs, false);
@@ -114,7 +123,6 @@ export async function startSmartFlowDaemon(
     config,
     dataDirectory,
     async close(): Promise<void> {
-      projectRuntime.dispose();
       await server.close();
       logger.log({ level: "info", event: "daemon.stopped" });
     }

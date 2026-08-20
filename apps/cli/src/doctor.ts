@@ -26,7 +26,7 @@ export interface DoctorCapability {
 
 export interface DoctorReport {
   schemaVersion: 1;
-  protocolVersion: "smartflow.v5";
+  protocolVersion: "smartflow.v6";
   status: CapabilityStatus;
   ready: boolean;
   config: SmartFlowConfig | null;
@@ -205,7 +205,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
   const optional = capabilities.some((capability) => capability.status === "optional-unavailable");
   return {
     schemaVersion: 1,
-    protocolVersion: "smartflow.v5",
+    protocolVersion: "smartflow.v6",
     status: blocking ? "blocking-unavailable" : optional ? "optional-unavailable" : "ready",
     ready: !blocking,
     config,

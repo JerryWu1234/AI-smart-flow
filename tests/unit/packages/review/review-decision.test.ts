@@ -10,7 +10,8 @@ function review(overrides: Partial<ReviewResult> = {}): ReviewResult {
       completionPercentage: 50,
       issues: [{
         path: "src/a.ts",
-        message: "renderResult omits the required empty-state branch"
+        message: "renderResult omits the required empty-state branch",
+        suggestedFix: null
       }]
     }],
     ...overrides
@@ -54,7 +55,8 @@ describe("planReviewDecision", () => {
             completionPercentage: 80,
             issues: [{
               path: "src/b.ts",
-              message: "parseConfig drops the fallback value"
+              message: "parseConfig drops the fallback value",
+              suggestedFix: null
             }]
           }
         ]

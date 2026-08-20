@@ -76,9 +76,10 @@ function repairTaskLine(
 ): string {
   const parentTask = taskForCriterion(manifest, task.id);
   if (parentTask === undefined) throw new Error("REPAIR_PARENT_TASK_MISSING");
-  const guidance = issue.suggestedFix === undefined
+  const suggestedFix = issue.suggestedFix;
+  const guidance = suggestedFix === null
     ? safeInline(issue.message)
-    : `${safeInline(issue.message)}；建议：${safeInline(issue.suggestedFix)}`;
+    : `${safeInline(issue.message)}；建议：${safeInline(suggestedFix)}`;
   return `- [ ] T${String(taskNumber).padStart(3, "0")} [${parentTask.module}] Repair \`${safeInline(issue.path)}\` — 验收：${guidance}; parentRevision=${String(manifest.revision)}; criterionId=${task.id}`;
 }
 

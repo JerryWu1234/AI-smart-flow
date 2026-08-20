@@ -9,158 +9,52 @@ import { executeApprovedWorkflow } from "../../../helpers/host-workflow/workflow
 
 const digest = "a".repeat(64);
 
-class WorkflowGateway implements HostGateway {
-  public phase = "PREPARING";
-  public revision = 1;
-  public stateVersion = 0;
-  public reviewerSessionId: string | undefined;
-  public decisions: string[] = [];
-  public toolNames: string[] = [];
-  private reviewNumber = 0;
-  private repairRounds = 0;
+function completedResult(): object {
+  return {
+    projectId: "project-1",
+    jobId: "job-1",
+    phase: "COMPLETED",
+    status: "COMMITTED",
+    artifacts: [],
+    nextActions: []
+  };
+}
+
+class PollingGateway implements HostGateway {
+  public readonly toolNames: string[] = [];
+  public readonly reviewTurnInputs: Array<Record<string, unknown>> = [];
+  private polls = 0;
 
   public call(toolName: string, input: unknown): Promise<unknown> {
     this.toolNames.push(toolName);
-    const request = input as Record<string, unknown>;
     if (toolName === "smartflow_execute") {
-      this.phase = "REVIEW_PENDING";
-      this.stateVersion = 1;
-      return Promise.resolve(this.mutation());
+      return Promise.resolve({
+        projectId: "project-1",
+        jobId: "job-1",
+        revision: 1,
+        stateVersion: 1,
+        phase: "REVIEW_PENDING"
+      });
     }
-    if (toolName === "smartflow_review_turn") {
-      const review = request.review as Record<string, unknown> | undefined;
-      if (review === undefined) return Promise.resolve(this.reviewRequired());
-      const result = review.result as { tasks?: Array<{ completionPercentage?: unknown }> };
-      this.reviewerSessionId = String(review.reviewerSessionId);
-      this.reviewNumber += 1;
-      this.stateVersion += 1;
-      const incomplete = result.tasks?.some(
-        (task) => Number(task.completionPercentage) < 100
-      ) ?? true;
-      if (!incomplete) {
-        this.decisions.push("accept");
-        this.phase = "COMPLETED";
-        return Promise.resolve({ kind: "DONE", result: this.result() });
-      }
-      if (this.repairRounds === 15) {
-        this.decisions.push("pause");
-        this.phase = "PAUSED";
-        return Promise.resolve({
-          kind: "USER_INPUT_REQUIRED",
-          turnToken: `turn-${String(this.reviewNumber)}`,
-          pause: {
-            code: "AUTOMATIC_REPAIR_LIMIT",
-            message: "The automatic repair limit of fifteen rounds was reached."
-          },
-          result: { ...this.result(), review: result },
-          options: [
-            { answer: "resume_review_decision", description: "Continue repairs" },
-            { answer: "cancel", description: "Cancel" }
-          ]
-        });
-      }
-      this.decisions.push("repair");
-      this.repairRounds += 1;
-      this.revision += 1;
-      this.phase = "REVIEW_PENDING";
-      return Promise.resolve(this.reviewRequired());
+    if (toolName !== "smartflow_review_turn") {
+      return Promise.reject(new Error(`Unexpected tool: ${toolName}`));
     }
-    return Promise.reject(new Error(`Unexpected tool: ${toolName}`));
-  }
-
-  private reviewRequired(): object {
-    return {
-      kind: "REVIEW_REQUIRED",
-      turnToken: `turn-${String(this.reviewNumber + 1)}`,
-      reviewerSession: this.reviewerSessionId === undefined
-        ? { mode: "CREATE" }
-        : { mode: "RESUME", reviewerSessionId: this.reviewerSessionId },
-      worktreePath: "/tmp/worktree",
-      tasksPath: "tasks.md",
-      taskIds: ["T001"],
-      changedPaths: ["src/a.ts", "src/b.ts"],
-      deadlineAt: "2026-07-20T00:30:00Z"
-    };
-  }
-
-  private result(): object {
-    return {
-      projectId: "project-1",
-      jobId: "job-1",
-      phase: this.phase,
-      status: this.phase === "COMPLETED" ? "COMMITTED" : "PAUSED",
-      artifacts: [],
-      nextActions: this.phase === "PAUSED" ? ["resume_review_decision"] : [],
-      ...(this.phase === "PAUSED"
-        ? {
-            repairDraft: {
-              sourceArtifact: {
-                relativePath: "runs/job-1/revision-2/repair.md",
-                sha256: digest,
-                size: 100
-              },
-              sourceHash: digest,
-              suggestedTasksPath: "tasks.md",
-              appendText: "repair",
-              addedTaskLines: ["- [ ] T900 repair"],
-              reasons: [],
-              approval: {
-                kind: "LEADER_REPAIR",
-                parentRevision: this.revision,
-                authorizedCriterionIds: ["T001"]
-              }
-            }
-          }
-        : {})
-    };
-  }
-
-  private mutation(): object {
-    return {
-      projectId: "project-1",
-      jobId: "job-1",
-      revision: this.revision,
-      stateVersion: this.stateVersion,
-      phase: this.phase
-    };
+    const request = input as Record<string, unknown>;
+    this.reviewTurnInputs.push(request);
+    this.polls += 1;
+    return Promise.resolve(this.polls === 1
+      ? { kind: "NOT_READY", retryAfterMs: 1 }
+      : { kind: "DONE", result: completedResult() });
   }
 }
 
 describe("executeApprovedWorkflow", () => {
-  it("repairs incomplete tasks, resumes the bound Reviewer, then accepts and publishes", async () => {
-    const gateway = new WorkflowGateway();
-    const reviewerContexts: Array<{
-      reviewerSession: { mode: string; reviewerSessionId?: string };
-      changedPaths: string[];
-    }> = [];
+  it("polls daemon-owned Review without submitting reviewer data", async () => {
+    const gateway = new PollingGateway();
     const projectRoot = await mkdtemp(join(tmpdir(), "smartflow-host-workflow-"));
     try {
       await writeFile(join(projectRoot, "tasks.md"), "# Tasks", "utf8");
-      const result = await executeApprovedWorkflow(gateway, {
-        review: (context) => {
-          reviewerContexts.push({
-            reviewerSession: { ...context.reviewerSession },
-            changedPaths: [...context.changedPaths]
-          });
-          const incomplete = reviewerContexts.length === 1;
-          return Promise.resolve({
-            reviewerSessionId: "reviewer-1",
-            result: {
-              tasks: incomplete
-                ? [{
-                    id: "T001",
-                    completionPercentage: 50,
-                    issues: [{
-                      path: "src/a.ts",
-                      message: "executeTask is missing the required implementation",
-                      suggestedFix: "Complete executeTask"
-                    }]
-                  }]
-                : [{ id: "T001", completionPercentage: 100, issues: [] }]
-            }
-          });
-        }
-      }, {
+      const result = await executeApprovedWorkflow(gateway, {}, {
         projectRoot,
         approval: approveTasksSource("tasks.md", "# Tasks"),
         requestId: "execute-workflow",
@@ -168,46 +62,83 @@ describe("executeApprovedWorkflow", () => {
         expectedStateVersion: 0
       });
 
-      expect(reviewerContexts).toEqual([
-        {
-          reviewerSession: { mode: "CREATE" },
-          changedPaths: ["src/a.ts", "src/b.ts"]
-        },
-        {
-          reviewerSession: { mode: "RESUME", reviewerSessionId: "reviewer-1" },
-          changedPaths: ["src/a.ts", "src/b.ts"]
-        }
-      ]);
-      expect(gateway.decisions).toEqual(["repair", "accept"]);
-      expect(result).toMatchObject({ phase: "COMPLETED", status: "COMMITTED" });
+      expect(result).toEqual(completedResult());
+      expect(gateway.reviewTurnInputs).toHaveLength(2);
+      for (const input of gateway.reviewTurnInputs) {
+        expect(input).not.toHaveProperty("review");
+        expect(input).not.toHaveProperty("reviewUnavailableReason");
+      }
+      expect(new Set(gateway.toolNames)).toEqual(new Set([
+        "smartflow_execute",
+        "smartflow_review_turn"
+      ]));
     } finally {
       await rm(projectRoot, { recursive: true, force: true });
     }
   });
 
-  it("pauses after the initial review plus fifteen automatic repair rounds", async () => {
-    const gateway = new WorkflowGateway();
+  it("continues after the automatic repair limit using only the listed answer", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "smartflow-host-limit-"));
-    let reviewCalls = 0;
+    const answers: unknown[] = [];
+    const review = {
+      tasks: [{
+        id: "T001",
+        completionPercentage: 0,
+        issues: [{
+          path: "src/a.ts",
+          message: "executeTask is missing the required implementation",
+          suggestedFix: null
+        }]
+      }]
+    };
+    const gateway: HostGateway = {
+      call: (toolName, input) => {
+        const request = input as Record<string, unknown>;
+        if (toolName === "smartflow_execute") {
+          return Promise.resolve({
+            projectId: "project-1",
+            jobId: "job-1",
+            revision: 16,
+            stateVersion: 16,
+            phase: "PAUSED"
+          });
+        }
+        if (toolName !== "smartflow_review_turn") {
+          return Promise.reject(new Error(`Unexpected tool: ${toolName}`));
+        }
+        if (request.answer !== undefined) {
+          answers.push(request.answer);
+          return Promise.resolve({ kind: "DONE", result: completedResult() });
+        }
+        return Promise.resolve({
+          kind: "USER_INPUT_REQUIRED",
+          turnToken: "turn-limit",
+          pause: {
+            code: "AUTOMATIC_REPAIR_LIMIT",
+            message: "The automatic repair limit was reached."
+          },
+          result: {
+            projectId: "project-1",
+            jobId: "job-1",
+            phase: "PAUSED",
+            status: "PAUSED",
+            artifacts: [],
+            nextActions: ["resume_review_decision", "cancel"],
+            review
+          },
+          options: [
+            { answer: "resume_review_decision", description: "Continue repairs" },
+            { answer: "cancel", description: "Cancel" }
+          ]
+        });
+      }
+    };
     try {
       await writeFile(join(projectRoot, "tasks.md"), "# Tasks", "utf8");
       const result = await executeApprovedWorkflow(gateway, {
-        review: () => {
-          reviewCalls += 1;
-          return Promise.resolve({
-            reviewerSessionId: "reviewer-1",
-            result: {
-              tasks: [{
-                id: "T001",
-                completionPercentage: 0,
-                issues: [{
-                  path: "src/a.ts",
-                  message: "executeTask is missing the required implementation",
-                  suggestedFix: "Complete executeTask"
-                }]
-              }]
-            }
-          });
+        continueAfterRepairLimit: (context) => {
+          expect(context).toEqual({ repairRounds: 15, result: review });
+          return Promise.resolve(true);
         }
       }, {
         projectRoot,
@@ -217,22 +148,8 @@ describe("executeApprovedWorkflow", () => {
         expectedStateVersion: 0
       });
 
-      expect(reviewCalls).toBe(16);
-      expect(gateway.decisions).toEqual([
-        ...Array.from({ length: 15 }, () => "repair"),
-        "pause"
-      ]);
-      expect(result).toMatchObject({
-        phase: "PAUSED",
-        status: "PAUSED",
-        nextActions: ["resume_review_decision"],
-        repairDraft: { approval: { kind: "LEADER_REPAIR" } }
-      });
-      expect(new Set(gateway.toolNames)).toEqual(new Set([
-        "smartflow_execute",
-        "smartflow_review_turn"
-      ]));
-      expect(gateway.toolNames).not.toContain("smartflow_result");
+      expect(result).toEqual(completedResult());
+      expect(answers).toEqual(["resume_review_decision"]);
     } finally {
       await rm(projectRoot, { recursive: true, force: true });
     }
@@ -242,14 +159,6 @@ describe("executeApprovedWorkflow", () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "smartflow-host-user-input-"));
     const toolNames: string[] = [];
     const answers: unknown[] = [];
-    const completedResult = {
-      projectId: "project-1",
-      jobId: "job-1",
-      phase: "COMPLETED",
-      status: "COMMITTED",
-      artifacts: [],
-      nextActions: []
-    };
     const answerTemplate = {
       action: "approve_new_manifest_revision" as const,
       tasksPath: "tasks.md",
@@ -278,7 +187,7 @@ describe("executeApprovedWorkflow", () => {
         }
         if (request.answer !== undefined) {
           answers.push(request.answer);
-          return Promise.resolve({ kind: "DONE", result: completedResult });
+          return Promise.resolve({ kind: "DONE", result: completedResult() });
         }
         return Promise.resolve({
           kind: "USER_INPUT_REQUIRED",
@@ -325,7 +234,7 @@ describe("executeApprovedWorkflow", () => {
         expectedStateVersion: 0
       });
 
-      expect(result).toEqual(completedResult);
+      expect(result).toEqual(completedResult());
       expect(answers).toEqual([answerTemplate]);
       expect(toolNames).toEqual([
         "smartflow_execute",

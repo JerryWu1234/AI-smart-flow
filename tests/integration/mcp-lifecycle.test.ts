@@ -7,7 +7,12 @@ import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { LocalIpcClient, LocalIpcServer, ProjectRuntime } from "@smartflow/daemon";
+import {
+  LocalIpcClient,
+  LocalIpcServer,
+  ProductionRuntimeComposition,
+  ProjectRuntime
+} from "@smartflow/daemon";
 import {
   PlanningSession,
   approveTasksSource,
@@ -638,7 +643,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     expect(await store.readState()).toEqual(before);
   });
 
-  it("accepts the current Host Review through the composite turn without running a Daemon reviewer", async () => {
+  it("keeps daemon-owned Review internals off the composite turn wire", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const dataDirectory = resolve(harness.dataDir, "composite-review");
@@ -650,11 +655,10 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       dataDirectory: resolve(dataDirectory, "projects", projectId),
       projectId
     });
-    const runtime = new ProjectRuntime({
-      dataDirectory,
-      publish: (): Promise<void> => Promise.resolve()
-    });
-    const requested = await runtime.handle({
+    const runtime = new ProjectRuntime({ dataDirectory });
+    const before = await store.readState();
+
+    const response = await runtime.handle({
       id: "current-host-review-request",
       method: "smartflow_review_turn",
       payload: {
@@ -664,69 +668,28 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         hostTurnId: "current-host-reviewer"
       }
     }) as ReviewTurnOutput;
-    if (requested.kind !== "REVIEW_REQUIRED") {
-      throw new Error("Host Review was not requested");
-    }
-    const reviewerSessionId = requested.reviewerSession.mode === "RESUME"
-      ? requested.reviewerSession.reviewerSessionId
-      : "current-host-reviewer-session";
+    expect(response).toEqual({ kind: "NOT_READY", retryAfterMs: 30_000 });
+    expect(response).not.toHaveProperty("reviewAttemptId");
+    expect(response).not.toHaveProperty("reviewerSession");
+    expect(response).not.toHaveProperty("worktreePath");
 
     await expect(runtime.handle({
-      id: "incomplete-task-coverage",
+      id: "legacy-host-review-submission",
       method: "smartflow_review_turn",
       payload: {
-        requestId: "incomplete-task-coverage",
+        requestId: "legacy-host-review-submission",
         projectId,
         jobId: "job-1",
         hostTurnId: "current-host-reviewer",
-        turnToken: requested.turnToken,
         review: {
-          reviewerSessionId,
-          result: {
-            tasks: [{ id: "T999", completionPercentage: 100, issues: [] }]
-          }
-        }
-      }
-    })).rejects.toThrow(/REVIEW_TASK_COVERAGE_INCOMPLETE/u);
-
-    const response = await runtime.handle({
-      id: "current-host-review-submission",
-      method: "smartflow_review_turn",
-      payload: {
-        requestId: "current-host-review-submission",
-        projectId,
-        jobId: "job-1",
-        hostTurnId: "current-host-reviewer",
-        turnToken: requested.turnToken,
-        review: {
-          reviewerSessionId,
+          reviewerSessionId: "legacy-reviewer",
           result: {
             tasks: [{ id: "T001", completionPercentage: 100, issues: [] }]
           }
         }
       }
-    }) as ReviewTurnOutput;
-    expect(response).toMatchObject({ kind: "NOT_READY" });
-    // Review attempt identity stays inside the Daemon and its durable evidence.
-    expect(requested).not.toHaveProperty("reviewAttemptId");
-
-    const reviewed = (await store.readState()).runs["job-1"];
-    expect(reviewed).toMatchObject({
-      phase: "READY_TO_PUBLISH",
-      reviewHistory: [{ reviewerSessionId }]
-    });
-    expect(reviewed?.review).toBeDefined();
-    expect(reviewed?.leaderDecision).toBeDefined();
-    expect(reviewed?.pendingAction).toBeUndefined();
-    expect(reviewed?.hostTurn).toBeUndefined();
-    if (reviewed?.review === undefined) throw new Error("Review artifact was not persisted");
-    const durableReview = JSON.parse(
-      new TextDecoder().decode(await store.readArtifact(reviewed.review))
-    ) as { schemaVersion: number; gate: { result: { tasks: unknown[] } } };
-    expect(durableReview.schemaVersion).toBe(2);
-    expect(durableReview.gate.result.tasks).toEqual([
-      { id: "T001", completionPercentage: 100, issues: [] }
-    ]);
+    })).rejects.toThrow();
+    expect(await store.readState()).toEqual(before);
   });
 
   it("pauses the composite Review boundary on approved source drift and replays the owned prompt", async () => {
@@ -771,11 +734,16 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       };
 
       let pipelineCalls = 0;
+      let reviewCalls = 0;
       let publishCalls = 0;
       const runtime = new ProjectRuntime({
         dataDirectory,
         runPipeline: (): Promise<void> => {
           pipelineCalls += 1;
+          return Promise.resolve();
+        },
+        review: (): Promise<void> => {
+          reviewCalls += 1;
           return Promise.resolve();
         },
         publish: (): Promise<void> => {
@@ -784,6 +752,17 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         }
       });
       await writeFile(tasksPath, `${tasksSource}\nsource drift`, "utf8");
+      const reviewState = await store.readState();
+      const reviewRun = reviewState.runs["job-1"];
+      if (reviewRun === undefined) throw new Error("review source drift run is missing");
+      const composition = new ProductionRuntimeComposition(dataDirectory);
+      await composition.review({
+        store,
+        projectId,
+        jobId: "job-1",
+        expectedFence: reviewRun.fence,
+        expectedRevision: reviewRun.revision
+      });
       const firstPrompt = await runtime.handle({
         id: requestId,
         method: "smartflow_review_turn",
@@ -834,12 +813,13 @@ describe("Host planning, approval, and MCP lifecycle", () => {
           answer: "restore_approved_tasks"
         }
       }) as ReviewTurnOutput;
-      expect(requested).toMatchObject({ kind: "REVIEW_REQUIRED" });
+      expect(requested).toEqual({ kind: "NOT_READY", retryAfterMs: 30_000 });
       expect((await store.readState()).runs["job-1"]).toMatchObject({
         revision: 1,
-        phase: "REVIEWING"
+        phase: "REVIEW_PENDING"
       });
       expect(pipelineCalls).toBe(0);
+      expect(reviewCalls).toBe(1);
       expect(publishCalls).toBe(0);
   });
 

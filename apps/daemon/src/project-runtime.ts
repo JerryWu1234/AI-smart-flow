@@ -42,11 +42,18 @@ import { cleanupGitRunTemporaryState } from "@smartflow/workspace";
 
 import { createApprovedRevision } from "./approved-revision.js";
 import { observeApprovedSource } from "./approved-source.js";
-import type { IpcRequest, IpcRequestHandler } from "./local-ipc-server.js";
+import {
+  SMARTFLOW_IPC_PROTOCOL,
+  type IpcRequest,
+  type IpcRequestHandler
+} from "./local-ipc-server.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
 import { HostTurnCoordinator } from "./host-turn-coordinator.js";
 import { verifyRunArtifacts } from "./recovery-manager.js";
-import { ReviewCoordinator } from "./review-coordinator.js";
+import {
+  ReviewCoordinator,
+  isDaemonReviewerHostTurn
+} from "./review-coordinator.js";
 
 export interface ProjectPipelineContext {
   store: StateStore;
@@ -61,6 +68,7 @@ export interface ProjectPipelineContext {
 export interface ProjectRuntimeOptions {
   dataDirectory: string;
   runPipeline?: (context: ProjectPipelineContext) => Promise<void>;
+  review?: (context: ProjectPipelineContext) => Promise<void>;
   publish?: (context: ProjectPipelineContext) => Promise<void>;
   cancel?: (context: ProjectPipelineContext) => Promise<void>;
   recover?: (context: ProjectPipelineContext) => Promise<void>;
@@ -215,7 +223,7 @@ function resultStatus(run: RunRecord): ResultOutput["status"] {
   return "RUNNING";
 }
 
-type ResumeSchedule = "pipeline" | "publish" | "cancel" | "recover" | "none";
+type ResumeSchedule = "pipeline" | "review" | "publish" | "cancel" | "recover" | "none";
 
 function closedResumeRoute(
   run: RunRecord,
@@ -227,7 +235,7 @@ function closedResumeRoute(
       return { phase: "CANCELING", schedule: "cancel" };
     case "retry_host_review":
       return code === "HOST_REVIEW_UNAVAILABLE" && publicAction(run.pendingAction)?.type === "REVIEW"
-        ? { phase: "REVIEW_PENDING", schedule: "none" }
+        ? { phase: "REVIEW_PENDING", schedule: "review" }
         : undefined;
     case "retry_publish":
       return (new Set([
@@ -275,7 +283,12 @@ function closedResumeRoute(
       if (code !== "APPROVED_SOURCE_DRIFT") return undefined;
       {
         const reviewPhase = approvedSourceDriftResumePhase(run);
-        if (reviewPhase !== undefined) return { phase: reviewPhase, schedule: "none" };
+        if (reviewPhase !== undefined) {
+          return {
+            phase: reviewPhase,
+            schedule: reviewPhase === "REVIEW_PENDING" ? "review" : "none"
+          };
+        }
       }
       return currentAttempt(run) === undefined
         ? { phase: "PREPARING", schedule: "pipeline" }
@@ -298,9 +311,11 @@ function resumeSchedule(
     case "restore_approved_tasks":
       return phase === "PREPARING"
         ? "pipeline"
-        : phase === "REVIEW_PENDING" || phase === "LEADER_DECISION"
-          ? "none"
-          : "recover";
+        : phase === "REVIEW_PENDING"
+          ? "review"
+          : phase === "LEADER_DECISION"
+            ? "none"
+            : "recover";
     case "retry_publish":
     case "confirm_manual_publish":
       return "publish";
@@ -316,6 +331,7 @@ function resumeSchedule(
           ? "publish"
           : "none";
     case "retry_host_review":
+      return "review";
     case "retry":
       return "none";
   }
@@ -371,7 +387,7 @@ export class ProjectRuntime {
 
   public readonly handle: IpcRequestHandler = async (request: IpcRequest): Promise<unknown> => {
     if (request.method === "smartflow_health") {
-      return { protocolVersion: "smartflow.v5", ready: true };
+      return { protocolVersion: SMARTFLOW_IPC_PROTOCOL, ready: true };
     }
     switch (request.method) {
       case "smartflow_execute":
@@ -442,12 +458,13 @@ export class ProjectRuntime {
           response: { projectId: current.projectId, runtimeEpochId: this.runtimeEpochId }
         })
         );
-        const currentRun = epoch.state.runs[run.jobId];
-        if (currentRun === undefined) continue;
-        await this.hostTurns.recoverRun(state.projectId, run.jobId);
-        const recoveredState = await store.readState();
+        const recoveredState = epoch.state;
         const recoveredRun = recoveredState.runs[run.jobId];
-        if (recoveredRun === undefined || recoveredRun.hostTurn !== undefined) continue;
+        if (
+          recoveredRun === undefined ||
+          (recoveredRun.hostTurn !== undefined &&
+            !isDaemonReviewerHostTurn(recoveredRun.hostTurn))
+        ) continue;
         const context = this.pipelineContext(
           store,
           recoveredState.projectId,
@@ -458,6 +475,12 @@ export class ProjectRuntime {
           this.schedule(context, "recover");
         } else if (recoveredRun.phase === "PREPARING") {
           this.schedule(context, "pipeline");
+        } else if (
+          recoveredRun.phase === "REVIEW_PENDING" ||
+          (recoveredRun.phase === "REVIEWING" &&
+            isDaemonReviewerHostTurn(recoveredRun.hostTurn))
+        ) {
+          this.schedule(context, "review");
         } else if (recoveredRun.phase === "READY_TO_PUBLISH") {
           this.schedule(context, "publish");
         } else if (recoveredRun.phase === "CANCELING") {
@@ -465,10 +488,6 @@ export class ProjectRuntime {
         }
       }
     }
-  }
-
-  public dispose(): void {
-    this.hostTurns.dispose();
   }
 
   public async execute(
@@ -949,7 +968,7 @@ export class ProjectRuntime {
   // cancel out of turn instead of having to drive a full composite turn first.
   private assertCancelAuthority(run: RunRecord, hostTurnId: string | undefined): void {
     const hostTurn = run.hostTurn;
-    if (hostTurn === undefined) return;
+    if (hostTurn === undefined || isDaemonReviewerHostTurn(hostTurn)) return;
     if (hostTurnId !== undefined && hostTurn.hostTurnId === hostTurnId) return;
     throw new ProjectRuntimeError(
       "HOST_TURN_ACTIVE",
@@ -1019,17 +1038,19 @@ export class ProjectRuntime {
 
   private schedule(
     context: ProjectPipelineContext,
-    kind: "pipeline" | "publish" | "cancel" | "recover"
+    kind: "pipeline" | "review" | "publish" | "cancel" | "recover"
   ): void {
     const key = `${context.projectId}:${context.jobId}:${kind}`;
     if (this.background.has(key)) return;
     const callback = kind === "pipeline"
       ? this.options.runPipeline
-      : kind === "publish"
-        ? this.options.publish
-        : kind === "cancel"
-          ? this.options.cancel
-          : this.options.recover;
+      : kind === "review"
+        ? this.options.review
+        : kind === "publish"
+          ? this.options.publish
+          : kind === "cancel"
+            ? this.options.cancel
+            : this.options.recover;
     const task = (callback === undefined
       ? this.pauseUnavailable(context, kind)
       : callback(context)
@@ -1083,7 +1104,12 @@ export class ProjectRuntime {
     ) as string;
     const resumeActions = stage === "publish"
       ? ["retry_publish", "cancel"] as const
-      : ["retry", "cancel"] as const;
+      : stage === "review"
+        ? ["retry_host_review", "cancel"] as const
+        : ["retry", "cancel"] as const;
+    const failureCode = stage === "review"
+      ? "HOST_REVIEW_UNAVAILABLE"
+      : "RUNTIME_STAGE_FAILED";
     await new ProjectMutationExecutor(context.store).mutate<{
       ignored: boolean;
       phase: "PAUSED" | null;
@@ -1116,9 +1142,10 @@ export class ProjectRuntime {
               [run.jobId]: {
                 ...active,
                 phase: "PAUSED",
-                pause: { code: "RUNTIME_STAGE_FAILED", resumeActions: [...resumeActions] },
+                hostTurn: stage === "review" ? undefined : active.hostTurn,
+                pause: { code: failureCode, resumeActions: [...resumeActions] },
                 lastError: {
-                  code: "RUNTIME_STAGE_FAILED",
+                  code: failureCode,
                   stage,
                   message,
                   retryable: true,

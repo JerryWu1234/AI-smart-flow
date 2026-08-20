@@ -11,7 +11,6 @@ import {
   type ReviewTurnOutput
 } from "@smartflow/protocol";
 import { REPAIR_ROUND_LIMIT } from "@smartflow/review";
-import { taskManifestSchema } from "@smartflow/task-manifest";
 import {
   StateStore,
   StateStoreError,
@@ -20,18 +19,14 @@ import {
   type RunRecord
 } from "@smartflow/state-store";
 
-import { observeApprovedSource } from "./approved-source.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
 import {
   ReviewCoordinator,
-  pendingReviewAction,
-  type BeginReviewOutput,
   type FinalizeReviewOutput
 } from "./review-coordinator.js";
 import { verifyRunArtifacts } from "./recovery-manager.js";
 
-const DEFAULT_RETRY_AFTER_MS = 1_000;
-const REVIEW_DEADLINE_MS = 45 * 60_000;
+const DEFAULT_RETRY_AFTER_MS = 30_000;
 const TERMINAL_PHASES = new Set(["COMPLETED", "CANCELED", "FAILED"]);
 
 interface ResumeOptions {
@@ -119,10 +114,6 @@ function optionDescription(action: string): string {
   return descriptions[action] ?? `Continue with ${action}`;
 }
 
-function runKey(projectId: string, jobId: string): string {
-  return `${projectId}:${jobId}`;
-}
-
 function isStateVersionMismatch(error: unknown): error is StateStoreError {
   return error instanceof StateStoreError && error.code === "STATE_VERSION_MISMATCH";
 }
@@ -134,61 +125,17 @@ function deterministicTurnToken(input: ReviewTurnInput, scope: string): string {
   );
 }
 
-interface DeadlineTimer {
-  timer: ReturnType<typeof setTimeout>;
-  dueAt: number;
-}
-
-type BeginMutationResponse =
-  | { kind: "DRIFT" }
-  | ({ kind: "BEGUN" } & BeginReviewOutput);
-
-type FinalizeMutationResponse =
-  | { kind: "DRIFT" }
-  | ({ kind: "FINALIZED" } & FinalizeReviewOutput);
-
 export class HostTurnCoordinator {
-  private readonly timers = new Map<string, DeadlineTimer>();
-  private disposed = false;
-
   public constructor(private readonly dependencies: HostTurnCoordinatorDependencies) {}
 
   public async turn(input: ReviewTurnInput): Promise<ReviewTurnOutput> {
     try {
-      if (input.review !== undefined) return await this.submitReviewTurn(input);
-      if (input.reviewUnavailableReason !== undefined) {
-        return await this.reportReviewUnavailable(input);
-      }
       if (input.answer !== undefined) return await this.submitAnswer(input);
       return await this.advance(input);
     } catch (error) {
       if (!isStateVersionMismatch(error)) throw error;
       return this.staleContinuation();
     }
-  }
-
-  public async recoverRun(projectId: string, jobId: string): Promise<void> {
-    const state = await this.dependencies.store(projectId).readState();
-    const run = state.runs[jobId];
-    const turn = run?.hostTurn;
-    if (run === undefined || turn === undefined) return;
-    if (turn.stage !== "AWAITING_REVIEW" || run.phase !== "REVIEWING") return;
-    if (Date.parse(turn.deadlineAt) <= Date.now()) {
-      await this.pauseActiveReview(
-        projectId,
-        jobId,
-        turn,
-        "HOST_REVIEW_UNAVAILABLE:thirty-minute review deadline exceeded during recovery"
-      );
-      return;
-    }
-    this.scheduleDeadline(projectId, jobId, state);
-  }
-
-  public dispose(): void {
-    this.disposed = true;
-    for (const entry of this.timers.values()) clearTimeout(entry.timer);
-    this.timers.clear();
   }
 
   private async advance(input: ReviewTurnInput): Promise<ReviewTurnOutput> {
@@ -217,25 +164,8 @@ export class HostTurnCoordinator {
         }
         return this.requireUserInput(input, status.revision);
       }
-      if (status.phase === "REVIEW_PENDING") return this.beginReview(input, status.revision);
-      if (status.phase === "REVIEWING") {
-        const state = await this.dependencies.store(input.projectId).readState();
-        const run = state.runs[input.jobId];
-        const turn = run?.hostTurn;
-        if (run === undefined) throw new Error("RUN_NOT_FOUND");
-        if (turn?.stage !== "AWAITING_REVIEW") return this.notReady();
-        this.assertHostOwner(turn, input.hostTurnId);
-        if (Date.parse(turn.deadlineAt) <= Date.now()) {
-          await this.pauseActiveReview(
-            input.projectId,
-            input.jobId,
-            turn,
-            "HOST_REVIEW_UNAVAILABLE:thirty-minute review deadline exceeded"
-          );
-          continue;
-        }
-        this.scheduleDeadline(input.projectId, input.jobId, state);
-        return await this.reviewRequired(state, run, turn);
+      if (status.phase === "REVIEW_PENDING" || status.phase === "REVIEWING") {
+        return this.notReady();
       }
       if (status.phase === "LEADER_DECISION") {
         await this.finalizeLegacyDecision(input);
@@ -256,199 +186,6 @@ export class HostTurnCoordinator {
   // it needs no Run state read. The next real turn re-reads and re-verifies.
   private staleContinuation(): ReviewTurnOutput {
     return this.notReady();
-  }
-
-  private async beginReview(
-    input: ReviewTurnInput,
-    revision: number
-  ): Promise<ReviewTurnOutput> {
-    const store = this.dependencies.store(input.projectId);
-    const state = await store.readState();
-    const run = state.runs[input.jobId];
-    if (run === undefined) throw new Error("RUN_NOT_FOUND");
-    if (run.hostTurn?.stage === "AWAITING_REVIEW") {
-      this.assertHostOwner(run.hostTurn, input.hostTurnId);
-      this.scheduleDeadline(input.projectId, input.jobId, state);
-      return await this.reviewRequired(state, run, run.hostTurn);
-    }
-    const turnToken = deterministicTurnToken(input, `review-r${String(revision)}`);
-    const deadlineAt = new Date(Date.now() + REVIEW_DEADLINE_MS).toISOString();
-    const mutation = await new ProjectMutationExecutor(store).mutate<BeginMutationResponse>(
-      {
-        requestId: childRequestId(turnToken, "begin"),
-        payload: {
-          kind: "begin-review-turn",
-          projectId: input.projectId,
-          jobId: input.jobId,
-          hostTurnId: input.hostTurnId,
-          revision,
-          turnToken,
-          deadlineAt
-        },
-        expectedStateVersion: state.stateVersion,
-        expectedJobId: input.jobId,
-        expectedRevision: revision,
-        expectedPhases: ["REVIEW_PENDING"]
-      },
-      async (current, context) => {
-        const currentRun = current.runs[input.jobId];
-        if (currentRun === undefined) throw new Error("RUN_NOT_FOUND");
-        const artifactFailure = await verifyRunArtifacts(store, currentRun);
-        if (artifactFailure !== undefined) {
-          throw new Error(`ARTIFACT_INTEGRITY_BLOCKED:${artifactFailure}`);
-        }
-        const observation = await observeApprovedSource(current, input.jobId);
-        const coordinator = new ReviewCoordinator(store);
-        if (!observation.matches) {
-          const paused = coordinator.pauseForApprovedSourceDrift(
-            current,
-            input.jobId,
-            observation
-          );
-          return {
-            nextState: paused.nextState,
-            response: { kind: "DRIFT" as const }
-          };
-        }
-        const begun = coordinator.beginReview(
-          current,
-          {
-            projectId: input.projectId,
-            jobId: input.jobId,
-            expectedRevision: revision,
-            hostTurnId: input.hostTurnId,
-            turnToken,
-            deadlineAt
-          },
-          context.nextStateVersion
-        );
-        return {
-          nextState: begun.nextState,
-          response: { kind: "BEGUN" as const, ...begun.response }
-        };
-      }
-    );
-    if (mutation.response.kind === "DRIFT") return this.advance(input);
-    const nextRun = mutation.state.runs[input.jobId];
-    const nextTurn = nextRun?.hostTurn;
-    if (nextRun === undefined || nextTurn?.stage !== "AWAITING_REVIEW") {
-      return this.staleContinuation();
-    }
-    this.scheduleDeadline(input.projectId, input.jobId, mutation.state);
-    return await this.reviewRequired(mutation.state, nextRun, nextTurn);
-  }
-
-  private async reviewRequired(
-    state: ProjectState,
-    run: RunRecord,
-    turn: Extract<HostTurn, { stage: "AWAITING_REVIEW" }>
-  ): Promise<ReviewTurnOutput> {
-    const action = pendingReviewAction(run);
-    if (action === undefined || run.workspace === undefined) {
-      throw new Error("REVIEW_ACTION_CONTEXT_MISSING");
-    }
-    const store = this.dependencies.store(state.projectId);
-    const manifest = taskManifestSchema.parse(JSON.parse(
-      new TextDecoder().decode(await store.readArtifact(run.taskManifest))
-    ));
-    return reviewTurnOutputSchema.parse({
-      kind: "REVIEW_REQUIRED",
-      turnToken: turn.turnToken,
-      reviewerSession: action.reviewerSession,
-      worktreePath: resolve(store.dataDirectory, run.workspace.relativePath),
-      tasksPath: manifest.canonicalTaskPath,
-      taskIds: manifest.enabledTaskIds,
-      changedPaths: action.changedPaths,
-      deadlineAt: turn.deadlineAt
-    });
-  }
-
-  private async submitReviewTurn(input: ReviewTurnInput): Promise<ReviewTurnOutput> {
-    const store = this.dependencies.store(input.projectId);
-    const state = await store.readState();
-    const run = state.runs[input.jobId];
-    const turn = run?.hostTurn;
-    if (
-      run === undefined ||
-      turn?.stage !== "AWAITING_REVIEW" ||
-      turn.turnToken !== input.turnToken ||
-      input.review === undefined
-    ) {
-      return this.staleContinuation();
-    }
-    this.assertHostOwner(turn, input.hostTurnId);
-    const review = input.review;
-    if (Date.parse(turn.deadlineAt) <= Date.now()) {
-      await this.pauseActiveReview(
-        input.projectId,
-        input.jobId,
-        turn,
-        "HOST_REVIEW_UNAVAILABLE:thirty-minute review deadline exceeded"
-      );
-      return this.advance({ ...input, review: undefined });
-    }
-    const mutation = await new ProjectMutationExecutor(store).mutate<FinalizeMutationResponse>(
-      {
-        requestId: childRequestId(turn.turnToken, "finalize"),
-        payload: {
-          kind: "finalize-review-turn",
-          projectId: input.projectId,
-          jobId: input.jobId,
-          hostTurnId: input.hostTurnId,
-          turnToken: turn.turnToken,
-          reviewerSessionId: review.reviewerSessionId,
-          result: review.result
-        },
-        expectedStateVersion: state.stateVersion,
-        expectedJobId: input.jobId,
-        expectedRevision: run.revision,
-        expectedPhases: ["REVIEWING"]
-      },
-      async (current, context) => {
-        const currentRun = current.runs[input.jobId];
-        if (currentRun === undefined) throw new Error("RUN_NOT_FOUND");
-        const artifactFailure = await verifyRunArtifacts(store, currentRun);
-        if (artifactFailure !== undefined) {
-          throw new Error(`ARTIFACT_INTEGRITY_BLOCKED:${artifactFailure}`);
-        }
-        const observation = await observeApprovedSource(current, input.jobId);
-        const coordinator = new ReviewCoordinator(store);
-        if (!observation.matches) {
-          const paused = coordinator.pauseForApprovedSourceDrift(
-            current,
-            input.jobId,
-            observation
-          );
-          return {
-            nextState: paused.nextState,
-            response: { kind: "DRIFT" as const }
-          };
-        }
-        const finalized = await coordinator.finalizeReview(
-          current,
-          {
-            projectId: input.projectId,
-            jobId: input.jobId,
-            expectedRevision: run.revision,
-            hostTurnId: input.hostTurnId,
-            turnToken: turn.turnToken,
-            reviewerSessionId: review.reviewerSessionId,
-            result: review.result
-          },
-          context.nextStateVersion
-        );
-        return {
-          nextState: finalized.nextState,
-          response: { kind: "FINALIZED" as const, ...finalized.response }
-        };
-      }
-    );
-    this.clearDeadline(input.projectId, input.jobId);
-    if (mutation.response.kind === "DRIFT") {
-      return this.advance({ ...input, review: undefined });
-    }
-    this.scheduleOutcome(input.projectId, input.jobId, mutation.state, mutation.response);
-    return this.advance({ ...input, review: undefined });
   }
 
   private async finalizeLegacyDecision(input: ReviewTurnInput): Promise<void> {
@@ -502,47 +239,6 @@ export class HostTurnCoordinator {
       state,
       kind: outcome.schedule
     });
-  }
-
-  private async reportReviewUnavailable(input: ReviewTurnInput): Promise<ReviewTurnOutput> {
-    const store = this.dependencies.store(input.projectId);
-    const state = await store.readState();
-    const run = state.runs[input.jobId];
-    const turn = run?.hostTurn;
-    if (
-      run === undefined ||
-      turn?.stage !== "AWAITING_REVIEW" ||
-      turn.turnToken !== input.turnToken ||
-      input.reviewUnavailableReason === undefined
-    ) {
-      return this.staleContinuation();
-    }
-    this.assertHostOwner(turn, input.hostTurnId);
-    const reason = input.reviewUnavailableReason.startsWith("HOST_REVIEW_UNAVAILABLE")
-      ? input.reviewUnavailableReason
-      : `HOST_REVIEW_UNAVAILABLE:${input.reviewUnavailableReason}`;
-    await new ProjectMutationExecutor(store).mutate(
-      {
-        requestId: childRequestId(turn.turnToken, "review-unavailable"),
-        payload: { kind: "review-unavailable", reason },
-        expectedStateVersion: state.stateVersion,
-        expectedJobId: input.jobId,
-        expectedRevision: run.revision,
-        expectedPhases: ["REVIEWING"]
-      },
-      (current) => ({
-        nextState: new ReviewCoordinator(store).pauseForHostUnavailable(
-          current,
-          input.jobId,
-          turn.turnToken,
-          new Date(),
-          reason
-        ),
-        response: { phase: "PAUSED" as const }
-      })
-    );
-    this.clearDeadline(input.projectId, input.jobId);
-    return this.advance({ ...input, reviewUnavailableReason: undefined });
   }
 
   private async requireUserInput(
@@ -810,94 +506,5 @@ export class HostTurnCoordinator {
 
   private assertHostOwner(turn: HostTurn, hostTurnId: string): void {
     if (turn.hostTurnId !== hostTurnId) throw new Error("HOST_TURN_OWNED_BY_ANOTHER_HOST");
-  }
-
-  private scheduleDeadline(projectId: string, jobId: string, state: ProjectState): void {
-    if (this.disposed) return;
-    const run = state.runs[jobId];
-    const turn = run?.hostTurn;
-    if (run?.phase !== "REVIEWING" || turn?.stage !== "AWAITING_REVIEW") return;
-    this.scheduleWakeAt(projectId, jobId, Date.parse(turn.deadlineAt));
-  }
-
-  private scheduleWakeAt(projectId: string, jobId: string, dueAt: number): void {
-    if (this.disposed) return;
-    const key = runKey(projectId, jobId);
-    const existing = this.timers.get(key);
-    if (existing !== undefined && existing.dueAt <= dueAt) return;
-    if (existing !== undefined) clearTimeout(existing.timer);
-    const delay = Math.max(0, dueAt - Date.now());
-    const timer = setTimeout(() => {
-      if (this.timers.get(key)?.timer !== timer) return;
-      this.timers.delete(key);
-      void this.expireReviewTurn(projectId, jobId).catch(() => {
-        this.scheduleWakeAt(projectId, jobId, Date.now() + DEFAULT_RETRY_AFTER_MS);
-      });
-    }, delay);
-    timer.unref();
-    this.timers.set(key, { timer, dueAt });
-  }
-
-  private clearDeadline(projectId: string, jobId: string): void {
-    const key = runKey(projectId, jobId);
-    const entry = this.timers.get(key);
-    if (entry !== undefined) clearTimeout(entry.timer);
-    this.timers.delete(key);
-  }
-
-  private async expireReviewTurn(projectId: string, jobId: string): Promise<void> {
-    const state = await this.dependencies.store(projectId).readState();
-    const turn = state.runs[jobId]?.hostTurn;
-    if (turn?.stage !== "AWAITING_REVIEW") return;
-    if (Date.parse(turn.deadlineAt) > Date.now()) {
-      this.scheduleDeadline(projectId, jobId, state);
-      return;
-    }
-    await this.pauseActiveReview(
-      projectId,
-      jobId,
-      turn,
-      "HOST_REVIEW_UNAVAILABLE:thirty-minute review deadline exceeded"
-    );
-  }
-
-  private async pauseActiveReview(
-    projectId: string,
-    jobId: string,
-    expectedTurn: Extract<HostTurn, { stage: "AWAITING_REVIEW" }>,
-    reason: string
-  ): Promise<void> {
-    const store = this.dependencies.store(projectId);
-    const state = await store.readState();
-    const run = state.runs[jobId];
-    if (
-      run?.phase !== "REVIEWING" ||
-      run.hostTurn?.stage !== "AWAITING_REVIEW" ||
-      run.hostTurn.turnToken !== expectedTurn.turnToken
-    ) {
-      this.clearDeadline(projectId, jobId);
-      return;
-    }
-    await new ProjectMutationExecutor(store).mutate(
-      {
-        requestId: childRequestId(expectedTurn.turnToken, `pause-${reason}`),
-        payload: { kind: "pause-review-turn", reason },
-        expectedStateVersion: state.stateVersion,
-        expectedJobId: jobId,
-        expectedRevision: run.revision,
-        expectedPhases: ["REVIEWING"]
-      },
-      (current) => ({
-        nextState: new ReviewCoordinator(store).pauseForHostUnavailable(
-          current,
-          jobId,
-          expectedTurn.turnToken,
-          new Date(),
-          reason
-        ),
-        response: { phase: "PAUSED" as const }
-      })
-    );
-    this.clearDeadline(projectId, jobId);
   }
 }

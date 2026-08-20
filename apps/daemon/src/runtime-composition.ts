@@ -6,6 +6,7 @@ import { StructuredLogger } from "@smartflow/observability";
 import type { PublishServiceResult, WorkspaceApplyAdapter } from "@smartflow/publish";
 import type { WorkerProvider } from "@smartflow/provider-core";
 import { PI_MINIMUM_ATTEMPT_DEADLINE_MS } from "@smartflow/provider-pi";
+import type { AgentAdapter, AgentRunOutcome } from "@smartflow/review";
 import type { ProjectState, RunRecord, WorkerAttempt } from "@smartflow/state-store";
 import { taskManifestSchema } from "@smartflow/task-manifest";
 import { ExecutionSandboxAdapter } from "@smartflow/workspace";
@@ -24,6 +25,11 @@ import {
   verifyRunArtifacts,
   type RecoveryRuntime
 } from "./recovery-manager.js";
+import { ReviewCoordinator } from "./review-coordinator.js";
+import {
+  ReviewRunner,
+  type ReviewRunnerOptions
+} from "./review-runner.js";
 import { WorkerRunner } from "./worker-runner.js";
 
 function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
@@ -52,6 +58,29 @@ function attemptDeadlineMs(config: Readonly<Record<string, unknown>>): number {
     : 300_000;
 }
 
+const unavailableReviewOutcome: AgentRunOutcome = {
+  kind: "FAILED",
+  code: "REVIEW_ADAPTER_UNAVAILABLE",
+  message: "No daemon Review Adapter is configured"
+};
+
+const unavailableReviewAdapter: AgentAdapter = {
+  id: "unavailable",
+  probe: () => Promise.resolve({
+    available: false,
+    agentId: "unavailable",
+    reason: "No daemon Review Adapter is configured"
+  }),
+  createSession: () => Promise.resolve(unavailableReviewOutcome),
+  resume: () => Promise.resolve(unavailableReviewOutcome),
+  cancel: () => Promise.resolve(false)
+};
+
+const defaultReviewOptions: Omit<ReviewRunnerOptions, "logger"> = {
+  deadlineMs: 45 * 60_000,
+  maxAttempts: 3
+};
+
 export class ProductionRuntimeComposition {
   public constructor(
     private readonly daemonDataDirectory: string,
@@ -59,7 +88,9 @@ export class ProductionRuntimeComposition {
     private readonly workspaceApplyAdapter?: WorkspaceApplyAdapter,
     private readonly provider?: WorkerProvider,
     private readonly providerRuntimeConfig: Readonly<Record<string, unknown>> = Object.freeze({}),
-    private readonly providerRuntimeResolver?: ProviderRuntimeResolver
+    private readonly providerRuntimeResolver?: ProviderRuntimeResolver,
+    private readonly reviewAdapter: AgentAdapter = unavailableReviewAdapter,
+    private readonly reviewOptions: Omit<ReviewRunnerOptions, "logger"> = defaultReviewOptions
   ) {}
 
   private repairCoordinator(
@@ -125,6 +156,33 @@ export class ProductionRuntimeComposition {
         context,
         providerRuntime.providerRuntimeConfig
       );
+      return;
+    }
+    if (worker.phase === "REVIEW_PENDING") {
+      const reviewState = await context.store.readState();
+      const reviewRun = reviewState.runs[context.jobId];
+      if (reviewRun?.phase === "REVIEW_PENDING") {
+        await this.review(this.contextForRun(context, reviewRun));
+      }
+    }
+  };
+
+  public review = async (context: ProjectPipelineContext): Promise<void> => {
+    if (!(await this.contextCurrent(context))) return;
+    if (!(await this.approvedSourceCurrent(context))) return;
+    const outcome = await new ReviewRunner(context.store, this.reviewAdapter, {
+      ...this.reviewOptions,
+      logger: this.logger
+    }).run({ projectId: context.projectId, jobId: context.jobId });
+    if (outcome.schedule === "none") return;
+    const state = await context.store.readState();
+    const run = state.runs[context.jobId];
+    if (run === undefined) return;
+    const nextContext = this.contextForRun(context, run);
+    if (outcome.schedule === "pipeline") {
+      await this.runPipeline(nextContext);
+    } else {
+      await this.publish(nextContext);
     }
   };
 
@@ -190,6 +248,10 @@ export class ProductionRuntimeComposition {
       ).prepare(context.jobId);
       return;
     }
+    if (result.action === "RUN_REVIEW") {
+      await this.review(context);
+      return;
+    }
     if (result.action === "RECHECK_PUBLISH_READINESS") await this.publish(context);
   };
 
@@ -205,7 +267,17 @@ export class ProductionRuntimeComposition {
         if (canceled?.treeEmpty === true) return true;
         return this.stopPersistedAttempt(context, attempt);
       },
-      revokeAction: () => Promise.resolve(true)
+      revokeAction: async (actionId): Promise<boolean> => {
+        const state = await context.store.readState();
+        const action = state.runs[context.jobId]?.pendingAction;
+        if (stringField(action, "actionId") !== actionId || action?.type !== "REVIEW") {
+          return true;
+        }
+        const reviewAttemptId = stringField(action, "reviewAttemptId");
+        if (reviewAttemptId === undefined) return false;
+        await this.reviewAdapter.cancel(reviewAttemptId);
+        return true;
+      }
     };
   }
 
@@ -323,6 +395,21 @@ export class ProductionRuntimeComposition {
       (current) => {
         const active = current.runs[run.jobId];
         if (active === undefined) throw new Error("APPROVED_SOURCE_RUN_MISSING");
+        if (new Set<RunRecord["phase"]>([
+          "REVIEW_PENDING",
+          "REVIEWING",
+          "LEADER_DECISION"
+        ]).has(active.phase)) {
+          const paused = new ReviewCoordinator(context.store).pauseForApprovedSourceDrift(
+            current,
+            run.jobId,
+            { approvedHash, observedHash: observed }
+          );
+          return {
+            nextState: paused.nextState,
+            response: { phase: "PAUSED", code: "APPROVED_SOURCE_DRIFT" }
+          };
+        }
         const updatedAt = new Date().toISOString();
         return {
           nextState: {

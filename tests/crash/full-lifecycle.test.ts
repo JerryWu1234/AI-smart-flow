@@ -4,8 +4,10 @@ import { dirname, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  DAEMON_REVIEWER_HOST_TURN_ID,
   PublishCoordinator,
   RecoveryManager,
+  pendingReviewAction,
   type PublishRecoveryObservation,
   type RecoveryAction,
   type RecoveryRuntime
@@ -39,11 +41,47 @@ function parseArtifact(bytes: Uint8Array): Record<string, unknown> {
   return JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
 }
 
+async function putReviewingOwner(
+  store: Awaited<ReturnType<typeof createLifecycleStore>>,
+  hostTurnId: string
+): Promise<void> {
+  const state = await store.readState();
+  const run = state.runs["job-1"];
+  if (run === undefined) throw new Error("Review recovery fixture has no run");
+  const action = pendingReviewAction(run);
+  if (action === undefined) throw new Error("Review recovery fixture has no pending action");
+  const startedAt = new Date().toISOString();
+  const deadlineAt = new Date(Date.now() + 60_000).toISOString();
+  await store.writeState({
+    ...state,
+    stateVersion: state.stateVersion + 1,
+    runs: {
+      ...state.runs,
+      [run.jobId]: {
+        ...run,
+        phase: "REVIEWING",
+        pendingAction: { ...action, expiresAt: deadlineAt },
+        hostTurn: {
+          stage: "AWAITING_REVIEW",
+          turnToken: "durable-review-turn",
+          hostTurnId,
+          revision: run.revision,
+          reviewAttemptId: action.reviewAttemptId,
+          startedAt,
+          deadlineAt
+        },
+        updatedAt: startedAt
+      }
+    },
+    updatedAt: startedAt
+  });
+}
+
 const stableActions: ReadonlyArray<[RunPhase, RecoveryAction]> = [
   ["PREPARING", "REBUILD_WORKSPACE"],
   ["RUNNING", "RESUME_WORKER"],
   ["FIXING", "PREPARE_REPAIR"],
-  ["REVIEW_PENDING", "WAIT_FOR_HOST"],
+  ["REVIEW_PENDING", "RUN_REVIEW"],
   ["LEADER_DECISION", "WAIT_FOR_LEADER"],
   ["READY_TO_PUBLISH", "RECHECK_PUBLISH_READINESS"],
   ["PAUSED", "NONE"]
@@ -66,6 +104,24 @@ describe("phase-complete crash recovery", () => {
     const second = await new RecoveryManager(store, runtime).recover("job-1");
     expect(first.action).toBe(expectedAction);
     expect(second.action).toBe(expectedAction);
+    expect((await store.readState()).stateVersion).toBe(before.stateVersion);
+  });
+
+  it.each([
+    [DAEMON_REVIEWER_HOST_TURN_ID, "RUN_REVIEW"],
+    ["foreign-review-host", "WAIT_FOR_HOST"]
+  ] as const)("recovers REVIEWING owner %s as %s", async (hostTurnId, expectedAction) => {
+    const harness = await createRuntimeHarness();
+    harnesses.push(harness);
+    const store = await createLifecycleStore(harness, "REVIEW_PENDING");
+    await putReviewingOwner(store, hostTurnId);
+    const before = await store.readState();
+
+    const first = await new RecoveryManager(store, runtime).recover("job-1");
+    const second = await new RecoveryManager(store, runtime).recover("job-1");
+
+    expect(first).toMatchObject({ phase: "REVIEWING", action: expectedAction });
+    expect(second).toMatchObject({ phase: "REVIEWING", action: expectedAction });
     expect((await store.readState()).stateVersion).toBe(before.stateVersion);
   });
 
@@ -309,7 +365,8 @@ describe("phase-complete crash recovery", () => {
           completionPercentage: 50,
           issues: [{
             path: "sum.js",
-            message: "sum does not implement the requested review change"
+            message: "sum does not implement the requested review change",
+            suggestedFix: null
           }]
         }]
       }
