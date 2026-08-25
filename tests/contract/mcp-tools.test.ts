@@ -69,7 +69,7 @@ const executeInput = {
   expectedStateVersion: 0
 };
 
-describe("smartflow.v6 MCP handlers", () => {
+describe("SmartFlow MCP handlers", () => {
   it("registers exactly the six public tools and validates approvedSourceHash", async () => {
     const handlers = createToolHandlers(new FakeDaemonGateway());
     expect(Object.keys(handlers).sort()).toEqual([

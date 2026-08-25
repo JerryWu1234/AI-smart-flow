@@ -1,9 +1,6 @@
 import type { ReviewResult } from "@smartflow/protocol";
 
-export type ReviewResultInput = ReviewResult;
-
 export interface ReviewGateContext {
-  reviewAttemptId: string;
   reviewerSessionId: string;
   piSessionId: string;
   boundReviewerSessionId?: string;
@@ -17,7 +14,7 @@ export interface ReviewGateDecision {
 
 export function evaluateReviewGate(
   context: ReviewGateContext,
-  input: ReviewResultInput
+  input: ReviewResult
 ): ReviewGateDecision {
   if (context.reviewerSessionId === context.piSessionId) {
     throw new Error("REVIEWER_SESSION_MATCHES_WORKER");

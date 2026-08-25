@@ -13,6 +13,14 @@ describe("SmartFlow doctor classification", () => {
       }
     });
     expect(report).toMatchObject({ status: "blocking-unavailable", ready: false });
+    expect(Object.keys(report).sort()).toEqual([
+      "capabilities",
+      "config",
+      "dataDirectory",
+      "ready",
+      "schemaVersion",
+      "status"
+    ]);
     expect(report.capabilities[0]?.id).toBe("config");
     expect(report.capabilities[0]?.summary).toMatch(/SMARTFLOW_PI_BASE_URL is required/u);
     expect(JSON.stringify(report)).not.toContain("doctor-secret-canary");

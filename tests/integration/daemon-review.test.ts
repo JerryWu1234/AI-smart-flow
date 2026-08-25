@@ -131,7 +131,6 @@ function runner(
 
 async function putReviewing(
   store: StateStore,
-  hostTurnId: string,
   turnToken = "durable-review-turn"
 ): Promise<Awaited<ReturnType<StateStore["readState"]>>> {
   const state = await store.readState();
@@ -155,7 +154,7 @@ async function putReviewing(
         hostTurn: {
           stage: "AWAITING_REVIEW",
           turnToken,
-          hostTurnId,
+          hostTurnId: DAEMON_REVIEWER_HOST_TURN_ID,
           revision: run.revision,
           reviewAttemptId: action.reviewAttemptId,
           startedAt: now.toISOString(),
@@ -373,7 +372,7 @@ describe("ReviewRunner", () => {
 
   it("recovers a daemon-owned REVIEWING turn without beginning it again", async () => {
     const { store } = await reviewFixture();
-    const claimed = await putReviewing(store, DAEMON_REVIEWER_HOST_TURN_ID);
+    const claimed = await putReviewing(store);
     const adapter = new FakeReviewAdapter([{
       kind: "COMPLETED",
       sessionId: "review-session-recovered",
@@ -394,22 +393,6 @@ describe("ReviewRunner", () => {
     expect(Object.keys(recovered.processedRequests).some(
       (requestId) => requestId.startsWith("daemon-review-begin-")
     )).toBe(false);
-  });
-
-  it("rejects a non-daemon REVIEWING owner without invoking the adapter", async () => {
-    const { store } = await reviewFixture();
-    await putReviewing(store, "human-review-host");
-    const before = await store.readState();
-    const adapter = new FakeReviewAdapter([]);
-
-    await expect(runner(store, adapter, 1).run({
-      projectId: "project-1",
-      jobId: "job-1"
-    })).rejects.toThrow("REVIEW_TURN_NOT_DAEMON_OWNED");
-
-    expect(adapter.probeCalls).toBe(0);
-    expect(adapter.calls).toHaveLength(0);
-    expect(await store.readState()).toEqual(before);
   });
 
   it("pauses with a clear reason when the reviewer probe is unavailable", async () => {

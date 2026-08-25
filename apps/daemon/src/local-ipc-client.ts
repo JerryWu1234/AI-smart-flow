@@ -2,8 +2,6 @@ import { createConnection, type Socket } from "node:net";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 
-import { SMARTFLOW_IPC_PROTOCOL } from "./local-ipc-server.js";
-
 interface PendingCall {
   settle(value: unknown): void;
   reject(error: Error): void;
@@ -61,7 +59,6 @@ export class LocalIpcClient {
     });
     socket.write(`${JSON.stringify({
         type: "handshake",
-        protocol: SMARTFLOW_IPC_PROTOCOL,
         uid: process.getuid?.() ?? null,
         ...(expectedDaemonConfigFingerprint === undefined
           ? {}
@@ -80,7 +77,6 @@ export class LocalIpcClient {
         lines.close();
         const response = JSON.parse(line) as {
           type?: unknown;
-          protocol?: unknown;
           instanceId?: unknown;
           daemonConfigFingerprint?: unknown;
           providerRuntimeConfigHash?: unknown;
@@ -98,7 +94,6 @@ export class LocalIpcClient {
         }
         if (
           response.type !== "ready" ||
-          response.protocol !== SMARTFLOW_IPC_PROTOCOL ||
           typeof response.instanceId !== "string"
         ) {
           socket.end();

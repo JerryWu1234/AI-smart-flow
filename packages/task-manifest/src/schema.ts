@@ -2,7 +2,7 @@ import { z } from "zod";
 
 const moduleIdSchema = z.string().regex(/^M\d{2}$/u);
 
-export const manifestTaskSchema = z
+const manifestTaskSchema = z
   .object({
     id: z.string().regex(/^T\d{3,}$/u),
     module: moduleIdSchema,

@@ -31,7 +31,7 @@ describe("ProjectState schema and recovery source", () => {
       hostTurn: {
         stage: "AWAITING_REVIEW",
         turnToken: "turn-1",
-        hostTurnId: "host-turn-1",
+        hostTurnId: "daemon-reviewer",
         revision: 1,
         reviewAttemptId: "review-attempt-1",
         startedAt: "2026-08-11T10:00:00+00:00",
@@ -52,113 +52,22 @@ describe("ProjectState schema and recovery source", () => {
         }
       }
     }).success).toBe(false);
-  });
-
-  it("migrates v4 Review claim state through v5 into one v6 Host turn checkpoint", () => {
-    const run = createRunRecord({
-      phase: "REVIEWING",
-      pendingAction: {
-        type: "REVIEW",
-        actionId: "review-action-1",
-        revision: 1,
-        taskSourceHash: "a".repeat(64),
-        candidateHash: "b".repeat(64),
-        reviewAttemptId: "review-attempt-1",
-        changedPaths: ["src/example.ts"],
-        reviewerSession: { mode: "CREATE" },
-        piSessionId: "pi-session-1",
-        expiresAt: "2026-08-11T10:15:00+00:00",
-        claimId: "claim-1",
-        hostTurnId: "host-turn-1",
-        claimExpiresAt: "2026-08-11T10:05:00+00:00",
-        claimStatus: "CLAIMED"
-      }
-    });
-    const v4 = {
-      ...createProjectState({ runs: { [run.jobId]: run } }),
-      schemaVersion: 4,
+    expect(projectStateSchema.safeParse({
+      ...state,
       runs: {
         [run.jobId]: {
           ...run,
-          hostTurn: {
-            stage: "AWAITING_REVIEW",
-            turnToken: "turn-1",
-            hostTurnId: "host-turn-1",
-            revision: 1,
-            actionId: "review-action-1",
-            claimId: "claim-1",
-            reviewAttemptId: "review-attempt-1",
-            startedAt: "2026-08-11T10:00:00+00:00",
-            deadlineAt: "2026-08-11T10:30:00+00:00"
-          }
+          hostTurn: { ...run.hostTurn, hostTurnId: "host-turn-1" }
         }
       }
-    };
-    const migrated = projectStateSchema.parse(v4);
-    expect(migrated.schemaVersion).toBe(6);
-    expect(migrated.runs[run.jobId]?.hostTurn).toEqual({
-      stage: "AWAITING_REVIEW",
-      turnToken: "turn-1",
-      hostTurnId: "host-turn-1",
-      revision: 1,
-      reviewAttemptId: "review-attempt-1",
-      startedAt: "2026-08-11T10:00:00+00:00",
-      deadlineAt: "2026-08-11T10:30:00+00:00"
-    });
-    expect(migrated.runs[run.jobId]?.pendingAction).not.toHaveProperty("claimId");
-    expect(migrated.runs[run.jobId]?.pendingAction).not.toHaveProperty("claimExpiresAt");
+    }).success).toBe(false);
   });
 
-  it("migrates v5 publish source and pause actions into the v6 manual-confirmation model", () => {
-    const operationId = "publish-legacy";
-    const operationsHash = "e".repeat(64);
-    const run = createRunRecord({
-      phase: "PAUSED",
-      publish: {
-        operationId,
-        operationsHash,
-        adapterId: "legacy-adapter",
-        revision: 1,
-        status: "SUBMITTED"
-      },
-      pause: {
-        code: "PUBLISH_ADAPTER_UNAVAILABLE",
-        resumeActions: ["retry_publish", "cancel"]
-      }
-    });
-    const legacyRun = {
-      ...run,
-      deliveryBundle: {
-        relativePath: "runs/job-1/revision-1/legacy-delivery.json",
-        sha256: "d".repeat(64),
-        size: 1
-      },
-      pause: {
-        code: "PUBLISH_ADAPTER_UNAVAILABLE",
-        resumeActions: ["retry_publish", "export_bundle", "cancel"]
-      }
-    };
-    const v5 = {
-      ...createProjectState({ runs: { [run.jobId]: run } }),
-      schemaVersion: 5,
-      runs: { [run.jobId]: legacyRun }
-    };
-
-    const migrated = projectStateSchema.parse(v5);
-    const migratedRun = migrated.runs[run.jobId];
-    expect(migrated.schemaVersion).toBe(6);
-    expect(migratedRun).not.toHaveProperty("deliveryBundle");
-    expect(migratedRun?.pause?.resumeActions).toEqual([
-      "retry_publish",
-      "confirm_manual_publish",
-      "cancel"
-    ]);
-    expect(migratedRun?.recovery).toMatchObject({
-      publishSourceMigration: {
-        sourceSchemaVersion: 5,
-        legacyOperationIdentity: true
-      }
-    });
+  it.each([4, 5])("rejects project state schema v%s", (schemaVersion) => {
+    expect(projectStateSchema.safeParse({
+      ...createProjectState(),
+      schemaVersion
+    }).success).toBe(false);
   });
 
   it("persists Pi Attempt session/containment identity and TIMED_OUT", () => {

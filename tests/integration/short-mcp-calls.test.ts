@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   LocalIpcClient,
   LocalIpcServer,
-  SMARTFLOW_IPC_PROTOCOL,
   resolveWorkerLaunchConfiguration,
   startSmartFlowDaemon
 } from "@smartflow/daemon";
@@ -74,7 +73,6 @@ describe("short MCP calls and independent daemon jobs", () => {
     socket.write(
       `${JSON.stringify({
         type: "handshake",
-        protocol: SMARTFLOW_IPC_PROTOCOL,
         uid: (process.getuid?.() ?? 0) + 1
       })}\n`
     );

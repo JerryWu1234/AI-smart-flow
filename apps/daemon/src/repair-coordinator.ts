@@ -61,7 +61,8 @@ export class RepairCoordinator {
 
   public constructor(
     private readonly store: StateStore,
-    private readonly providerRuntimeConfig: Readonly<Record<string, unknown>>
+    private readonly providerRuntimeConfig: Readonly<Record<string, unknown>>,
+    private readonly noProgressThreshold = 15
   ) {
     this.mutations = new ProjectMutationExecutor(store);
   }
@@ -143,7 +144,11 @@ export class RepairCoordinator {
       previousRound ?? currentRound,
       currentRound,
       previousRound === undefined ? -1 : run.noProgressCount,
-      { parentManifest, firstTaskNumber: nextTaskNumber(parentManifest) }
+      {
+        parentManifest,
+        firstTaskNumber: nextTaskNumber(parentManifest),
+        noProgressThreshold: this.noProgressThreshold
+      }
     );
     if (assessed.pauseRequired) {
       await this.pause(run, currentRound, assessed.noProgressCount, "REPAIR_NO_PROGRESS");

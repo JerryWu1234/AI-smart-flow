@@ -237,6 +237,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     let firstClient: LocalIpcClient | undefined;
     try {
       firstClient = await LocalIpcClient.connect(firstServer.endpoint);
+      expect(await firstClient.call("smartflow_health", {})).toEqual({ ready: true });
       const request = {
         projectRoot: harness.projectDir,
         tasksPath: "tasks.md",
@@ -755,7 +756,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       const reviewState = await store.readState();
       const reviewRun = reviewState.runs["job-1"];
       if (reviewRun === undefined) throw new Error("review source drift run is missing");
-      const composition = new ProductionRuntimeComposition(dataDirectory);
+      const composition = new ProductionRuntimeComposition();
       await composition.review({
         store,
         projectId,

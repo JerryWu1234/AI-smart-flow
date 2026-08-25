@@ -5,8 +5,8 @@ const privateKeyBlock = /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*P
 const posixAbsolutePath = /(^|[\s"'`=:(])\/(?!\/)[^\s"'`,;)}\]]+/gu;
 const windowsAbsolutePath = /\b[A-Za-z]:\\[^\s"'`,;)}\]]+/gu;
 
-export const REDACTED = "[REDACTED]";
-export const REDACTED_PATH = "[REDACTED_PATH]";
+const REDACTED = "[REDACTED]";
+const REDACTED_PATH = "[REDACTED_PATH]";
 
 function redactString(value: string): string {
   return value

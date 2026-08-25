@@ -16,7 +16,6 @@ export const runPhaseSchema = z.enum([
   "FIXING",
   "REVIEW_PENDING",
   "REVIEWING",
-  "LEADER_DECISION",
   "READY_TO_PUBLISH",
   "PUBLISHING",
   "PAUSED",

@@ -12,7 +12,7 @@ import {
   type ArtifactRef
 } from "@smartflow/protocol";
 
-export const workspaceRefSchema = z
+const workspaceRefSchema = z
   .object({
     relativePath: z.string().min(1),
     baselineHash: z.string().regex(/^[a-f0-9]{64}$/u),
@@ -22,7 +22,7 @@ export const workspaceRefSchema = z
   })
   .strict();
 
-export const gitRevisionWorkspaceSchema = z.object({
+const gitRevisionWorkspaceSchema = z.object({
   revision: z.number().int().positive(),
   indexPath: z.string().min(1),
   workspacePath: z.string().min(1),
@@ -34,7 +34,7 @@ export const gitRevisionWorkspaceSchema = z.object({
   evidence: artifactRefSchema.optional()
 }).strict();
 
-export const gitRunWorkspaceSchema = z.object({
+const gitRunWorkspaceSchema = z.object({
   repositoryId: z.string().regex(/^[a-f0-9]{64}$/u),
   inclusionPolicyHash: z.string().regex(/^[a-f0-9]{64}$/u),
   objectDirectory: z.string().min(1),
@@ -42,7 +42,7 @@ export const gitRunWorkspaceSchema = z.object({
   revisions: z.record(z.string(), gitRevisionWorkspaceSchema)
 }).strict();
 
-export const publishAttemptSchema = z
+const publishAttemptSchema = z
   .object({
     operationId: z.string().min(1),
     operationsHash: z.string().regex(/^[a-f0-9]{64}$/u),
@@ -82,7 +82,7 @@ export const publishAttemptSchema = z
 
 const canonicalRecordSchema = z.record(z.string(), canonicalValueSchema);
 
-export const workerAttemptSchema = piWorkerAttemptSchema;
+const workerAttemptSchema = piWorkerAttemptSchema;
 
 const hostTurnIdentitySchema = z.object({
   turnToken: z.string().min(1).max(256),
@@ -91,9 +91,10 @@ const hostTurnIdentitySchema = z.object({
   startedAt: z.iso.datetime({ offset: true })
 });
 
-export const hostTurnSchema = z.discriminatedUnion("stage", [
+const hostTurnSchema = z.discriminatedUnion("stage", [
   hostTurnIdentitySchema.extend({
     stage: z.literal("AWAITING_REVIEW"),
+    hostTurnId: z.literal("daemon-reviewer"),
     reviewAttemptId: z.string().min(1),
     deadlineAt: z.iso.datetime({ offset: true })
   }).strict(),
@@ -103,7 +104,7 @@ export const hostTurnSchema = z.discriminatedUnion("stage", [
   }).strict()
 ]);
 
-export const runRecordSchema = z
+const runRecordSchema = z
   .object({
     jobId: z.string().min(1),
     canonicalTaskPath: z.string().min(1),
@@ -209,170 +210,7 @@ export const runRecordSchema = z
     }
   });
 
-function plainRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-function nonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function migrateV4Run(value: unknown): unknown {
-  const run = plainRecord(value);
-  if (run === undefined) return value;
-  const pendingSource = plainRecord(run.pendingAction);
-  const pendingAction = pendingSource === undefined ? undefined : { ...pendingSource };
-  if (pendingAction !== undefined) {
-    delete pendingAction.claimId;
-    delete pendingAction.hostTurnId;
-    delete pendingAction.claimExpiresAt;
-    delete pendingAction.claimStatus;
-    delete pendingAction.status;
-  }
-
-  const legacyTurn = plainRecord(run.hostTurn);
-  let hostTurn: Record<string, unknown> | undefined;
-  if (legacyTurn?.stage === "AWAITING_USER_INPUT") {
-    hostTurn = {
-      stage: "AWAITING_USER_INPUT",
-      turnToken: legacyTurn.turnToken,
-      hostTurnId: legacyTurn.hostTurnId,
-      revision: legacyTurn.revision,
-      pauseCode: legacyTurn.pauseCode,
-      startedAt: legacyTurn.startedAt
-    };
-  } else if (
-    legacyTurn?.stage === "AWAITING_REVIEW" ||
-    (legacyTurn?.stage === "CLAIMING" && run.phase === "REVIEWING")
-  ) {
-    const reviewAttemptId = nonEmptyString(legacyTurn.reviewAttemptId) ??
-      nonEmptyString(pendingSource?.reviewAttemptId);
-    if (reviewAttemptId !== undefined) {
-      hostTurn = {
-        stage: "AWAITING_REVIEW",
-        turnToken: legacyTurn.turnToken,
-        hostTurnId: legacyTurn.hostTurnId,
-        revision: legacyTurn.revision,
-        reviewAttemptId,
-        startedAt: legacyTurn.startedAt,
-        deadlineAt: legacyTurn.deadlineAt
-      };
-    }
-  }
-
-  const rest = { ...run };
-  delete rest.hostTurn;
-  delete rest.pendingAction;
-  if (run.phase === "REVIEWING" && hostTurn === undefined) {
-    return {
-      ...rest,
-      phase: "PAUSED",
-      ...(pendingAction === undefined ? {} : { pendingAction }),
-      pause: {
-        code: "HOST_REVIEW_UNAVAILABLE",
-        resumeActions: pendingAction?.type === "REVIEW"
-          ? ["retry_host_review", "cancel"]
-          : ["cancel"]
-      },
-      lastError: {
-        code: "HOST_REVIEW_UNAVAILABLE",
-        stage: "review",
-        message: "Legacy Review ownership could not be migrated safely",
-        retryable: pendingAction?.type === "REVIEW",
-        nextActions: pendingAction?.type === "REVIEW"
-          ? ["retry_host_review", "cancel"]
-          : ["cancel"],
-        artifacts: []
-      }
-    };
-  }
-  return {
-    ...rest,
-    ...(pendingAction === undefined ? {} : { pendingAction }),
-    ...(hostTurn === undefined ? {} : { hostTurn })
-  };
-}
-
-function migratePublishActions(value: unknown, pauseCode: unknown): unknown {
-  if (!Array.isArray(value)) return value;
-  const canConfirm = pauseCode === "PUBLISH_ADAPTER_UNAVAILABLE" ||
-    pauseCode === "PUBLISH_PRECHECK_CONFLICT";
-  const migrated: unknown[] = [];
-  for (const action of value as unknown[]) {
-    if (action === "export_bundle") {
-      if (canConfirm) migrated.push("confirm_manual_publish");
-    } else {
-      migrated.push(action);
-    }
-  }
-  return [...new Set(migrated)];
-}
-
-function migrateV5Run(value: unknown): unknown {
-  const run = plainRecord(value);
-  if (run === undefined) return value;
-  const migrated = { ...run };
-  const hadLegacyPublishSource = Object.hasOwn(migrated, "deliveryBundle");
-  delete migrated.deliveryBundle;
-
-  const pause = plainRecord(migrated.pause);
-  if (pause !== undefined) {
-    migrated.pause = {
-      ...pause,
-      resumeActions: migratePublishActions(pause.resumeActions, pause.code)
-    };
-  }
-  const lastError = plainRecord(migrated.lastError);
-  if (lastError !== undefined) {
-    migrated.lastError = {
-      ...lastError,
-      nextActions: migratePublishActions(lastError.nextActions, pause?.code)
-    };
-  }
-  if (hadLegacyPublishSource && plainRecord(migrated.publish) !== undefined) {
-    migrated.recovery = {
-      ...(plainRecord(migrated.recovery) ?? {}),
-      publishSourceMigration: {
-        sourceSchemaVersion: 5,
-        legacyOperationIdentity: true
-      }
-    };
-  }
-  return migrated;
-}
-
-function migrateProjectStateInput(value: unknown): unknown {
-  let state = plainRecord(value);
-  if (state?.schemaVersion === 4) {
-    const runs = plainRecord(state.runs);
-    state = {
-      ...state,
-      schemaVersion: 5,
-      runs: runs === undefined
-        ? state.runs
-        : Object.fromEntries(
-            Object.entries(runs).map(([jobId, run]) => [jobId, migrateV4Run(run)])
-          )
-    };
-  }
-  if (state?.schemaVersion !== 5) return state ?? value;
-  const runs = plainRecord(state.runs);
-  return {
-    ...state,
-    schemaVersion: 6,
-    runs: runs === undefined
-      ? state.runs
-      : Object.fromEntries(
-          Object.entries(runs).map(([jobId, run]) => [jobId, migrateV5Run(run)])
-        )
-  };
-}
-
-export const projectStateSchema = z.preprocess(
-  migrateProjectStateInput,
-  z.object({
+export const projectStateSchema = z.object({
     schemaVersion: z.literal(6),
     projectId: z.string().min(1),
     canonicalProjectRoot: z.string().min(1),
@@ -432,18 +270,14 @@ export const projectStateSchema = z.preprocess(
         });
       }
     }
-  }));
+  });
 
-export type WorkspaceRef = z.infer<typeof workspaceRefSchema>;
-export type GitRevisionWorkspace = z.infer<typeof gitRevisionWorkspaceSchema>;
-export type GitRunWorkspace = z.infer<typeof gitRunWorkspaceSchema>;
-export type PublishAttempt = z.infer<typeof publishAttemptSchema>;
 export type WorkerAttempt = z.infer<typeof workerAttemptSchema>;
 export type HostTurn = z.infer<typeof hostTurnSchema>;
 export type RunRecord = z.infer<typeof runRecordSchema>;
 export type ProjectState = z.infer<typeof projectStateSchema>;
 
-export interface RunArtifactBinding {
+interface RunArtifactBinding {
   name: string;
   ref: ArtifactRef;
   revision: number;
@@ -517,11 +351,11 @@ export function runArtifactInventory(run: RunRecord): RunArtifactInventory {
   }
 
   const requiresBaseline = new Set([
-    "RUNNING", "FIXING", "REVIEW_PENDING", "REVIEWING", "LEADER_DECISION",
+    "RUNNING", "FIXING", "REVIEW_PENDING", "REVIEWING",
     "READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"
   ]).has(run.phase);
   const requiresCandidate = new Set([
-    "FIXING", "REVIEW_PENDING", "REVIEWING", "LEADER_DECISION",
+    "FIXING", "REVIEW_PENDING", "REVIEWING",
     "READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"
   ]).has(run.phase);
   const publishPaused = run.phase === "PAUSED" && (
@@ -533,7 +367,7 @@ export function runArtifactInventory(run: RunRecord): RunArtifactInventory {
   const repairPaused = run.phase === "PAUSED" && (run.pause?.code.startsWith("REPAIR_") ?? false);
   const candidate = add("candidate", run.candidate, run.revision, "CANDIDATE", requiresCandidate || publishPaused || reviewPaused || repairPaused);
   add("baseline", run.baseline, 1, "BASELINE", requiresBaseline || publishPaused || reviewPaused || repairPaused);
-  add("review", run.review, run.revision, "REVIEW", new Set(["LEADER_DECISION", "READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase) || publishPaused);
+  add("review", run.review, run.revision, "REVIEW", new Set(["READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase) || publishPaused);
   add("leaderDecision", run.leaderDecision, run.revision, "LEADER_DECISION", new Set(["READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase) || publishPaused);
 
   const recovery = record(run.recovery);

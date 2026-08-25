@@ -148,28 +148,10 @@ export class HostTurnCoordinator {
         });
       }
       if (status.phase === "PAUSED") {
-        // Compatibility for a v4 repair draft. New safe repair revisions no longer pause.
-        if (status.pause?.code === "REPAIR_TASKS_READY") {
-          const result = resultOutputSchema.parse(await this.dependencies.result(input));
-          const draft = result.repairDraft;
-          if (draft?.approval.kind === "LEADER_REPAIR") {
-            await this.resumeCurrentState(
-              input,
-              childRequestId(input.requestId, `approve-r${String(status.revision)}`),
-              "approve_new_manifest_revision",
-              { approval: draft.approval }
-            );
-            continue;
-          }
-        }
         return this.requireUserInput(input, status.revision);
       }
       if (status.phase === "REVIEW_PENDING" || status.phase === "REVIEWING") {
         return this.notReady();
-      }
-      if (status.phase === "LEADER_DECISION") {
-        await this.finalizeLegacyDecision(input);
-        continue;
       }
       return this.notReady();
     }
@@ -186,44 +168,6 @@ export class HostTurnCoordinator {
   // it needs no Run state read. The next real turn re-reads and re-verifies.
   private staleContinuation(): ReviewTurnOutput {
     return this.notReady();
-  }
-
-  private async finalizeLegacyDecision(input: ReviewTurnInput): Promise<void> {
-    const store = this.dependencies.store(input.projectId);
-    const state = await store.readState();
-    const run = state.runs[input.jobId];
-    if (run?.phase !== "LEADER_DECISION" || run.review === undefined) return;
-    const requestSeed = run.review.sha256;
-    const mutation = await new ProjectMutationExecutor(store).mutate(
-      {
-        requestId: childRequestId(requestSeed, "finalize-legacy-decision"),
-        payload: {
-          kind: "finalize-legacy-review-decision",
-          projectId: input.projectId,
-          jobId: input.jobId,
-          revision: run.revision,
-          reviewHash: requestSeed
-        },
-        expectedStateVersion: state.stateVersion,
-        expectedJobId: input.jobId,
-        expectedRevision: run.revision,
-        expectedPhases: ["LEADER_DECISION"]
-      },
-      async (current, context) => {
-        const currentRun = current.runs[input.jobId];
-        if (currentRun === undefined) throw new Error("RUN_NOT_FOUND");
-        const artifactFailure = await verifyRunArtifacts(store, currentRun);
-        if (artifactFailure !== undefined) {
-          throw new Error(`ARTIFACT_INTEGRITY_BLOCKED:${artifactFailure}`);
-        }
-        return new ReviewCoordinator(store).finalizeStoredReview(
-          current,
-          input.jobId,
-          context.nextStateVersion
-        );
-      }
-    );
-    this.scheduleOutcome(input.projectId, input.jobId, mutation.state, mutation.response);
   }
 
   private scheduleOutcome(
@@ -480,28 +424,6 @@ export class HostTurnCoordinator {
       }
     );
     return mutation.state;
-  }
-
-  private async resumeCurrentState(
-    input: ReviewTurnInput,
-    requestId: string,
-    resumeAction: ResumeInput["resumeAction"],
-    extra: Partial<Pick<ResumeInput, "tasksPath" | "approvedSourceHash" | "approval">>
-  ): Promise<void> {
-    const state = await this.dependencies.store(input.projectId).readState();
-    const run = state.runs[input.jobId];
-    if (run === undefined) throw new Error("RUN_NOT_FOUND");
-    await this.dependencies.resume({
-      requestId,
-      projectId: input.projectId,
-      jobId: input.jobId,
-      expectedRevision: run.revision,
-      expectedStateVersion: state.stateVersion,
-      resumeAction,
-      ...extra
-    }, run.hostTurn === undefined
-      ? undefined
-      : { expectedHostTurnToken: run.hostTurn.turnToken });
   }
 
   private assertHostOwner(turn: HostTurn, hostTurnId: string): void {

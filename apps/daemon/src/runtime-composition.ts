@@ -81,23 +81,29 @@ const defaultReviewOptions: Omit<ReviewRunnerOptions, "logger"> = {
   maxAttempts: 3
 };
 
+const DEFAULT_NO_PROGRESS_THRESHOLD = 15;
+
 export class ProductionRuntimeComposition {
   public constructor(
-    private readonly daemonDataDirectory: string,
     private readonly logger = new StructuredLogger("smartflow-runtime"),
     private readonly workspaceApplyAdapter?: WorkspaceApplyAdapter,
     private readonly provider?: WorkerProvider,
     private readonly providerRuntimeConfig: Readonly<Record<string, unknown>> = Object.freeze({}),
     private readonly providerRuntimeResolver?: ProviderRuntimeResolver,
     private readonly reviewAdapter: AgentAdapter = unavailableReviewAdapter,
-    private readonly reviewOptions: Omit<ReviewRunnerOptions, "logger"> = defaultReviewOptions
+    private readonly reviewOptions: Omit<ReviewRunnerOptions, "logger"> = defaultReviewOptions,
+    private readonly noProgressThreshold = DEFAULT_NO_PROGRESS_THRESHOLD
   ) {}
 
   private repairCoordinator(
     store: ProjectPipelineContext["store"],
     providerRuntimeConfig: Readonly<Record<string, unknown>>
   ): RepairCoordinator {
-    return new RepairCoordinator(store, providerRuntimeConfig);
+    return new RepairCoordinator(
+      store,
+      providerRuntimeConfig,
+      this.noProgressThreshold
+    );
   }
 
   private async prepareRepairAndContinue(
@@ -142,7 +148,7 @@ export class ProductionRuntimeComposition {
       ]),
       "When the requested work is complete, answer briefly and stop."
     ].join("\n");
-    const worker = await new WorkerRunner(context.store, providerRuntime.provider, {
+    await new WorkerRunner(context.store, providerRuntime.provider, {
       logger: this.logger
     }).run({
       jobId: context.jobId,
@@ -151,19 +157,17 @@ export class ProductionRuntimeComposition {
       providerRuntimeConfigHash: manifest.providerRuntimeConfigHash,
       attemptDeadlineMs: attemptDeadlineMs(providerRuntime.providerRuntimeConfig)
     });
-    if (worker.phase === "FIXING") {
+    const postWorkerState = await context.store.readState();
+    const postWorkerRun = postWorkerState.runs[context.jobId];
+    if (postWorkerRun?.phase === "FIXING") {
       await this.prepareRepairAndContinue(
         context,
         providerRuntime.providerRuntimeConfig
       );
       return;
     }
-    if (worker.phase === "REVIEW_PENDING") {
-      const reviewState = await context.store.readState();
-      const reviewRun = reviewState.runs[context.jobId];
-      if (reviewRun?.phase === "REVIEW_PENDING") {
-        await this.review(this.contextForRun(context, reviewRun));
-      }
+    if (postWorkerRun?.phase === "REVIEW_PENDING") {
+      await this.review(this.contextForRun(context, postWorkerRun));
     }
   };
 
@@ -397,8 +401,7 @@ export class ProductionRuntimeComposition {
         if (active === undefined) throw new Error("APPROVED_SOURCE_RUN_MISSING");
         if (new Set<RunRecord["phase"]>([
           "REVIEW_PENDING",
-          "REVIEWING",
-          "LEADER_DECISION"
+          "REVIEWING"
         ]).has(active.phase)) {
           const paused = new ReviewCoordinator(context.store).pauseForApprovedSourceDrift(
             current,

@@ -227,11 +227,10 @@ describe("installed SmartFlow package", () => {
         "smartflow.mjs"
       );
       await writeFile(smartFlowConfigPath, [
-        "version: 5",
         "workspace:",
         "  mode: git-tree",
         "review:",
-        "  strategy: daemon-codex",
+        "  strategy: codex",
         "  onUnavailable: pause",
         "  noProgressThreshold: 15",
         "  deadlineMs: 300000",
@@ -378,19 +377,6 @@ describe("installed SmartFlow package", () => {
       expect(workflowToolNames.slice(1).every(
         (toolName) => toolName === "smartflow_review_turn"
       )).toBe(true);
-      for (const forbidden of [
-        "smartflow_wait",
-        "smartflow_status",
-        "smartflow_claim_action",
-        "smartflow_renew_action_claim",
-        "smartflow_submit_review",
-        "smartflow_submit_leader_decision",
-        "smartflow_resume",
-        "smartflow_result"
-      ]) {
-        expect(workflowToolNames).not.toContain(forbidden);
-      }
-
       expect(lifecycle).not.toHaveProperty("reviewerModes");
       expect(lifecycle).not.toHaveProperty("reviewChangedPaths");
       expect(lifecycle).not.toHaveProperty("reviewCalls");

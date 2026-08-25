@@ -55,7 +55,6 @@ interface StateRow {
 
 interface ParsedStateDocument {
   state: ProjectState;
-  sourceSchemaVersion: number;
 }
 
 interface MutationLeaseRow {
@@ -109,27 +108,18 @@ function parseJson(text: string, source: string): unknown {
 
 function parseStateDocument(text: string, source: string): ParsedStateDocument {
   const value = parseJson(text, source);
-  const sourceSchemaVersion = typeof value === "object" && value !== null &&
+  const schemaVersion = typeof value === "object" && value !== null &&
     "schemaVersion" in value
     ? (value as { schemaVersion?: unknown }).schemaVersion
     : undefined;
-  if (
-    typeof sourceSchemaVersion === "number" &&
-    !new Set([4, 5, 6]).has(sourceSchemaVersion)
-  ) {
+  if (typeof schemaVersion === "number" && schemaVersion !== 6) {
     throw new StateStoreError(
       "STATE_MIGRATION_UNSUPPORTED",
-      `Unsupported SmartFlow project state schema version: ${String(sourceSchemaVersion)}`
+      `Unsupported SmartFlow project state schema version: ${String(schemaVersion)}`
     );
   }
   try {
-    const state = projectStateSchema.parse(value);
-    return {
-      state,
-      sourceSchemaVersion: typeof sourceSchemaVersion === "number"
-        ? sourceSchemaVersion
-        : state.schemaVersion
-    };
+    return { state: projectStateSchema.parse(value) };
   } catch (error) {
     if (error instanceof StateStoreError) throw error;
     throw new StateStoreError(
@@ -159,7 +149,7 @@ function parseStateRow(row: StateRow, databasePath: string): ParsedStateDocument
   }
   const parsed = parseStateDocument(row.state_json, databasePath);
   if (
-    parsed.sourceSchemaVersion !== row.document_schema_version ||
+    parsed.state.schemaVersion !== row.document_schema_version ||
     parsed.state.stateVersion !== row.state_version ||
     parsed.state.projectFence !== row.project_fence ||
     parsed.state.updatedAt !== row.updated_at
@@ -459,28 +449,6 @@ export class StateStore {
         }
         commit(database);
         return inserted.state;
-      } catch (error) {
-        rollback(database);
-        throw error;
-      }
-    });
-  }
-
-  public async migrateState(): Promise<ProjectState> {
-    const state = await this.readState();
-    return this.withDatabase((database) => {
-      beginImmediate(database);
-      try {
-        const row = stateRow(database);
-        if (row === undefined) {
-          throw new StateStoreError("STATE_NOT_FOUND", `State does not exist: ${this.databasePath}`);
-        }
-        const parsed = parseStateRow(row, this.databasePath);
-        if (parsed.sourceSchemaVersion !== state.schemaVersion) {
-          updateState(database, state, state.stateVersion);
-        }
-        commit(database);
-        return state;
       } catch (error) {
         rollback(database);
         throw error;

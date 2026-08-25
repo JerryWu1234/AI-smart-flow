@@ -221,7 +221,7 @@ describe("Pi WorkerRunner", () => {
     const { store, configHash } = await initializedStore(harness);
     const logLines: string[] = [];
     const logger = new StructuredLogger("pi-runner-test", (line) => logLines.push(line));
-    const result = await new WorkerRunner(
+    await new WorkerRunner(
       store,
       new TestPiProvider(configHash, "COMPLETED"),
       { logger }
@@ -233,9 +233,9 @@ describe("Pi WorkerRunner", () => {
       attemptDeadlineMs: 10_000
     });
 
-    expect(result.phase).toBe("REVIEW_PENDING");
     const state = await store.readState();
     const run = state.runs["job-1"];
+    expect(run?.phase).toBe("REVIEW_PENDING");
     if (
       run?.candidate === undefined ||
       run.workspace === undefined ||
@@ -324,7 +324,7 @@ describe("Pi WorkerRunner", () => {
     const harness = await createRuntimeHarness();
     harnesses.push(harness);
     const { store, configHash } = await initializedStore(harness);
-    const result = await new WorkerRunner(store, new TestPiProvider(configHash, "TIMED_OUT")).run({
+    await new WorkerRunner(store, new TestPiProvider(configHash, "TIMED_OUT")).run({
       jobId: "job-1",
       revision: 1,
       prompt: "implement",
@@ -332,8 +332,8 @@ describe("Pi WorkerRunner", () => {
       attemptDeadlineMs: 10_000
     });
 
-    expect(result.phase).toBe("PAUSED");
     const run = (await store.readState()).runs["job-1"];
+    expect(run?.phase).toBe("PAUSED");
     expect(run?.workerAttempts).toHaveLength(1);
     expect(run?.workerAttempts[0]?.status).toBe("TIMED_OUT");
     expect(run?.pause?.code).toBe("ATTEMPT_DEADLINE_EXCEEDED");

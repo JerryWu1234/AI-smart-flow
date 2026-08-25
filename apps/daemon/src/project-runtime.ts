@@ -42,11 +42,7 @@ import { cleanupGitRunTemporaryState } from "@smartflow/workspace";
 
 import { createApprovedRevision } from "./approved-revision.js";
 import { observeApprovedSource } from "./approved-source.js";
-import {
-  SMARTFLOW_IPC_PROTOCOL,
-  type IpcRequest,
-  type IpcRequestHandler
-} from "./local-ipc-server.js";
+import { type IpcRequest, type IpcRequestHandler } from "./local-ipc-server.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
 import { HostTurnCoordinator } from "./host-turn-coordinator.js";
 import { verifyRunArtifacts } from "./recovery-manager.js";
@@ -155,7 +151,7 @@ function approvedSourceDriftResumePhase(run: RunRecord): RunRecord["phase"] | un
   const value = run.recovery?.approvedSourceDrift;
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const phase = (value as { resumePhase?: unknown }).resumePhase;
-  return phase === "REVIEW_PENDING" || phase === "LEADER_DECISION" ? phase : undefined;
+  return phase === "REVIEW_PENDING" ? phase : undefined;
 }
 
 function clearApprovedSourceDrift(recovery: RunRecord["recovery"]): RunRecord["recovery"] {
@@ -313,9 +309,7 @@ function resumeSchedule(
         ? "pipeline"
         : phase === "REVIEW_PENDING"
           ? "review"
-          : phase === "LEADER_DECISION"
-            ? "none"
-            : "recover";
+          : "recover";
     case "retry_publish":
     case "confirm_manual_publish":
       return "publish";
@@ -387,7 +381,7 @@ export class ProjectRuntime {
 
   public readonly handle: IpcRequestHandler = async (request: IpcRequest): Promise<unknown> => {
     if (request.method === "smartflow_health") {
-      return { protocolVersion: SMARTFLOW_IPC_PROTOCOL, ready: true };
+      return { ready: true };
     }
     switch (request.method) {
       case "smartflow_execute":
@@ -433,7 +427,7 @@ export class ProjectRuntime {
     for (const entry of entries) {
       if (!entry.isDirectory() || !/^project-[a-f0-9]{40}$/u.test(entry.name)) continue;
       const store = this.store(entry.name);
-      const initial = await store.migrateState();
+      const initial = await store.readState();
       for (const run of Object.values(initial.runs)) {
         if (new Set(["COMPLETED", "CANCELED", "FAILED"]).has(run.phase)) {
           await cleanupGitRunTemporaryState(store.dataDirectory, run);

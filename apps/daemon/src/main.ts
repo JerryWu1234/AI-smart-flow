@@ -5,7 +5,11 @@ import { MetricsRegistry, StructuredLogger } from "@smartflow/observability";
 import type { WorkspaceApplyAdapter } from "@smartflow/publish";
 import { CodexAdapter, type AgentAdapter } from "@smartflow/review";
 
-import { loadSmartFlowConfig, type SmartFlowConfig } from "./config.js";
+import {
+  loadSmartFlowConfig,
+  type ReviewStrategy,
+  type SmartFlowConfig
+} from "./config.js";
 import { resolveInstallationDataDirectory } from "./data-dir.js";
 import { LocalIpcServer, type IpcRequestHandler } from "./local-ipc-server.js";
 import { ProviderRegistry } from "./provider-registry.js";
@@ -16,6 +20,10 @@ import {
   WORKER_CONFIGURATION_ENVIRONMENT_KEYS,
   type ResolvedWorkerLaunchConfiguration
 } from "./worker-config.js";
+
+const REVIEW_ADAPTER_FACTORIES = {
+  codex: (): AgentAdapter => new CodexAdapter()
+} satisfies Record<ReviewStrategy, () => AgentAdapter>;
 
 export interface SmartFlowDaemonOptions {
   dataDirectory?: string;
@@ -54,9 +62,9 @@ export async function startSmartFlowDaemon(
     options.dataDirectory ?? resolve(resolveInstallationDataDirectory(), "daemon")
   );
   await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
-  const reviewAdapter = options.reviewAdapter ?? new CodexAdapter();
+  const reviewAdapter = options.reviewAdapter ??
+    REVIEW_ADAPTER_FACTORIES[config.review.strategy]();
   const composition = new ProductionRuntimeComposition(
-    dataDirectory,
     logger,
     options.workspaceApplyAdapter,
     initialProviderRuntime.provider,
@@ -67,7 +75,8 @@ export async function startSmartFlowDaemon(
       ...(config.review.model === undefined ? {} : { model: config.review.model }),
       deadlineMs: config.review.deadlineMs,
       maxAttempts: config.review.maxAttempts
-    }
+    },
+    config.review.noProgressThreshold
   );
   const projectRuntime = new ProjectRuntime({
     dataDirectory,

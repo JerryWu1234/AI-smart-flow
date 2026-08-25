@@ -35,7 +35,7 @@ export interface BeginReviewInput {
   projectId: string;
   jobId: string;
   expectedRevision: number;
-  hostTurnId: string;
+  hostTurnId: typeof DAEMON_REVIEWER_HOST_TURN_ID;
   turnToken: string;
   deadlineAt: string;
 }
@@ -50,7 +50,7 @@ export interface FinalizeReviewInput {
   projectId: string;
   jobId: string;
   expectedRevision: number;
-  hostTurnId: string;
+  hostTurnId: typeof DAEMON_REVIEWER_HOST_TURN_ID;
   turnToken: string;
   reviewerSessionId: string;
   result: ReviewResult;
@@ -225,7 +225,6 @@ export class ReviewCoordinator {
       run.phase !== "REVIEWING" ||
       turn?.stage !== "AWAITING_REVIEW" ||
       turn.turnToken !== input.turnToken ||
-      turn.hostTurnId !== input.hostTurnId ||
       action === undefined ||
       action.reviewAttemptId !== turn.reviewAttemptId
     ) {
@@ -258,7 +257,6 @@ export class ReviewCoordinator {
     assertReviewTaskCoverage(manifest.enabledTaskIds, reviewResult);
     const gate = evaluateReviewGate(
       {
-        reviewAttemptId: action.reviewAttemptId,
         reviewerSessionId: input.reviewerSessionId,
         piSessionId: workerSession(run),
         ...(boundSessionId === undefined ? {} : { boundReviewerSessionId: boundSessionId })
@@ -385,7 +383,7 @@ export class ReviewCoordinator {
       run.pause?.code === "AUTOMATIC_REPAIR_LIMIT";
     if (
       run === undefined ||
-      (run.phase !== "LEADER_DECISION" && !resumableRepairLimit) ||
+      !resumableRepairLimit ||
       run.review === undefined
     ) {
       throw new Error("LEADER_DECISION_NOT_READY");
@@ -482,7 +480,7 @@ export class ReviewCoordinator {
     const run = state.runs[jobId];
     if (
       run === undefined ||
-      !new Set<RunRecord["phase"]>(["REVIEW_PENDING", "REVIEWING", "LEADER_DECISION"])
+      !new Set<RunRecord["phase"]>(["REVIEW_PENDING", "REVIEWING"])
         .has(run.phase)
     ) {
       throw new Error("REVIEW_SOURCE_DRIFT_BOUNDARY_INVALID");

@@ -2,11 +2,14 @@ import { readFile } from "node:fs/promises";
 
 import { parse } from "yaml";
 
+export const REVIEW_STRATEGIES = ["codex"] as const;
+export type ReviewStrategy = (typeof REVIEW_STRATEGIES)[number];
+export const DEFAULT_REVIEW_STRATEGY: ReviewStrategy = "codex";
+
 export interface SmartFlowConfig {
-  version: 5;
   workspace: { mode: "git-tree" };
   review: {
-    strategy: "daemon-codex";
+    strategy: ReviewStrategy;
     onUnavailable: "pause";
     noProgressThreshold: 15;
     model?: string;
@@ -17,10 +20,9 @@ export interface SmartFlowConfig {
 }
 
 export const defaultSmartFlowConfig: SmartFlowConfig = {
-  version: 5,
   workspace: { mode: "git-tree" },
   review: {
-    strategy: "daemon-codex",
+    strategy: DEFAULT_REVIEW_STRATEGY,
     onUnavailable: "pause",
     noProgressThreshold: 15,
     deadlineMs: 45 * 60_000,
@@ -33,6 +35,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isReviewStrategy(value: unknown): value is ReviewStrategy {
+  return REVIEW_STRATEGIES.some((strategy) => strategy === value);
+}
+
 function exactKeys(record: Record<string, unknown>, allowed: readonly string[], scope: string): void {
   const unknown = Object.keys(record).filter((key) => !allowed.includes(key));
   if (unknown.length > 0) throw new Error(`Unknown ${scope} configuration: ${unknown.join(",")}`);
@@ -40,7 +46,7 @@ function exactKeys(record: Record<string, unknown>, allowed: readonly string[], 
 
 export function parseSmartFlowConfig(value: unknown): SmartFlowConfig {
   if (!isRecord(value)) throw new Error("SmartFlow configuration must be an object");
-  exactKeys(value, ["version", "workspace", "review", "publish"], "root");
+  exactKeys(value, ["workspace", "review", "publish"], "root");
   const workspace = value.workspace ?? defaultSmartFlowConfig.workspace;
   const review = value.review ?? defaultSmartFlowConfig.review;
   const publish = value.publish ?? defaultSmartFlowConfig.publish;
@@ -54,9 +60,8 @@ export function parseSmartFlowConfig(value: unknown): SmartFlowConfig {
     "review"
   );
   exactKeys(publish, ["mode", "onConflict"], "publish");
-  const version = value.version ?? 5;
   const workspaceMode = workspace.mode ?? "git-tree";
-  const reviewStrategy = review.strategy ?? "daemon-codex";
+  const reviewStrategy = review.strategy ?? DEFAULT_REVIEW_STRATEGY;
   const reviewUnavailable = review.onUnavailable ?? "pause";
   const noProgressThreshold = review.noProgressThreshold ?? 15;
   const model = review.model;
@@ -65,9 +70,8 @@ export function parseSmartFlowConfig(value: unknown): SmartFlowConfig {
   const publishMode = publish.mode ?? "auto-after-review";
   const publishConflict = publish.onConflict ?? "pause";
   if (
-    version !== 5 ||
     workspaceMode !== "git-tree" ||
-    reviewStrategy !== "daemon-codex" ||
+    !isReviewStrategy(reviewStrategy) ||
     reviewUnavailable !== "pause" ||
     noProgressThreshold !== 15 ||
     (model !== undefined && (typeof model !== "string" || model.trim().length === 0)) ||
@@ -82,10 +86,9 @@ export function parseSmartFlowConfig(value: unknown): SmartFlowConfig {
     publishMode !== "auto-after-review" ||
     publishConflict !== "pause"
   ) {
-    throw new Error("SmartFlow configuration contains unsupported V5 values");
+    throw new Error("SmartFlow configuration contains unsupported values");
   }
   return {
-    version,
     workspace: { mode: workspaceMode },
     review: {
       strategy: reviewStrategy,

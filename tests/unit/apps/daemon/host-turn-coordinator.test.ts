@@ -252,7 +252,7 @@ describe("HostTurnCoordinator daemon-owned Review boundary", () => {
             reviewAttemptId: "review-attempt-1",
             startedAt: nowText,
             deadlineAt: "2026-08-11T10:45:00.000Z"
-          }
+          } as const
         : undefined;
       const store = await createStore(reviewRun({ phase, hostTurn }));
       const before = await store.readState();

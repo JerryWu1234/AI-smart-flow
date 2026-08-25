@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest";
 
+import type { ReviewResult } from "@smartflow/protocol";
 import {
   assertLeaderDecision,
-  evaluateReviewGate,
-  type ReviewResultInput
+  evaluateReviewGate
 } from "@smartflow/review";
 
-function result(overrides: Partial<ReviewResultInput> = {}): ReviewResultInput {
+function result(overrides: Partial<ReviewResult> = {}): ReviewResult {
   return {
     tasks: [{ id: "T031", completionPercentage: 100, issues: [] }],
     ...overrides
   };
 }
 
-function incompleteResult(message = "validateInput fails to reject an empty token"): ReviewResultInput {
+function incompleteResult(message = "validateInput fails to reject an empty token"): ReviewResult {
   return result({
     tasks: [{
       id: "T031",
@@ -28,7 +28,6 @@ function incompleteResult(message = "validateInput fails to reject an empty toke
 }
 
 const context = {
-  reviewAttemptId: "review-1",
   reviewerSessionId: "reviewer-1",
   piSessionId: "pi-session-1"
 };

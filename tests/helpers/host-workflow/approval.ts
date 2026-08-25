@@ -14,7 +14,7 @@ export interface ApprovedTasksSnapshot {
   approvedAt: string;
 }
 
-export class ApprovalError extends Error {
+class ApprovalError extends Error {
   public readonly code:
     | "APPROVAL_REQUIRED"
     | "APPROVED_SOURCE_DRIFT"
@@ -47,7 +47,7 @@ export function approveTasksSource(tasksPath: string, source: string | Uint8Arra
   return { tasksPath, sourceHash: sourceHash(bytes), approvedAt: new Date().toISOString() };
 }
 
-export async function readStableApprovedTasks(
+async function readStableApprovedTasks(
   projectRoot: string,
   approval: ApprovedTasksSnapshot
 ): Promise<Uint8Array> {

@@ -7,8 +7,6 @@ import { createInterface } from "node:readline";
 import { ProjectLock } from "@smartflow/state-store";
 import { redactSensitive } from "@smartflow/observability";
 
-export const SMARTFLOW_IPC_PROTOCOL = "smartflow.v6";
-
 export interface IpcRequest {
   id: string;
   method: string;
@@ -30,7 +28,6 @@ export type WorkerConfigurationRegistrar = (
 type IpcResponse =
   | {
       type: "ready";
-      protocol: typeof SMARTFLOW_IPC_PROTOCOL;
       instanceId: string;
       daemonConfigFingerprint?: string;
       providerRuntimeConfigHash?: string;
@@ -201,21 +198,19 @@ export class LocalIpcServer {
         const expectedUid = process.getuid?.();
         const candidate = message as {
           type?: unknown;
-          protocol?: unknown;
           uid?: unknown;
           daemonConfigFingerprint?: unknown;
           workerEnvironment?: unknown;
         };
         if (
           candidate.type !== "handshake" ||
-          candidate.protocol !== SMARTFLOW_IPC_PROTOCOL ||
           (expectedUid !== undefined && candidate.uid !== expectedUid)
         ) {
           send(socket, {
             type: "response",
             id: "handshake",
             ok: false,
-            error: { code: "IPC_PEER_REJECTED", message: "IPC protocol or user identity mismatch" }
+            error: { code: "IPC_PEER_REJECTED", message: "IPC handshake or user identity mismatch" }
           });
           socket.end();
           return;
@@ -279,7 +274,6 @@ export class LocalIpcServer {
         authenticated = true;
         send(socket, {
           type: "ready",
-          protocol: SMARTFLOW_IPC_PROTOCOL,
           instanceId: this.instanceId,
           ...(connectionFingerprint === undefined
             ? {}

@@ -1,4 +1,6 @@
-# Daemon 自己启动 Reviewer — 实现计划（第一版：Codex）
+# Daemon 自己启动 Reviewer — 已实施设计记录（第一版：Codex）
+
+> **状态：已实施。** 运行时切换已在 `d8d45b3` 落地；本文保留决策背景、验证证据与尚未完成的真实 Codex 只读沙箱检查。文中的旧行号和“待改”措辞记录的是实施前代码位置，不应再用作当前源码导航；当前行为以代码、协议 schema 和测试为准。
 
 ## 目标
 
@@ -541,8 +543,8 @@ apps/daemon/src/review-runner.ts                     编排（唯一碰 StateSto
 
 **协议 breaking。** `reviewTurnInputSchema` / `reviewTurnOutputSchema` 都是 `.strict()`：
 删掉 `review` 后仍然传的调用方会被直接拒，`REVIEW_REQUIRED` 也已从 output union 删除。
-为避免旧 MCP server 与新 Daemon 握手后产生形状错配，IPC 已同步升为 `smartflow.v6`；
-YAML `SmartFlowConfig.version: 5` 与持久状态 `schemaVersion: 6` 是独立版本，不随 IPC 改动。
+本地 IPC 只支持当前 Client/Daemon wire shape，不携带协议版本，也不提供旧版协商或 fallback；
+持久状态 `schemaVersion: 6` 独立于本地 IPC，不随 wire shape 改动。
 
 **`HOST_REVIEW_UNAVAILABLE` 语义改变。** 从「host 的 reviewer 不可用」变成
 「daemon 的 reviewer 失败」。pause code 和 `retry_host_review` 这个 resume action

@@ -199,7 +199,6 @@ export async function createLifecycleStore(
   }, new Date(Date.now() + 60_000).toISOString());
   const reviewGate = evaluateReviewGate(
     {
-      reviewAttemptId: "review-attempt-1",
       reviewerSessionId: "reviewer-session-1",
       piSessionId: "pi-session-old"
     },
@@ -261,27 +260,14 @@ export async function createLifecycleStore(
     operationsHash: publishOperationsHash
   });
 
-  const reviewClaimed = phase === "REVIEWING";
   const pendingAction = phase === "REVIEW_PENDING" || phase === "REVIEWING"
-    ? {
-        ...reviewAction,
-        ...(reviewClaimed
-          ? {
-              claimId: "claim-old",
-              hostTurnId: "host-turn-old",
-              claimExpiresAt: new Date(Date.now() + 60_000).toISOString(),
-              claimStatus: "CLAIMED"
-            }
-          : {})
-      }
+    ? reviewAction
     : undefined;
   const hasBaseline = phase !== "PREPARING";
   const hasCandidate = new Set<RunPhase>([
-    "FIXING", "REVIEW_PENDING", "REVIEWING", "LEADER_DECISION",
-    "READY_TO_PUBLISH", "PUBLISHING"
+    "FIXING", "REVIEW_PENDING", "REVIEWING", "READY_TO_PUBLISH", "PUBLISHING"
   ]).has(phase);
-  const hasDecision = new Set<RunPhase>(["LEADER_DECISION", "READY_TO_PUBLISH", "PUBLISHING"])
-    .has(phase);
+  const hasDecision = new Set<RunPhase>(["READY_TO_PUBLISH", "PUBLISHING"]).has(phase);
   const hasLeader = phase === "READY_TO_PUBLISH" || phase === "PUBLISHING";
   const basePendingAction = pendingAction;
   const run = createRunRecord({

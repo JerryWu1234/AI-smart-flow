@@ -41,9 +41,8 @@ function parseArtifact(bytes: Uint8Array): Record<string, unknown> {
   return JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
 }
 
-async function putReviewingOwner(
-  store: Awaited<ReturnType<typeof createLifecycleStore>>,
-  hostTurnId: string
+async function putDaemonReviewingOwner(
+  store: Awaited<ReturnType<typeof createLifecycleStore>>
 ): Promise<void> {
   const state = await store.readState();
   const run = state.runs["job-1"];
@@ -64,7 +63,7 @@ async function putReviewingOwner(
         hostTurn: {
           stage: "AWAITING_REVIEW",
           turnToken: "durable-review-turn",
-          hostTurnId,
+          hostTurnId: DAEMON_REVIEWER_HOST_TURN_ID,
           revision: run.revision,
           reviewAttemptId: action.reviewAttemptId,
           startedAt,
@@ -82,7 +81,6 @@ const stableActions: ReadonlyArray<[RunPhase, RecoveryAction]> = [
   ["RUNNING", "RESUME_WORKER"],
   ["FIXING", "PREPARE_REPAIR"],
   ["REVIEW_PENDING", "RUN_REVIEW"],
-  ["LEADER_DECISION", "WAIT_FOR_LEADER"],
   ["READY_TO_PUBLISH", "RECHECK_PUBLISH_READINESS"],
   ["PAUSED", "NONE"]
 ];
@@ -107,21 +105,18 @@ describe("phase-complete crash recovery", () => {
     expect((await store.readState()).stateVersion).toBe(before.stateVersion);
   });
 
-  it.each([
-    [DAEMON_REVIEWER_HOST_TURN_ID, "RUN_REVIEW"],
-    ["foreign-review-host", "WAIT_FOR_HOST"]
-  ] as const)("recovers REVIEWING owner %s as %s", async (hostTurnId, expectedAction) => {
+  it("recovers a daemon-owned REVIEWING turn as RUN_REVIEW", async () => {
     const harness = await createRuntimeHarness();
     harnesses.push(harness);
     const store = await createLifecycleStore(harness, "REVIEW_PENDING");
-    await putReviewingOwner(store, hostTurnId);
+    await putDaemonReviewingOwner(store);
     const before = await store.readState();
 
     const first = await new RecoveryManager(store, runtime).recover("job-1");
     const second = await new RecoveryManager(store, runtime).recover("job-1");
 
-    expect(first).toMatchObject({ phase: "REVIEWING", action: expectedAction });
-    expect(second).toMatchObject({ phase: "REVIEWING", action: expectedAction });
+    expect(first).toMatchObject({ phase: "REVIEWING", action: "RUN_REVIEW" });
+    expect(second).toMatchObject({ phase: "REVIEWING", action: "RUN_REVIEW" });
     expect((await store.readState()).stateVersion).toBe(before.stateVersion);
   });
 

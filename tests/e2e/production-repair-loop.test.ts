@@ -266,12 +266,10 @@ class ScriptedReviewAdapter implements AgentAdapter {
 }
 
 function compositionFor(
-  harness: RuntimeHarness,
   provider: WorkerProvider,
   adapter: AgentAdapter
 ): ProductionRuntimeComposition {
   return new ProductionRuntimeComposition(
-    harness.dataDir,
     undefined,
     undefined,
     provider,
@@ -358,7 +356,7 @@ describe("production daemon Review repair loop", () => {
       },
       new Set([1, 2, 3])
     );
-    const composition = compositionFor(harness, provider, adapter);
+    const composition = compositionFor(provider, adapter);
     const runtime = runtimeFor(harness, composition);
     const execute = await runtime.handle({
       id: "execute-r1",
@@ -460,7 +458,7 @@ describe("production daemon Review repair loop", () => {
       }
       return enabledTaskIdsForRun(reviewStore, reviewJobId);
     });
-    const composition = compositionFor(harness, provider, adapter);
+    const composition = compositionFor(provider, adapter);
     const runtime = runtimeFor(harness, composition);
     const execute = await runtime.handle({
       id: "execute-no-progress",
@@ -546,7 +544,7 @@ describe("production daemon Review repair loop", () => {
       },
       new Set([1, 2])
     );
-    const composition = compositionFor(harness, provider, adapter);
+    const composition = compositionFor(provider, adapter);
     const runtime = runtimeFor(harness, composition);
     const toolNames: string[] = [];
     const call = async (method: "smartflow_execute" | "smartflow_review_turn", payload: unknown): Promise<unknown> => {
@@ -687,7 +685,7 @@ describe("production daemon Review repair loop", () => {
       },
       new Set([1])
     );
-    const composition = compositionFor(harness, provider, adapter);
+    const composition = compositionFor(provider, adapter);
     const runtime = runtimeFor(harness, composition);
     const execute = await runtime.handle({
       id: "execute-cancel-review",

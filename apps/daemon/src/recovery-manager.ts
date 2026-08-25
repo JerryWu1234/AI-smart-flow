@@ -33,7 +33,6 @@ import {
 
 import { gitPublishOperations } from "./git-publish-source.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
-import { isDaemonReviewerHostTurn } from "./review-coordinator.js";
 
 const terminalPhases = new Set<RunPhase>(["COMPLETED", "CANCELED", "FAILED"]);
 
@@ -44,7 +43,6 @@ export type RecoveryAction =
   | "START_NEW_WORKER_ATTEMPT"
   | "PREPARE_REPAIR"
   | "RUN_REVIEW"
-  | "WAIT_FOR_HOST"
   | "WAIT_FOR_LEADER"
   | "RECHECK_PUBLISH_READINESS"
   | "PUBLISH_RECONCILED"
@@ -282,16 +280,10 @@ export async function verifyRunArtifacts(
       if (!leaderAccepted) return "ARTIFACT_SEMANTIC_MISMATCH:leaderDecision";
     }
 
-    const publishSourceMigration = run.recovery?.publishSourceMigration;
-    const hasLegacyOperationIdentity = typeof publishSourceMigration === "object" &&
-      publishSourceMigration !== null &&
-      !Array.isArray(publishSourceMigration) &&
-      (publishSourceMigration as Record<string, unknown>).sourceSchemaVersion === 5 &&
-      (publishSourceMigration as Record<string, unknown>).legacyOperationIdentity === true;
     const publishNeedsReconciliation = run.publish?.status === "PREPARED" ||
       run.publish?.status === "SUBMITTED" ||
       run.pause?.code === "PUBLISH_RECOVERY_BLOCKED";
-    if (run.publish !== undefined && !publishNeedsReconciliation && !hasLegacyOperationIdentity) {
+    if (run.publish !== undefined && !publishNeedsReconciliation) {
       if (candidate === undefined || resultSnapshot === undefined || reviewHash === undefined) {
         return "ARTIFACT_SEMANTIC_MISMATCH:publish";
       }
@@ -353,13 +345,7 @@ export class RecoveryManager {
         if (run.hostTurn?.stage !== "AWAITING_REVIEW") {
           return this.pause(state, run, "HOST_REVIEW_UNAVAILABLE:REVIEW_TURN_STATE_MISSING");
         }
-        return this.result(
-          state,
-          run,
-          isDaemonReviewerHostTurn(run.hostTurn) ? "RUN_REVIEW" : "WAIT_FOR_HOST"
-        );
-      case "LEADER_DECISION":
-        return this.result(state, run, "WAIT_FOR_LEADER");
+        return this.result(state, run, "RUN_REVIEW");
       case "READY_TO_PUBLISH":
         return this.result(state, run, "RECHECK_PUBLISH_READINESS");
       case "PUBLISHING":

@@ -1,19 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-export interface ReviewHostAction {
-  type: "REVIEW";
-  actionId: string;
-  revision: number;
-  taskSourceHash: string;
-  candidateHash: string;
-  reviewAttemptId: string;
-  changedPaths: string[];
-  reviewerSession:
-    | { mode: "CREATE" }
-    | { mode: "RESUME"; reviewerSessionId: string };
-  piSessionId: string;
-  expiresAt: string;
-}
+import type { HostAction } from "@smartflow/protocol";
 
 export function createReviewHostAction(
   context: {
@@ -25,7 +12,7 @@ export function createReviewHostAction(
     boundReviewerSessionId?: string;
   },
   expiresAt: string
-): ReviewHostAction {
+): HostAction {
   if (
     context.revision < 1 ||
     !/^[a-f0-9]{64}$/u.test(context.taskSourceHash) ||

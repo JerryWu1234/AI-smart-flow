@@ -34,6 +34,7 @@
     "build": "pnpm run build:workspaces && pnpm run build:package",
     "build:workspaces": "pnpm -r --if-present build",
     "build:package": "tsdown --config tsdown.config.mjs",
+    "clean:daemon-data": "node clear-daemon-data.ts",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.tests.json --noEmit",
     "test": "vitest run tests/unit",

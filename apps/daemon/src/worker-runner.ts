@@ -40,15 +40,6 @@ export interface WorkerRunRequest {
   attemptDeadlineMs: number;
 }
 
-export interface WorkerRunResult {
-  attemptId?: string;
-  generation?: number;
-  phase: RunRecord["phase"];
-  candidate?: Candidate;
-  code?: "WORKER_CANDIDATE_EMPTY";
-  stale: boolean;
-}
-
 export interface WorkerRunnerHooks {
   beforeCandidateArtifact?(input: {
     jobId: string;
@@ -139,7 +130,7 @@ export class WorkerRunner {
     this.mutations = new ProjectMutationExecutor(store);
   }
 
-  public async run(request: WorkerRunRequest): Promise<WorkerRunResult> {
+  public async run(request: WorkerRunRequest): Promise<void> {
     if (!Number.isInteger(request.attemptDeadlineMs) || request.attemptDeadlineMs <= 0) {
       throw new Error("PI_ATTEMPT_DEADLINE_INVALID");
     }
@@ -154,39 +145,37 @@ export class WorkerRunner {
     }
     const probe = await this.provider.probe();
     if (!probe.available || !requiredCapabilities(probe)) {
-      const paused = await this.pause(
+      await this.pause(
         request,
         initialRun.fence,
         initial.stateVersion,
         "PROVIDER_UNAVAILABLE",
         ["retry_provider_probe", "cancel"]
       );
-      return { phase: paused ? "PAUSED" : (await this.currentRun(request.jobId)).phase, stale: !paused };
+      return;
     }
     if (probe.providerRuntimeConfigHash !== request.providerRuntimeConfigHash) {
-      const paused = await this.pause(
+      await this.pause(
         request,
         initialRun.fence,
         initial.stateVersion,
         "PROVIDER_RUNTIME_CONFIG_DRIFT",
         ["approve_new_manifest_revision", "cancel"]
       );
-      return { phase: paused ? "PAUSED" : (await this.currentRun(request.jobId)).phase, stale: !paused };
+      return;
     }
 
     let prepared: Awaited<ReturnType<WorkerRunner["prepareWorkspace"]>>;
     try {
       prepared = await this.prepareWorkspace(initial, initialRun, request);
     } catch (error) {
-      if (error instanceof WorkspacePreparationPaused) {
-        return { phase: (await this.currentRun(request.jobId)).phase, stale: false };
-      }
+      if (error instanceof WorkspacePreparationPaused) return;
       if (error instanceof StateStoreError) {
         if (
           new Set(["STATE_VERSION_MISMATCH", "STALE_FENCE", "REVISION_MISMATCH", "STATE_INVALID"])
             .has(error.code)
         ) {
-          return { phase: (await this.currentRun(request.jobId)).phase, stale: true };
+          return;
         }
       }
       throw error;
@@ -236,14 +225,7 @@ export class WorkerRunner {
           prepared.run.fence,
           event
         );
-        if (!accepted) {
-          return {
-            attemptId,
-            generation,
-            phase: (await this.currentRun(request.jobId)).phase,
-            stale: true
-          };
-        }
+        if (!accepted) return;
         if (terminalEvents.has(event.type)) terminal = event;
       }
     } catch (error) {
@@ -254,12 +236,7 @@ export class WorkerRunner {
         message: error instanceof Error ? error.message : String(error)
       };
       if (!(await this.persistEvent(request, attemptId, generation, prepared.run.fence, terminal))) {
-        return {
-          attemptId,
-          generation,
-          phase: (await this.currentRun(request.jobId)).phase,
-          stale: true
-        };
+        return;
       }
     }
     if (terminal === undefined) {
@@ -270,12 +247,7 @@ export class WorkerRunner {
         message: "Pi RPC stream closed before a terminal event"
       };
       if (!(await this.persistEvent(request, attemptId, generation, prepared.run.fence, terminal))) {
-        return {
-          attemptId,
-          generation,
-          phase: (await this.currentRun(request.jobId)).phase,
-          stale: true
-        };
+        return;
       }
     }
 
@@ -287,18 +259,9 @@ export class WorkerRunner {
       prepared.run.fence,
       registryPath
     );
-    if (!reconciled) {
-      return { attemptId, generation, phase: "PAUSED", stale: false };
-    }
+    if (!reconciled) return;
     await rm(runtimeRoot, { recursive: true, force: true });
-    if (terminal.type !== "COMPLETED") {
-      return {
-        attemptId,
-        generation,
-        phase: (await this.currentRun(request.jobId)).phase,
-        stale: false
-      };
-    }
+    if (terminal.type !== "COMPLETED") return;
     return this.captureCandidate(
       initial,
       prepared,
@@ -857,7 +820,7 @@ export class WorkerRunner {
     attemptId: string,
     generation: number,
     expectedFence: number
-  ): Promise<WorkerRunResult> {
+  ): Promise<void> {
     const revisionRoot = resolve(
       this.store.dataDirectory,
       "runs",
@@ -896,7 +859,7 @@ export class WorkerRunner {
     });
     const beforeArtifacts = await this.store.readState();
     if (!this.matchesAttempt(beforeArtifacts, request, attemptId, generation, expectedFence)) {
-      return { attemptId, generation, phase: (await this.currentRun(request.jobId)).phase, stale: true };
+      return;
     }
     const candidateRef = await this.store.writeArtifact(
       `runs/${request.jobId}/revision-${String(request.revision)}/candidates/${attemptId}-${candidate.candidateHash}.json`,
@@ -998,14 +961,7 @@ export class WorkerRunner {
         };
       }
     );
-    return {
-      attemptId,
-      generation,
-      phase: candidateIncomplete ? "FIXING" : "REVIEW_PENDING",
-      candidate,
-      ...(candidateIncomplete ? { code: "WORKER_CANDIDATE_EMPTY" as const } : {}),
-      stale: false
-    };
+    return;
   }
 
   private async protectedReadPaths(
@@ -1059,7 +1015,7 @@ export class WorkerRunner {
     expectedStateVersion: number,
     code: string,
     resumeActions: string[]
-  ): Promise<boolean> {
+  ): Promise<void> {
     try {
       await this.mutations.mutate(
         {
@@ -1080,24 +1036,17 @@ export class WorkerRunner {
           response: { phase: "PAUSED", code }
         })
       );
-      return true;
     } catch (error) {
       if (
         error instanceof StateStoreError &&
         new Set(["STATE_VERSION_MISMATCH", "STALE_FENCE", "REVISION_MISMATCH", "STATE_INVALID"])
           .has(error.code)
-      ) return false;
+      ) return;
       throw error;
     }
   }
 
   private async readSnapshot(ref: NonNullable<RunRecord["baseline"]>): Promise<GitWorkspaceSnapshot> {
     return JSON.parse(new TextDecoder().decode(await this.store.readArtifact(ref))) as GitWorkspaceSnapshot;
-  }
-
-  private async currentRun(jobId: string): Promise<RunRecord> {
-    const run = (await this.store.readState()).runs[jobId];
-    if (run === undefined) throw new Error(`Unknown worker run: ${jobId}`);
-    return run;
   }
 }

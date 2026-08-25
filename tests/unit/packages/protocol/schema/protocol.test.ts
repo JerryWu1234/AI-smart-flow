@@ -18,7 +18,7 @@ import {
 
 const digest = "a".repeat(64);
 
-describe("smartflow.v6 protocol schemas", () => {
+describe("SmartFlow protocol schemas", () => {
   it("defines exactly the six public MCP tools without manual Review primitives", () => {
     expect(Object.keys(mcpToolSchemas).sort()).toEqual([
       "smartflow_cancel",
