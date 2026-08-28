@@ -1,7 +1,6 @@
 export type { AtomicWriteCheckpoint, AtomicWriteHooks } from "./atomic-file.js";
 export { canonicalHash } from "./canonical-json.js";
 export { StateStoreError } from "./errors.js";
-export { ProjectMutationSession } from "./mutation.js";
 export { ProjectLock } from "./project-lock.js";
 export {
   projectStateSchema,

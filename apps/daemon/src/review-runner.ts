@@ -36,6 +36,7 @@ import {
 
 export interface ReviewRunnerOptions {
   readonly model?: string;
+  readonly effort?: string;
   readonly deadlineMs: number;
   /** Total createSession/resume calls permitted for one run() invocation. Minimum: 1. */
   readonly maxAttempts: number;
@@ -54,7 +55,6 @@ export interface ReviewRunnerResult {
 type AwaitingReviewTurn = Extract<HostTurn, { stage: "AWAITING_REVIEW" }>;
 
 interface ActiveReviewContext extends ReviewRunnerRequest {
-  readonly revision: number;
   readonly action: HostAction;
   readonly turn: AwaitingReviewTurn;
   readonly worktreePath: string;
@@ -75,11 +75,6 @@ type FinalizeMutationResponse =
   | ({ kind: "FINALIZED" } & FinalizeReviewOutput)
   | { kind: "DRIFT"; schedule: "none" };
 
-type ProbeResult =
-  | { kind: "AVAILABLE"; correction?: string }
-  | { kind: "EXHAUSTED"; reason: string }
-  | { kind: "STALE" };
-
 type OutputValidation =
   | { success: true; result: ReviewResult }
   | { success: false; reason: string };
@@ -90,14 +85,14 @@ function errorMessage(error: unknown): string {
 
 function reviewIdentity(
   request: ReviewRunnerRequest,
-  revision: number,
   action: HostAction
 ): string {
   return createHash("sha256")
     .update([
       request.projectId,
       request.jobId,
-      String(revision),
+      action.taskSourceHash,
+      action.candidateHash,
       action.reviewAttemptId,
       action.actionId
     ].join("\0"), "utf8")
@@ -167,13 +162,8 @@ export class ReviewRunner {
     if (active === undefined) return { schedule: "none" };
 
     const prepared = await this.prepare(active);
-    const probe = await this.probe(prepared);
-    if (probe.kind === "STALE") return { schedule: "none" };
-    if (probe.kind === "EXHAUSTED") {
-      return this.pause(prepared, probe.reason);
-    }
 
-    let correction = probe.correction;
+    let correction: string | undefined;
     let reviewerSessionId = prepared.action.reviewerSession.mode === "RESUME"
       ? prepared.action.reviewerSession.reviewerSessionId
       : undefined;
@@ -201,7 +191,8 @@ export class ReviewRunner {
         outputSchemaPath: prepared.schemaPath,
         outputPath: prepared.outputPath,
         deadlineMs: remainingDeadlineMs,
-        ...(this.options.model === undefined ? {} : { model: this.options.model })
+        ...(this.options.model === undefined ? {} : { model: this.options.model }),
+        ...(this.options.effort === undefined ? {} : { effort: this.options.effort })
       };
       const mode = reviewerSessionId === undefined ? "CREATE" : "RESUME";
       let outcome: AgentRunOutcome;
@@ -231,6 +222,8 @@ export class ReviewRunner {
           attempt,
           maxAttempts: this.options.maxAttempts,
           mode,
+          ...(this.options.model === undefined ? {} : { model: this.options.model }),
+          ...(this.options.effort === undefined ? {} : { effort: this.options.effort }),
           outcome: outcome.kind,
           ...(outcome.sessionId === undefined ? {} : { sessionId: outcome.sessionId })
         }
@@ -323,7 +316,7 @@ export class ReviewRunner {
           level: "warn",
           event: "daemon_review.foreign_turn_rejected",
           stage: "review",
-          correlation: { projectId: request.projectId, jobId: request.jobId, revision: run.revision }
+          correlation: { projectId: request.projectId, jobId: request.jobId }
         });
         throw new Error("REVIEW_TURN_NOT_DAEMON_OWNED");
       }
@@ -333,7 +326,7 @@ export class ReviewRunner {
 
     const action = pendingReviewAction(run);
     if (action === undefined) throw new Error("REVIEW_ACTION_CONTEXT_MISSING");
-    const identity = reviewIdentity(request, run.revision, action);
+    const identity = reviewIdentity(request, action);
     const turnToken = reviewTurnToken(identity);
     const startedAt = new Date();
     const deadlineAt = new Date(startedAt.getTime() + this.options.deadlineMs).toISOString();
@@ -344,14 +337,12 @@ export class ReviewRunner {
           kind: "daemon-review-begin",
           projectId: request.projectId,
           jobId: request.jobId,
-          revision: run.revision,
           reviewAttemptId: action.reviewAttemptId,
           actionId: action.actionId
         },
         expectedStateVersion: state.stateVersion,
         expectedFence: run.fence,
         expectedJobId: request.jobId,
-        expectedRevision: run.revision,
         expectedPhases: ["REVIEW_PENDING"]
       },
       async (current, context) => {
@@ -376,7 +367,6 @@ export class ReviewRunner {
           {
             projectId: request.projectId,
             jobId: request.jobId,
-            expectedRevision: run.revision,
             hostTurnId: DAEMON_REVIEWER_HOST_TURN_ID,
             turnToken,
             deadlineAt
@@ -412,19 +402,16 @@ export class ReviewRunner {
       turn.stage !== "AWAITING_REVIEW" ||
       action === undefined ||
       run.workspace === undefined ||
-      turn.revision !== run.revision ||
-      turn.reviewAttemptId !== action.reviewAttemptId ||
-      action.revision !== run.revision
+      turn.reviewAttemptId !== action.reviewAttemptId
     ) {
       throw new Error("REVIEW_ACTION_CONTEXT_MISSING");
     }
-    const identity = reviewIdentity(request, run.revision, action);
+    const identity = reviewIdentity(request, action);
     if (expectedIdentity !== undefined && identity !== expectedIdentity) {
       throw new Error("REVIEW_ACTION_CONTEXT_CHANGED");
     }
     return {
       ...request,
-      revision: run.revision,
       action,
       turn,
       worktreePath: resolve(this.store.dataDirectory, run.workspace.relativePath),
@@ -439,7 +426,7 @@ export class ReviewRunner {
     const manifest = taskManifestSchema.parse(JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(run.taskManifest))
     ));
-    const directory = `runs/${context.jobId}/revision-${String(context.revision)}/reviews`;
+    const directory = `runs/${context.jobId}/reviews`;
     const schemaRelativePath = `${directory}/${context.action.reviewAttemptId}.schema.json`;
     const outputRelativePath = `${directory}/${context.action.reviewAttemptId}.output.json`;
     await this.store.writeArtifact(
@@ -451,61 +438,6 @@ export class ReviewRunner {
       manifest,
       schemaPath: resolve(this.store.dataDirectory, schemaRelativePath),
       outputPath: resolve(this.store.dataDirectory, outputRelativePath)
-    };
-  }
-
-  private async probe(context: PreparedReviewContext): Promise<ProbeResult> {
-    let lastFailure: string | undefined;
-    for (let attempt = 1; attempt <= this.options.maxAttempts; attempt += 1) {
-      if (!await this.isStillActive(context)) return { kind: "STALE" };
-      if (Date.parse(context.turn.deadlineAt) <= Date.now()) {
-        return { kind: "EXHAUSTED", reason: "REVIEW_DEADLINE_EXPIRED_BEFORE_PROBE" };
-      }
-      try {
-        const probe = await this.adapter.probe();
-        const available = probe.available && probe.agentId === this.adapter.id;
-        this.options.logger?.log({
-          level: available ? "info" : "warn",
-          event: "daemon_review.probe",
-          stage: "review",
-          correlation: this.correlation(context),
-          data: {
-            attempt,
-            maxAttempts: this.options.maxAttempts,
-            available,
-            agentId: probe.agentId,
-            ...(probe.version === undefined ? {} : { version: probe.version }),
-            ...(probe.reason === undefined ? {} : { reason: probe.reason })
-          }
-        });
-        if (available) {
-          return {
-            kind: "AVAILABLE",
-            ...(lastFailure === undefined ? {} : { correction: correctionFor(lastFailure) })
-          };
-        }
-        lastFailure = probe.available
-          ? `REVIEWER_PROBE_AGENT_MISMATCH:expected=${this.adapter.id};observed=${probe.agentId}`
-          : `REVIEWER_PROBE_UNAVAILABLE:${probe.reason ?? "no reason supplied"}`;
-      } catch (error) {
-        lastFailure = `REVIEWER_PROBE_FAILED:${errorMessage(error)}`;
-        this.options.logger?.log({
-          level: "warn",
-          event: "daemon_review.probe",
-          stage: "review",
-          correlation: this.correlation(context),
-          data: {
-            attempt,
-            maxAttempts: this.options.maxAttempts,
-            available: false,
-            reason: lastFailure
-          }
-        });
-      }
-    }
-    return {
-      kind: "EXHAUSTED",
-      reason: `DAEMON_REVIEW_PROBE_EXHAUSTED:maxAttempts=${String(this.options.maxAttempts)};lastFailure=${lastFailure ?? "unknown"}`
     };
   }
 
@@ -540,7 +472,6 @@ export class ReviewRunner {
           kind: "daemon-review-finalize",
           projectId: context.projectId,
           jobId: context.jobId,
-          revision: context.revision,
           reviewAttemptId: context.action.reviewAttemptId,
           actionId: context.action.actionId,
           reviewerSessionId,
@@ -549,7 +480,6 @@ export class ReviewRunner {
         expectedStateVersion: state.stateVersion,
         expectedFence: run.fence,
         expectedJobId: context.jobId,
-        expectedRevision: context.revision,
         expectedPhases: ["REVIEWING"]
       },
       async (current, mutationContext) => {
@@ -576,7 +506,6 @@ export class ReviewRunner {
           {
             projectId: context.projectId,
             jobId: context.jobId,
-            expectedRevision: context.revision,
             hostTurnId: DAEMON_REVIEWER_HOST_TURN_ID,
             turnToken: context.turn.turnToken,
             reviewerSessionId,
@@ -617,14 +546,12 @@ export class ReviewRunner {
             kind: "daemon-review-pause",
             projectId: context.projectId,
             jobId: context.jobId,
-            revision: context.revision,
             reviewAttemptId: context.action.reviewAttemptId,
             actionId: context.action.actionId
           },
           expectedStateVersion: state.stateVersion,
           expectedFence: run.fence,
           expectedJobId: context.jobId,
-          expectedRevision: context.revision,
           expectedPhases: ["REVIEWING"]
         },
         (current) => ({
@@ -673,20 +600,17 @@ export class ReviewRunner {
       run.hostTurn.turnToken === context.turn.turnToken &&
       run.hostTurn.reviewAttemptId === context.action.reviewAttemptId &&
       action?.actionId === context.action.actionId &&
-      action.reviewAttemptId === context.action.reviewAttemptId &&
-      run.revision === context.revision;
+      action.reviewAttemptId === context.action.reviewAttemptId;
   }
 
   private correlation(context: ActiveReviewContext): {
     projectId: string;
     jobId: string;
-    revision: number;
     actionId: string;
   } {
     return {
       projectId: context.projectId,
       jobId: context.jobId,
-      revision: context.revision,
       actionId: context.action.actionId
     };
   }

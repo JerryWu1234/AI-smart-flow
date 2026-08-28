@@ -31,7 +31,6 @@ class PollingGateway implements HostGateway {
       return Promise.resolve({
         projectId: "project-1",
         jobId: "job-1",
-        revision: 1,
         stateVersion: 1,
         phase: "REVIEW_PENDING"
       });
@@ -98,7 +97,6 @@ describe("executeApprovedWorkflow", () => {
           return Promise.resolve({
             projectId: "project-1",
             jobId: "job-1",
-            revision: 16,
             stateVersion: 16,
             phase: "PAUSED"
           });
@@ -155,19 +153,23 @@ describe("executeApprovedWorkflow", () => {
     }
   });
 
-  it("routes a structured USER approval through the generic callback and same tool", async () => {
+  it("routes a scope-expanding repair cancellation through the generic callback and same tool", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "smartflow-host-user-input-"));
     const toolNames: string[] = [];
     const answers: unknown[] = [];
-    const answerTemplate = {
-      action: "approve_new_manifest_revision" as const,
-      tasksPath: "tasks.md",
-      approvedSourceHash: digest,
-      approval: {
-        kind: "USER" as const,
-        parentRevision: 1,
-        authorizedCriterionIds: ["T002"]
-      }
+    const repairDraft = {
+      sourceArtifact: {
+        relativePath: `runs/job-1/repair-drafts/${digest}.md`,
+        sha256: digest,
+        size: 10
+      },
+      sourceHash: digest,
+      baseTaskSourceHash: digest,
+      baseTaskManifestHash: digest,
+      suggestedTasksPath: "tasks.md",
+      appendText: "\n- [ ] T002 repair",
+      addedTaskLines: ["- [ ] T002 repair"],
+      reasons: ["User scope changed"]
     };
     const gateway: HostGateway = {
       call: (toolName, value) => {
@@ -177,7 +179,6 @@ describe("executeApprovedWorkflow", () => {
           return Promise.resolve({
             projectId: "project-1",
             jobId: "job-1",
-            revision: 1,
             stateVersion: 1,
             phase: "PAUSED"
           });
@@ -194,7 +195,7 @@ describe("executeApprovedWorkflow", () => {
           turnToken: "turn-user",
           pause: {
             code: "REPAIR_USER_APPROVAL_REQUIRED",
-            message: "Approve the revised task manifest"
+            message: "Cancel this immutable Job and create a new Job with updated tasks."
           },
           result: {
             projectId: "project-1",
@@ -202,17 +203,12 @@ describe("executeApprovedWorkflow", () => {
             phase: "PAUSED",
             status: "PAUSED",
             artifacts: [],
-            nextActions: ["approve_new_manifest_revision", "cancel"]
+            nextActions: ["cancel"],
+            repairDraft
           },
           options: [
-            { answer: "approve_new_manifest_revision", description: "Approve revision" },
             { answer: "cancel", description: "Cancel" }
-          ],
-          requiredInput: {
-            mode: "CONFIRM",
-            action: "approve_new_manifest_revision",
-            answer: answerTemplate
-          }
+          ]
         });
       }
     };
@@ -220,11 +216,9 @@ describe("executeApprovedWorkflow", () => {
       await writeFile(join(projectRoot, "tasks.md"), "# Tasks", "utf8");
       const result = await executeApprovedWorkflow(gateway, {
         answerUserInput: (context) => {
-          expect(context.requiredInput).toMatchObject({
-            mode: "CONFIRM",
-            answer: answerTemplate
-          });
-          return Promise.resolve(answerTemplate);
+          expect(context.result.repairDraft).toEqual(repairDraft);
+          expect(context.options.map((option) => option.answer)).toEqual(["cancel"]);
+          return Promise.resolve("cancel");
         }
       }, {
         projectRoot,
@@ -235,7 +229,7 @@ describe("executeApprovedWorkflow", () => {
       });
 
       expect(result).toEqual(completedResult());
-      expect(answers).toEqual([answerTemplate]);
+      expect(answers).toEqual(["cancel"]);
       expect(toolNames).toEqual([
         "smartflow_execute",
         "smartflow_review_turn",

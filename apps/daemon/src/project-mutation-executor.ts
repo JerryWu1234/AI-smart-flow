@@ -16,7 +16,6 @@ export interface ProjectMutationRequest {
   replayPolicy?: "CANONICAL" | "CURRENT_EPOCH";
   expectedStateVersion?: number;
   expectedFence?: number;
-  expectedRevision?: number;
   expectedJobId?: string;
   expectedGeneration?: number;
   expectedAttemptId?: string | null;
@@ -160,12 +159,6 @@ export class ProjectMutationExecutor {
           throw new StateStoreError(
             "STATE_INVALID",
             `Run ${request.expectedJobId} is no longer the active Project run`
-          );
-        }
-        if (request.expectedRevision !== undefined && run?.revision !== request.expectedRevision) {
-          throw new StateStoreError(
-            "REVISION_MISMATCH",
-            `Expected Revision ${String(request.expectedRevision)}, observed ${String(run?.revision)}`
           );
         }
         if (

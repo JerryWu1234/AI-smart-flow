@@ -3,7 +3,10 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createRuntimeHarness, type RuntimeHarness } from "../../../helpers/runtime-harness.js";
-import { projectStateSchema } from "../../../../packages/state-store/src/schema.js";
+import {
+  projectStateSchema,
+  runArtifactInventory
+} from "../../../../packages/state-store/src/schema.js";
 import { StateStore } from "../../../../packages/state-store/src/state-store.js";
 import {
   createProjectState,
@@ -24,7 +27,22 @@ describe("ProjectState schema and recovery source", () => {
     ).toBe(false);
   });
 
-  it("persists strict Host review turns and automatic repair counts in schema v6", () => {
+  it("keeps only the active workspace path in state v7", () => {
+    const run = createRunRecord({ workspace: { relativePath: "runs/job-1/workspace" } });
+    const state = createProjectState({ runs: { [run.jobId]: run } });
+    expect(projectStateSchema.safeParse(state).success).toBe(true);
+    expect(projectStateSchema.safeParse({
+      ...state,
+      runs: {
+        [run.jobId]: {
+          ...run,
+          workspace: { ...run.workspace, baselineHash: "a".repeat(64) }
+        }
+      }
+    }).success).toBe(false);
+  });
+
+  it("persists strict Host review turns and automatic repair counts in schema v7", () => {
     const run = createRunRecord({
       phase: "REVIEWING",
       autoRepairRounds: 7,
@@ -32,7 +50,6 @@ describe("ProjectState schema and recovery source", () => {
         stage: "AWAITING_REVIEW",
         turnToken: "turn-1",
         hostTurnId: "daemon-reviewer",
-        revision: 1,
         reviewAttemptId: "review-attempt-1",
         startedAt: "2026-08-11T10:00:00+00:00",
         deadlineAt: "2026-08-11T10:30:00+00:00"
@@ -63,19 +80,11 @@ describe("ProjectState schema and recovery source", () => {
     }).success).toBe(false);
   });
 
-  it.each([4, 5])("rejects project state schema v%s", (schemaVersion) => {
-    expect(projectStateSchema.safeParse({
-      ...createProjectState(),
-      schemaVersion
-    }).success).toBe(false);
-  });
-
   it("persists Pi Attempt session/containment identity and TIMED_OUT", () => {
     const run = createRunRecord({
       phase: "PAUSED",
       workerAttempts: [{
         attemptId: "attempt-1",
-        revision: 1,
         generation: 0,
         providerRuntimeConfigHash: "b".repeat(64),
         status: "TIMED_OUT",
@@ -104,6 +113,43 @@ describe("ProjectState schema and recovery source", () => {
         }
       }
     }).success).toBe(false);
+  });
+
+  it("requires completed Pi Attempts to bind their internal session artifact", () => {
+    const completedAttempt = {
+      attemptId: "attempt-completed",
+      generation: 0,
+      providerRuntimeConfigHash: "c".repeat(64),
+      status: "COMPLETED" as const,
+      piSessionId: "pi-session-completed",
+      startedAt: "2026-07-20T10:00:00+08:00",
+      endedAt: "2026-07-20T10:01:00+08:00"
+    };
+    const incompleteRun = createRunRecord({
+      phase: "RUNNING",
+      workerAttempts: [completedAttempt]
+    });
+    expect(projectStateSchema.safeParse(createProjectState({
+      runs: { [incompleteRun.jobId]: incompleteRun }
+    })).success).toBe(false);
+
+    const sessionArtifact = {
+      relativePath: "runs/job-1/attempts/attempt-completed/session-artifact.json",
+      sha256: "d".repeat(64),
+      size: 256
+    };
+    const completeRun = createRunRecord({
+      phase: "RUNNING",
+      workerAttempts: [{ ...completedAttempt, sessionArtifact }]
+    });
+    expect(projectStateSchema.safeParse(createProjectState({
+      runs: { [completeRun.jobId]: completeRun }
+    })).success).toBe(true);
+    expect(runArtifactInventory(completeRun).bindings).toContainEqual({
+      name: "workerAttempts[0].sessionArtifact",
+      ref: sessionArtifact,
+      semantic: "PI_SESSION"
+    });
   });
 
   it("rejects Broker, effect, managed-process, singular Worker Attempt, and workerBlock state", () => {
@@ -140,7 +186,6 @@ describe("ProjectState schema and recovery source", () => {
         operationId,
         operationsHash,
         adapterId: "cas-adapter",
-        revision: 1,
         status: "COMMITTED",
         result
       }
@@ -178,6 +223,20 @@ describe("ProjectState schema and recovery source", () => {
 
     const database = new DatabaseSync(store.databasePath);
     try {
+      const version = database.prepare("PRAGMA user_version").get() as {
+        user_version?: unknown;
+      } | undefined;
+      expect(version?.user_version).toBe(5);
+      const projectStateColumns = database.prepare("PRAGMA table_info(project_state)").all() as {
+        name?: unknown;
+      }[];
+      expect(projectStateColumns.map((column) => column.name)).toEqual([
+        "singleton",
+        "state_version",
+        "project_fence",
+        "state_json",
+        "updated_at"
+      ]);
       const row = database.prepare(`
         SELECT event_json
         FROM audit_events
@@ -187,6 +246,32 @@ describe("ProjectState schema and recovery source", () => {
       expect(row?.event_json).toBe(JSON.stringify(event));
     } finally {
       database.close();
+    }
+  });
+
+  it("rejects SQLite layout 4 without migration", async () => {
+    const harness = await createRuntimeHarness();
+    activeHarnesses.push(harness);
+    const store = new StateStore(harness.dataDir);
+    const database = new DatabaseSync(store.databasePath);
+    try {
+      database.exec("PRAGMA user_version = 4");
+    } finally {
+      database.close();
+    }
+
+    await expect(store.readState()).rejects.toMatchObject({
+      code: "STATE_MIGRATION_UNSUPPORTED"
+    });
+
+    const observed = new DatabaseSync(store.databasePath);
+    try {
+      const version = observed.prepare("PRAGMA user_version").get() as {
+        user_version?: unknown;
+      } | undefined;
+      expect(version?.user_version).toBe(4);
+    } finally {
+      observed.close();
     }
   });
 });

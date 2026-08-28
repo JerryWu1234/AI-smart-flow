@@ -53,25 +53,10 @@ function childRequestId(seed: string, scope: string): string {
   return `review-turn-${safeScope}-${digest}`;
 }
 
-function answerAction(answer: NonNullable<ReviewTurnInput["answer"]>): {
-  action: ResumeInput["resumeAction"];
-  tasksPath?: string;
-  approvedSourceHash?: string;
-  approval?: ResumeInput["approval"];
-} {
-  if (typeof answer === "string") return { action: answer };
-  return {
-    action: answer.action,
-    tasksPath: answer.tasksPath,
-    approvedSourceHash: answer.approvedSourceHash,
-    approval: answer.approval
-  };
-}
-
 function pauseMessage(run: RunRecord): string {
   const code = run.pause?.code ?? "RUN_PAUSED";
   if (code === "REPAIR_USER_APPROVAL_REQUIRED") {
-    return "The repair revision exceeds automatic approval scope and requires user approval.";
+    return "The requested repair exceeds this immutable Job's task scope. Cancel it and create a new Job with updated tasks.";
   }
   if (code === "REPAIR_NO_PROGRESS") {
     return "Automatic repair is not making progress; inspect the repair state or cancel the run.";
@@ -98,7 +83,6 @@ function mutableResumeActions(run: RunRecord): ResumeInput["resumeAction"][] {
 
 function optionDescription(action: string): string {
   const descriptions: Record<string, string> = {
-    approve_new_manifest_revision: "Approve the supplied revision and continue the run",
     cancel: "Cancel the run and preserve its current evidence",
     confirm_manual_publish: "Confirm that the Project already matches the reviewed Candidate",
     resume_review_decision: "Grant another fifteen automatic repair rounds",
@@ -148,7 +132,7 @@ export class HostTurnCoordinator {
         });
       }
       if (status.phase === "PAUSED") {
-        return this.requireUserInput(input, status.revision);
+        return this.requireUserInput(input);
       }
       if (status.phase === "REVIEW_PENDING" || status.phase === "REVIEWING") {
         return this.notReady();
@@ -186,8 +170,7 @@ export class HostTurnCoordinator {
   }
 
   private async requireUserInput(
-    input: ReviewTurnInput,
-    revision: number
+    input: ReviewTurnInput
   ): Promise<ReviewTurnOutput> {
     const store = this.dependencies.store(input.projectId);
     let state = await store.readState();
@@ -202,16 +185,15 @@ export class HostTurnCoordinator {
     const previousTurn = run.hostTurn;
     if (previousTurn !== undefined) this.assertHostOwner(previousTurn, input.hostTurnId);
     const turnToken = previousTurn === undefined
-      ? deterministicTurnToken(input, `user-input-r${String(run.revision)}`)
+      ? deterministicTurnToken(input, `user-input-${run.pause.code}`)
       : childRequestId(
           previousTurn.turnToken,
-          `user-input-r${String(run.revision)}-${run.pause.code}`
+          `user-input-${run.pause.code}`
         ).replace(/^review-turn-/u, "turn-");
     const turn: HostTurn = {
       stage: "AWAITING_USER_INPUT",
       turnToken,
       hostTurnId: previousTurn?.hostTurnId ?? input.hostTurnId,
-      revision,
       pauseCode: run.pause.code,
       startedAt: new Date().toISOString()
     };
@@ -220,7 +202,6 @@ export class HostTurnCoordinator {
       input.jobId,
       childRequestId(turnToken, "user-input"),
       state.stateVersion,
-      revision,
       turn,
       previousTurn?.turnToken
     );
@@ -238,17 +219,7 @@ export class HostTurnCoordinator {
       projectId: state.projectId,
       jobId: run.jobId
     }));
-    const repairDraft = result.repairDraft;
     const resumeActions = mutableResumeActions(run);
-    const requiresRevisionApproval = resumeActions.includes("approve_new_manifest_revision");
-    const revisionApprovalAnswer = repairDraft?.approval.kind === "USER"
-      ? {
-          action: "approve_new_manifest_revision" as const,
-          tasksPath: repairDraft.suggestedTasksPath,
-          approvedSourceHash: repairDraft.sourceHash,
-          approval: repairDraft.approval
-        }
-      : undefined;
     const publishNeedsWorkspace = run.pause?.code.includes("PUBLISH") === true ||
       run.pause?.code === "PROJECT_PUBLISH_BUSY" ||
       (run.pause?.code === "RUNTIME_STAGE_FAILED" && run.lastError?.stage === "publish");
@@ -267,25 +238,6 @@ export class HostTurnCoordinator {
         answer,
         description: optionDescription(answer)
       })),
-      ...(requiresRevisionApproval
-        ? {
-            requiredInput: revisionApprovalAnswer === undefined
-              ? {
-                  mode: "COLLECT",
-                  action: "approve_new_manifest_revision",
-                  inputForm: {
-                    tasksPath: null,
-                    approvedSourceHash: null,
-                    approval: null
-                  }
-                }
-              : {
-                  mode: "CONFIRM",
-                  action: "approve_new_manifest_revision",
-                  answer: revisionApprovalAnswer
-                }
-          }
-        : {}),
       ...(worktreePath === undefined ? {} : { worktreePath })
     });
   }
@@ -295,7 +247,7 @@ export class HostTurnCoordinator {
     const state = await store.readState();
     const run = state.runs[input.jobId];
     const turn = run?.hostTurn;
-    const answer = input.answer === undefined ? undefined : answerAction(input.answer);
+    const answer = input.answer;
     if (
       run === undefined ||
       turn?.stage !== "AWAITING_USER_INPUT" ||
@@ -305,24 +257,18 @@ export class HostTurnCoordinator {
       return this.staleContinuation();
     }
     this.assertHostOwner(turn, input.hostTurnId);
-    if (!mutableResumeActions(run).includes(answer.action)) {
+    if (!mutableResumeActions(run).includes(answer)) {
       throw new Error("REVIEW_TURN_ANSWER_NOT_ALLOWED");
     }
-    if (answer.action === "resume_review_decision") {
-      return this.resumeReviewDecision(input, state, run, turn);
+    if (answer === "resume_review_decision") {
+      return this.resumeReviewDecision(input, state, turn);
     }
     await this.dependencies.resume({
-      requestId: childRequestId(turn.turnToken, `answer-${answer.action}`),
+      requestId: childRequestId(turn.turnToken, `answer-${answer}`),
       projectId: input.projectId,
       jobId: input.jobId,
-      expectedRevision: run.revision,
       expectedStateVersion: state.stateVersion,
-      resumeAction: answer.action,
-      ...(answer.tasksPath === undefined ? {} : { tasksPath: answer.tasksPath }),
-      ...(answer.approvedSourceHash === undefined
-        ? {}
-        : { approvedSourceHash: answer.approvedSourceHash }),
-      ...(answer.approval === undefined ? {} : { approval: answer.approval })
+      resumeAction: answer
     }, {
       clearHostTurn: true,
       expectedHostTurnToken: turn.turnToken
@@ -333,7 +279,6 @@ export class HostTurnCoordinator {
   private async resumeReviewDecision(
     input: ReviewTurnInput,
     state: ProjectState,
-    run: RunRecord,
     turn: Extract<HostTurn, { stage: "AWAITING_USER_INPUT" }>
   ): Promise<ReviewTurnOutput> {
     const store = this.dependencies.store(input.projectId);
@@ -344,12 +289,10 @@ export class HostTurnCoordinator {
           kind: "resume-review-decision",
           projectId: input.projectId,
           jobId: input.jobId,
-          revision: run.revision,
           turnToken: turn.turnToken
         },
         expectedStateVersion: state.stateVersion,
         expectedJobId: input.jobId,
-        expectedRevision: run.revision,
         expectedPhases: ["PAUSED"]
       },
       async (current, context) => {
@@ -382,7 +325,6 @@ export class HostTurnCoordinator {
     jobId: string,
     requestId: string,
     expectedStateVersion: number,
-    expectedRevision: number,
     hostTurn: HostTurn,
     expectedTurnToken?: string
   ): Promise<ProjectState> {
@@ -392,7 +334,6 @@ export class HostTurnCoordinator {
         payload: { kind: "host-turn", jobId, hostTurn },
         expectedStateVersion,
         expectedJobId: jobId,
-        expectedRevision,
         expectedPhases: ["PAUSED"]
       },
       (state) => {

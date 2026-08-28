@@ -53,7 +53,6 @@ class AsyncEventQueue<T> implements AsyncIterable<T> {
 export interface PiRpcTransport {
   stdin: Writable;
   stdout: Readable;
-  stderr: Readable;
 }
 
 export type PiRpcEventInterceptor = (

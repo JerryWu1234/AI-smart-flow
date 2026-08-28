@@ -46,7 +46,6 @@ function reviewAction(overrides: Record<string, unknown> = {}): Record<string, u
   return {
     type: "REVIEW",
     actionId: "review-action-1",
-    revision: 1,
     taskSourceHash: digestA,
     candidateHash: digestB,
     reviewAttemptId: "review-attempt-1",
@@ -63,20 +62,15 @@ function reviewRun(overrides: Partial<RunRecord> = {}): RunRecord {
     phase: "REVIEW_PENDING",
     pendingAction: reviewAction(),
     candidate: {
-      relativePath: "runs/job-1/revision-1/candidate.json",
+      relativePath: `runs/job-1/candidates/candidate-${digestB}.json`,
       sha256: digestB,
       size: 2
     },
     workspace: {
-      relativePath: "worktrees/job-1",
-      baselineHash: digestA,
-      generation: 0,
-      sandboxId: "sandbox-1",
-      mutable: true
+      relativePath: "worktrees/job-1"
     },
     workerAttempts: [{
       attemptId: "attempt-1",
-      revision: 1,
       generation: 0,
       providerRuntimeConfigHash: digestC,
       status: "COMPLETED",
@@ -102,28 +96,46 @@ async function createStore(run: RunRecord): Promise<StateStore> {
   const compiled = compileTaskManifest(tasksSource, {
     projectId,
     jobId,
-    revision: 1,
     canonicalTaskPath: logicalTaskPath,
     providerRuntimeConfig: { model: "test" },
     approval: {
       kind: "USER",
       approvedAt: nowText,
-      parentRevision: null,
       authorizedCriterionIds: ["T001:acceptance:1"]
     }
   });
   const taskSource = await store.writeArtifact(
-    `runs/${jobId}/revision-1/task-source.md`,
+    `runs/${jobId}/task-source.md`,
     Buffer.from(tasksSource, "utf8")
   );
   const taskManifest = await store.writeArtifact(
-    `runs/${jobId}/revision-1/task-manifest.json`,
+    `runs/${jobId}/task-manifest.json`,
     compiled.artifactBytes
   );
   const candidate = await store.writeArtifact(
-    `runs/${jobId}/revision-1/candidate.json`,
+    `runs/${jobId}/candidates/candidate-${digestB}.json`,
     Buffer.from("{}", "utf8")
   );
+  const completedAttempt = run.workerAttempts.find((attempt) => attempt.status === "COMPLETED");
+  const completedSessionArtifact = completedAttempt === undefined
+    ? undefined
+    : await store.writeArtifact(
+        `runs/${jobId}/attempts/${completedAttempt.attemptId}/session-artifact.json`,
+        Buffer.from(JSON.stringify({
+          jobId,
+          attemptId: completedAttempt.attemptId,
+          generation: completedAttempt.generation,
+          piSessionId: completedAttempt.piSessionId,
+          providerRuntimeConfigHash: completedAttempt.providerRuntimeConfigHash,
+          terminalStatus: "COMPLETED",
+          sessionFileRelativePath: `sessions/${completedAttempt.piSessionId ?? "session"}.jsonl`,
+          sessionJsonlBase64: Buffer.from("{}\n", "utf8").toString("base64"),
+          ...(completedAttempt.containmentId === undefined
+            ? {}
+            : { containmentId: completedAttempt.containmentId }),
+          createdAt: completedAttempt.endedAt ?? nowText
+        }), "utf8")
+      );
   const pendingAction = run.pendingAction?.type === "REVIEW"
     ? {
         ...run.pendingAction,
@@ -141,6 +153,11 @@ async function createStore(run: RunRecord): Promise<StateStore> {
       path: resolve(store.dataDirectory, taskSource.relativePath),
       sourceHash: compiled.manifest.sourceHash
     },
+    workerAttempts: run.workerAttempts.map((attempt) =>
+      attempt.status === "COMPLETED" && completedSessionArtifact !== undefined
+        ? { ...attempt, sessionArtifact: completedSessionArtifact }
+        : attempt
+    ),
     pendingAction
   };
   await store.initialize(createProjectState({
@@ -188,7 +205,7 @@ function resultFor(run: RunRecord, repairDraft?: Record<string, unknown>): Recor
     phase: run.phase,
     status: resultStatus(run),
     artifacts: [],
-    nextActions: run.pause?.resumeActions ?? [],
+    nextActions: (run.pause?.resumeActions ?? []).filter((action) => !action.startsWith("inspect_")),
     ...(repairDraft === undefined ? {} : { repairDraft })
   };
 }
@@ -212,7 +229,6 @@ function createDependencies(
         projectId,
         jobId,
         phase: run.phase,
-        revision: run.revision,
         stateVersion: state.stateVersion,
         ...(run.pendingAction === undefined ? {} : { pendingAction: run.pendingAction }),
         ...(run.pause === undefined ? {} : { pause: run.pause })
@@ -248,7 +264,6 @@ describe("HostTurnCoordinator daemon-owned Review boundary", () => {
             stage: "AWAITING_REVIEW" as const,
             turnToken: "daemon-review-turn-1",
             hostTurnId: DAEMON_REVIEWER_HOST_TURN_ID,
-            revision: 1,
             reviewAttemptId: "review-attempt-1",
             startedAt: nowText,
             deadlineAt: "2026-08-11T10:45:00.000Z"
@@ -373,30 +388,27 @@ describe("HostTurnCoordinator daemon-owned Review boundary", () => {
     );
   });
 
-  it("exposes a complete USER revision approval and forwards it through resume", async () => {
+  it("presents scope-expanding repair evidence and only permits cancel", async () => {
     const repairDraft = {
       sourceArtifact: {
-        relativePath: "runs/job-1/repair.md",
+        relativePath: `runs/job-1/repair-drafts/${digestA}.md`,
         sha256: digestA,
         size: 10
       },
       sourceHash: digestA,
+      baseTaskSourceHash: digestA,
+      baseTaskManifestHash: digestB,
       suggestedTasksPath: "tasks.md",
       appendText: "\n- [ ] T002 repair",
       addedTaskLines: ["- [ ] T002 repair"],
-      reasons: ["User scope changed"],
-      approval: {
-        kind: "USER",
-        parentRevision: 1,
-        authorizedCriterionIds: ["T002"]
-      }
+      reasons: ["User scope changed"]
     };
     const store = await createStore(reviewRun({
       phase: "PAUSED",
       pendingAction: undefined,
       pause: {
         code: "REPAIR_USER_APPROVAL_REQUIRED",
-        resumeActions: ["inspect_repair_diff", "approve_new_manifest_revision", "cancel"]
+        resumeActions: ["inspect_repair_diff", "cancel"]
       },
       recovery: { repairDraft }
     }));
@@ -414,34 +426,30 @@ describe("HostTurnCoordinator daemon-owned Review boundary", () => {
     const prompt = await coordinator.turn(initialInput({ requestId: "user-prompt" }));
     expect(prompt).toMatchObject({
       kind: "USER_INPUT_REQUIRED",
-      requiredInput: {
-        mode: "CONFIRM",
-        action: "approve_new_manifest_revision",
-        answer: {
-          tasksPath: "tasks.md",
-          approvedSourceHash: digestA,
-          approval: repairDraft.approval
-        }
-      }
+      pause: {
+        code: "REPAIR_USER_APPROVAL_REQUIRED"
+      },
+      result: {
+        nextActions: ["cancel"],
+        repairDraft
+      },
+      options: [{ answer: "cancel" }]
     });
+    expect(prompt).not.toHaveProperty("requiredInput");
     expect(prompt).not.toHaveProperty("worktreePath");
-    if (prompt.kind !== "USER_INPUT_REQUIRED" || prompt.requiredInput?.mode !== "CONFIRM") {
-      throw new Error("complete USER approval answer missing");
+    if (prompt.kind !== "USER_INPUT_REQUIRED") {
+      throw new Error("scope-expanding repair prompt missing");
     }
+    expect(prompt.pause.message).toContain("Cancel it and create a new Job");
 
     const done = await coordinator.turn(initialInput({
       requestId: "user-answer",
       turnToken: prompt.turnToken,
-      answer: prompt.requiredInput.answer
+      answer: "cancel"
     }));
     expect(done.kind).toBe("DONE");
     expect(resume).toHaveBeenCalledWith(
-      expect.objectContaining({
-        resumeAction: "approve_new_manifest_revision",
-        tasksPath: "tasks.md",
-        approvedSourceHash: digestA,
-        approval: repairDraft.approval
-      }),
+      expect.objectContaining({ resumeAction: "cancel" }),
       expect.objectContaining({
         clearHostTurn: true,
         expectedHostTurnToken: prompt.turnToken

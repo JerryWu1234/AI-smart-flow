@@ -49,10 +49,9 @@ it("captures tracked dirty and allowed untracked files in an isolated Run object
     projectRoot: root,
     dataDirectory: resolve(data, "run-1"),
     runGitDirectory: objectStore.gitDirectory,
-    indexPath: resolve(data, "run-1", "revision-1", "baseline.index"),
+    indexPath: resolve(data, "run-1", "current.index"),
     repositoryId: capabilities.repositoryId,
     snapshotKind: "RUN_BASELINE",
-    revision: 1,
     includedPathPolicyHash: capabilities.inclusionPolicyHash
   });
 

@@ -8,7 +8,6 @@ import {
   type McpModelExtensionApi
 } from "../../../../packages/provider-pi/src/mcp-model-extension.js";
 import {
-  PI_API_KEY_ENVIRONMENT_VARIABLE,
   PI_INTERNAL_PROVIDER_ID,
   PI_MODEL_APIS
 } from "../../../../packages/provider-pi/src/runtime-config.js";
@@ -16,14 +15,14 @@ import {
 describe("SmartFlow Pi model Extension", () => {
   it.each(PI_MODEL_APIS)("registers exactly one %s model without credential bytes", (api) => {
     const environment = {
-      SMARTFLOW_PI_API: api,
-      SMARTFLOW_PI_BASE_URL: "https://models.example.test/v1",
-      SMARTFLOW_PI_MODEL: "model-test",
+      API: api,
+      BASE_URL: "https://models.example.test/v1",
+      MODEL: "model-test",
       SMARTFLOW_PI_CONTEXT_WINDOW: "1000000",
       SMARTFLOW_PI_MAX_TOKENS: "384000",
       SMARTFLOW_PI_THINKING: "high",
       SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "300000",
-      SMARTFLOW_PI_API_KEY: "secret-value"
+      API_KEY: "secret-value"
     };
     const registerProvider = vi.fn();
     const on = vi.fn();
@@ -36,7 +35,7 @@ describe("SmartFlow Pi model Extension", () => {
       name: "SmartFlow MCP Model",
       api,
       baseUrl: "https://models.example.test/v1",
-      apiKey: `$${PI_API_KEY_ENVIRONMENT_VARIABLE}`,
+      apiKey: "$API_KEY",
       models: [{
         id: "model-test",
         name: "model-test",
@@ -54,14 +53,14 @@ describe("SmartFlow Pi model Extension", () => {
     vi.useFakeTimers();
     try {
       const environment = {
-        SMARTFLOW_PI_API: "openai-completions",
-        SMARTFLOW_PI_BASE_URL: "https://models.example.test/v1",
-        SMARTFLOW_PI_MODEL: "model-test",
+        API: "openai-completions",
+        BASE_URL: "https://models.example.test/v1",
+        MODEL: "model-test",
         SMARTFLOW_PI_CONTEXT_WINDOW: "1000000",
         SMARTFLOW_PI_MAX_TOKENS: "384000",
         SMARTFLOW_PI_THINKING: "high",
         SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "300000",
-        SMARTFLOW_PI_API_KEY: "secret-value"
+        API_KEY: "secret-value"
       };
       type SessionEvent = Parameters<McpModelExtensionApi["on"]>[0];
       type SessionHandler = Parameters<McpModelExtensionApi["on"]>[1];
@@ -93,14 +92,14 @@ describe("SmartFlow Pi model Extension", () => {
 
   it("rejects numeric settings outside the safe-integer range", () => {
     const environment = {
-      SMARTFLOW_PI_API: "openai-completions",
-      SMARTFLOW_PI_BASE_URL: "https://models.example.test/v1",
-      SMARTFLOW_PI_MODEL: "model-test",
+      API: "openai-completions",
+      BASE_URL: "https://models.example.test/v1",
+      MODEL: "model-test",
       SMARTFLOW_PI_CONTEXT_WINDOW: "1000000",
       SMARTFLOW_PI_MAX_TOKENS: "384000",
       SMARTFLOW_PI_THINKING: "high",
       SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "300000",
-      SMARTFLOW_PI_API_KEY: "secret-value"
+      API_KEY: "secret-value"
     };
     for (const unsafe of [String(Number.MAX_SAFE_INTEGER + 1), "9".repeat(400)]) {
       expect(() => createMcpModelRegistration({
@@ -121,13 +120,13 @@ describe("SmartFlow Pi model Extension", () => {
 
   it("rejects incomplete child configuration without exposing the API Key", () => {
     expect(() => createMcpModelRegistration({
-      SMARTFLOW_PI_API: "openai-completions",
-      SMARTFLOW_PI_API_KEY: "secret-value"
-    })).toThrow(/SMARTFLOW_PI_BASE_URL is required/u);
+      API: "openai-completions",
+      API_KEY: "secret-value"
+    })).toThrow(/BASE_URL is required/u);
     try {
       createMcpModelRegistration({
-        SMARTFLOW_PI_API: "openai-completions",
-        SMARTFLOW_PI_API_KEY: "secret-value"
+        API: "openai-completions",
+        API_KEY: "secret-value"
       });
     } catch (error) {
       expect(String(error)).not.toContain("secret-value");

@@ -28,7 +28,7 @@ export interface HostActionCallbacks {
 
 export interface ExecuteApprovedWorkflowInput {
   projectRoot: string;
-  approval: ApprovedTasksSnapshot;
+  approval?: ApprovedTasksSnapshot;
   requestId: string;
   hostTurnId: string;
   expectedStateVersion?: number;

@@ -16,10 +16,10 @@ export interface ResolvedWorkerLaunchConfiguration {
 }
 
 export const WORKER_CONFIGURATION_ENVIRONMENT_KEYS = [
-  "SMARTFLOW_PI_API",
-  "SMARTFLOW_PI_BASE_URL",
-  "SMARTFLOW_PI_MODEL",
-  "SMARTFLOW_PI_API_KEY",
+  "API",
+  "BASE_URL",
+  "MODEL",
+  "API_KEY",
   "SMARTFLOW_PI_CONTEXT_WINDOW",
   "SMARTFLOW_PI_MAX_TOKENS",
   "SMARTFLOW_PI_THINKING",
@@ -43,7 +43,9 @@ function required(environment: NodeJS.ProcessEnv, key: string): string {
 }
 
 function isWorkerConfigurationKey(key: string): boolean {
-  return key.startsWith("SMARTFLOW_PI_") || /^SMARTFLOW_(?:MODEL(?:_|$)|WORKER$)/u.test(key);
+  return WORKER_CONFIGURATION_ENVIRONMENT_KEYS.includes(
+    key as typeof WORKER_CONFIGURATION_ENVIRONMENT_KEYS[number]
+  ) || key.startsWith("SMARTFLOW_PI_") || /^SMARTFLOW_(?:MODEL(?:_|$)|WORKER$)/u.test(key);
 }
 
 function optionalPositiveInteger(
@@ -83,7 +85,7 @@ export function resolveWorkerLaunchConfiguration(
     value === flag || value.startsWith(`${flag}=`)
   ))) {
     throw new Error(
-      "WORKER_CONFIGURATION_INVALID: Pi model configuration must use SMARTFLOW_PI_* environment variables"
+      "WORKER_CONFIGURATION_INVALID: Pi model configuration must use API, BASE_URL, MODEL, and API_KEY environment variables"
     );
   }
   const unsupportedKey = Object.keys(environment).find((key) =>
@@ -96,9 +98,9 @@ export function resolveWorkerLaunchConfiguration(
   if (unsupportedKey !== undefined) {
     throw new Error(`WORKER_CONFIGURATION_INVALID: ${unsupportedKey} is unsupported`);
   }
-  const api = required(environment, "SMARTFLOW_PI_API");
+  const api = required(environment, "API");
   if (!PI_MODEL_APIS.includes(api as PiModelApi)) {
-    throw new Error("WORKER_CONFIGURATION_INVALID: SMARTFLOW_PI_API is unsupported");
+    throw new Error("WORKER_CONFIGURATION_INVALID: API is unsupported");
   }
   const contextWindow = optionalPositiveInteger(
     environment,
@@ -121,11 +123,11 @@ export function resolveWorkerLaunchConfiguration(
       `WORKER_CONFIGURATION_INVALID: SMARTFLOW_PI_ATTEMPT_DEADLINE_MS must be at least ${String(PI_MINIMUM_ATTEMPT_DEADLINE_MS)}`
     );
   }
-  const credential = required(environment, "SMARTFLOW_PI_API_KEY");
+  const credential = required(environment, "API_KEY");
   const runtimeConfig = parsePiRuntimeConfiguration({
     api,
-    baseUrl: required(environment, "SMARTFLOW_PI_BASE_URL"),
-    modelId: required(environment, "SMARTFLOW_PI_MODEL"),
+    baseUrl: required(environment, "BASE_URL"),
+    modelId: required(environment, "MODEL"),
     contextWindow,
     maxTokens,
     thinkingLevel: (environment.SMARTFLOW_PI_THINKING?.trim() || "high") as PiThinkingLevel,
@@ -145,20 +147,16 @@ export function workerLaunchEnvironment(
 ): NodeJS.ProcessEnv {
   const environment = { ...baseEnvironment };
   for (const key of Object.keys(environment)) {
-    if (WORKER_CONFIGURATION_ENVIRONMENT_KEYS.includes(
-      key as typeof WORKER_CONFIGURATION_ENVIRONMENT_KEYS[number]
-    ) || isWorkerConfigurationKey(key)) {
-      Reflect.deleteProperty(environment, key);
-    }
+    if (isWorkerConfigurationKey(key)) Reflect.deleteProperty(environment, key);
   }
-  environment.SMARTFLOW_PI_API = configuration.runtimeConfig.api;
-  environment.SMARTFLOW_PI_BASE_URL = configuration.runtimeConfig.baseUrl;
-  environment.SMARTFLOW_PI_MODEL = configuration.runtimeConfig.modelId;
+  environment.API = configuration.runtimeConfig.api;
+  environment.BASE_URL = configuration.runtimeConfig.baseUrl;
+  environment.MODEL = configuration.runtimeConfig.modelId;
   environment.SMARTFLOW_PI_CONTEXT_WINDOW = String(configuration.runtimeConfig.contextWindow);
   environment.SMARTFLOW_PI_MAX_TOKENS = String(configuration.runtimeConfig.maxTokens);
   environment.SMARTFLOW_PI_THINKING = configuration.runtimeConfig.thinkingLevel;
   environment.SMARTFLOW_PI_ATTEMPT_DEADLINE_MS = String(configuration.runtimeConfig.attemptDeadlineMs);
-  environment.SMARTFLOW_PI_API_KEY = configuration.credential;
+  environment.API_KEY = configuration.credential;
   return environment;
 }
 

@@ -91,7 +91,6 @@ describe("Provider configuration binding", () => {
         run.projectId,
         "runs",
         run.jobId,
-        "revision-1",
         "task-manifest.json"
       );
       const manifest = JSON.parse(await readFile(path, "utf8")) as {

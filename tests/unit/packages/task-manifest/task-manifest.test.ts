@@ -7,13 +7,11 @@ import { createTasksSource } from "../../../fixtures/task-manifest/test-fixture.
 const baseOptions = {
   projectId: "project-1",
   jobId: "job-1",
-  revision: 1,
-  canonicalTaskPath: "/project/tasks.md",
+  canonicalTaskPath: "tasks.md",
   providerRuntimeConfig: { endpoint: "https://provider.invalid", model: "test-model" },
   approval: {
     kind: "USER" as const,
     approvedAt: "2026-07-20T10:00:00+08:00",
-    parentRevision: null,
     authorizedCriterionIds: ["T001:acceptance:1"]
   }
 };
@@ -24,12 +22,14 @@ describe("TaskManifest compiler", () => {
     const second = compileTaskManifest(createTasksSource(), baseOptions);
     expect(first).toEqual(second);
     expect(first.manifest.sourceHash).toMatch(/^[a-f0-9]{64}$/u);
-    expect(first.manifest.schemaVersion).toBe(3);
+    expect(first.manifest).not.toHaveProperty("schemaVersion");
     expect(first.manifest.runId).toBe("job-1");
-    expect(first.manifest.revisionId).toBe("job-1:revision-1");
     expect(first.manifest.tasksSha256).toBe(first.manifest.sourceHash);
-    expect(first.manifest.taskSourceArtifact.sha256).toBe(first.manifest.sourceHash);
-    expect(first.manifest.canonicalTaskPath).toBe("/project/tasks.md");
+    expect(first.manifest.taskSourceArtifact).toMatchObject({
+      relativePath: "runs/job-1/task-source.md",
+      sha256: first.manifest.sourceHash
+    });
+    expect(first.manifest.canonicalTaskPath).toBe("tasks.md");
     expect(first.manifest.tasksHash).toMatch(/^[a-f0-9]{64}$/u);
     expect(first.manifest.providerRuntimeConfigHash).toMatch(/^[a-f0-9]{64}$/u);
     expect(first.manifestHash).toMatch(/^[a-f0-9]{64}$/u);
@@ -41,7 +41,7 @@ describe("TaskManifest compiler", () => {
     const first = compileTaskManifest(createTasksSource(), baseOptions);
     const second = compileTaskManifest(createTasksSource(), {
       ...baseOptions,
-      canonicalTaskPath: "/project/other-tasks.md"
+      canonicalTaskPath: "other-tasks.md"
     });
     expect(second.manifest.sourceHash).toBe(first.manifest.sourceHash);
     expect(second.manifestHash).not.toBe(first.manifestHash);

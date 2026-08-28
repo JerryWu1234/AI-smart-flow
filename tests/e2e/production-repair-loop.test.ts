@@ -9,7 +9,12 @@ import {
   ProjectRuntime,
   DAEMON_REVIEWER_HOST_TURN_ID
 } from "@smartflow/daemon";
-import type { ReviewResult, ReviewTurnOutput } from "@smartflow/protocol";
+import type {
+  ResultOutput,
+  ReviewResult,
+  ReviewTurnOutput,
+  RunSummary
+} from "@smartflow/protocol";
 import type {
   CancelReceipt,
   ProviderProbeResult,
@@ -19,7 +24,6 @@ import type {
 } from "@smartflow/provider-core";
 import type {
   AgentAdapter,
-  AgentProbe,
   AgentRunOutcome,
   AgentRunRequest
 } from "@smartflow/review";
@@ -43,13 +47,16 @@ class RepairLoopProvider implements WorkerProvider {
   public readonly starts: Array<{
     attemptId: string;
     generation: number;
-    revision: number;
     sessionId: string;
+    workspaceDir: string;
+    prompt: string;
+    resumeSession: WorkerStartInput["resumeSession"];
+    restoredSession?: string;
   }> = [];
 
   public constructor(
-    private readonly revisionMarker: (revision: number) => string = (revision) => String(revision),
-    private readonly beforeStart: (revision: number) => Promise<void> = () => Promise.resolve()
+    private readonly generationMarker: (generation: number) => string = (generation) => String(generation),
+    private readonly beforeStart: (generation: number) => Promise<void> = () => Promise.resolve()
   ) {}
 
   public probe(): Promise<ProviderProbeResult> {
@@ -69,8 +76,27 @@ class RepairLoopProvider implements WorkerProvider {
   }
 
   public async *start(input: WorkerStartInput): AsyncIterable<WorkerEvent> {
-    await this.beforeStart(input.revision);
-    const piSessionId = `worker-r${String(input.revision)}-${input.attemptId}`;
+    await this.beforeStart(input.generation);
+    const piSessionId = input.resumeSession?.expectedPiSessionId ?? "worker-session-s1";
+    const sessionFile = input.resumeSession?.sessionFile ?? resolve(
+      input.workspaceDir,
+      ".smartflow-runtime",
+      "sessions",
+      `${piSessionId}.jsonl`
+    );
+    const restoredSession = input.resumeSession === undefined
+      ? undefined
+      : await readFile(sessionFile, "utf8");
+    const sessionEntry = `${JSON.stringify({
+      type: "smartflow-test-turn",
+      attemptId: input.attemptId,
+      generation: input.generation,
+      prompt: input.prompt,
+      workspaceDir: input.workspaceDir
+    })}\n`;
+    await mkdir(dirname(sessionFile), { recursive: true });
+    await writeFile(sessionFile, `${restoredSession ?? ""}${sessionEntry}`, "utf8");
+
     const identity = {
       attemptId: input.attemptId,
       configHash: input.providerRuntimeConfigHash,
@@ -84,8 +110,11 @@ class RepairLoopProvider implements WorkerProvider {
     this.starts.push({
       attemptId: input.attemptId,
       generation: input.generation,
-      revision: input.revision,
-      sessionId: piSessionId
+      sessionId: piSessionId,
+      workspaceDir: input.workspaceDir,
+      prompt: input.prompt,
+      resumeSession: input.resumeSession,
+      ...(restoredSession === undefined ? {} : { restoredSession })
     });
     yield {
       type: "STARTED",
@@ -95,7 +124,7 @@ class RepairLoopProvider implements WorkerProvider {
       pid: identity.pid,
       processStartToken: identity.processStartToken
     };
-    const callId = `write-r${String(input.revision)}`;
+    const callId = `write-g${String(input.generation)}`;
     yield {
       type: "TOOL_STARTED",
       attemptId: input.attemptId,
@@ -108,7 +137,7 @@ class RepairLoopProvider implements WorkerProvider {
         "export function sum(left, right) {",
         "  return left + right;",
         "}",
-        `export const implementedRevision = ${JSON.stringify(this.revisionMarker(input.revision))};`,
+        `export const implementationMarker = ${JSON.stringify(this.generationMarker(input.generation))};`,
         ""
       ].join("\n"),
       "utf8"
@@ -120,7 +149,7 @@ class RepairLoopProvider implements WorkerProvider {
       callId,
       isError: false
     };
-    yield { type: "COMPLETED", attemptId: input.attemptId, piSessionId };
+    yield { type: "COMPLETED", attemptId: input.attemptId, piSessionId, sessionFile };
   }
 
   public cancel(attemptId: string): Promise<CancelReceipt> {
@@ -172,7 +201,6 @@ interface RecordedReviewCall {
 }
 
 class ScriptedReviewAdapter implements AgentAdapter {
-  public readonly id = "scripted-reviewer";
   public readonly calls: RecordedReviewCall[] = [];
   private readonly releases = new Map<number, () => void>();
 
@@ -185,10 +213,6 @@ class ScriptedReviewAdapter implements AgentAdapter {
       findingCodes: ["REPAIR_REQUIRED"]
     }
   ) {}
-
-  public probe(): Promise<AgentProbe> {
-    return Promise.resolve({ available: true, agentId: this.id, version: "test" });
-  }
 
   public createSession(request: AgentRunRequest): Promise<AgentRunOutcome> {
     return this.run("CREATE", request);
@@ -270,12 +294,12 @@ function compositionFor(
   adapter: AgentAdapter
 ): ProductionRuntimeComposition {
   return new ProductionRuntimeComposition(
+    adapter,
     undefined,
     undefined,
     provider,
     Object.freeze({}),
     undefined,
-    adapter,
     { deadlineMs: 60_000, maxAttempts: 3 }
   );
 }
@@ -314,7 +338,7 @@ async function pollReviewTurn(
 }
 
 describe("production daemon Review repair loop", () => {
-  it("creates Revision N+1, invalidates evidence, and resumes one Reviewer session", async () => {
+  it("reuses one immutable Job, its workspace, and one PI session across repair attempts", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const tasksPath = resolve(harness.projectDir, "tasks.md");
@@ -323,20 +347,20 @@ describe("production daemon Review repair loop", () => {
     });
     await writeFile(tasksPath, tasksSource, "utf8");
 
-    let releaseRevision2!: () => void;
-    let revision2Reached!: () => void;
-    const revision2Gate = new Promise<void>((settle) => {
-      releaseRevision2 = settle;
+    let releaseGeneration1!: () => void;
+    let generation1Reached!: () => void;
+    const generation1Gate = new Promise<void>((settle) => {
+      releaseGeneration1 = settle;
     });
-    const revision2Scheduled = new Promise<void>((settle) => {
-      revision2Reached = settle;
+    const generation1Scheduled = new Promise<void>((settle) => {
+      generation1Reached = settle;
     });
     const provider = new RepairLoopProvider(
-      (revision) => revision === 1 ? "1" : "stable",
-      async (revision): Promise<void> => {
-        if (revision === 2) {
-          revision2Reached();
-          await revision2Gate;
+      (generation) => generation === 0 ? "1" : "stable",
+      async (generation): Promise<void> => {
+        if (generation === 1) {
+          generation1Reached();
+          await generation1Gate;
         }
       }
     );
@@ -374,9 +398,14 @@ describe("production daemon Review repair loop", () => {
     await adapter.waitForCalls(1);
     const firstState = await store.readState();
     const firstRun = firstState.runs[execute.jobId];
-    if (firstRun === undefined) throw new Error("first revision missing");
+    if (
+      firstRun === undefined ||
+      firstRun.workspace === undefined ||
+      firstRun.candidate === undefined
+    ) {
+      throw new Error("first Job evidence missing");
+    }
     expect(firstRun).toMatchObject({
-      revision: 1,
       phase: "REVIEWING",
       hostTurn: {
         stage: "AWAITING_REVIEW",
@@ -385,6 +414,8 @@ describe("production daemon Review repair loop", () => {
     });
     const firstEvidence = {
       taskManifest: firstRun.taskManifest,
+      taskSource: firstRun.taskSource,
+      workspace: firstRun.workspace.relativePath,
       candidate: firstRun.candidate,
       candidateHash: firstRun.pendingAction?.candidateHash,
       attemptId: firstRun.workerAttempts.at(-1)?.attemptId,
@@ -394,47 +425,74 @@ describe("production daemon Review repair loop", () => {
       .toEqual({ kind: "NOT_READY", retryAfterMs: 30_000 });
 
     adapter.release(1);
-    await revision2Scheduled;
-    const cleanRevision = await store.readState();
-    const cleanRun = cleanRevision.runs[execute.jobId];
-    expect(cleanRun).toMatchObject({ revision: 2, phase: "RUNNING" });
-    expect(cleanRun?.taskManifest.sha256).not.toBe(firstEvidence.taskManifest.sha256);
+    await generation1Scheduled;
+    const cleanState = await store.readState();
+    const cleanRun = cleanState.runs[execute.jobId];
+    expect(cleanRun).toMatchObject({
+      phase: "RUNNING",
+      taskManifest: firstEvidence.taskManifest,
+      taskSource: firstEvidence.taskSource,
+      workspace: { relativePath: firstEvidence.workspace }
+    });
     expect(cleanRun?.candidate).toBeUndefined();
     expect(cleanRun?.review).toBeUndefined();
     expect(cleanRun?.leaderDecision).toBeUndefined();
     expect(cleanRun?.pendingAction).toBeUndefined();
+    expect(cleanRun?.gitWorkspace?.current.resultSnapshot).toBeUndefined();
+    expect(cleanRun?.gitWorkspace?.current.candidate).toBeUndefined();
+    expect(cleanRun?.workerAttempts.map((attempt) => attempt.generation)).toEqual([0, 1]);
 
-    releaseRevision2();
+    releaseGeneration1();
     await adapter.waitForCalls(2);
     const secondRun = (await store.readState()).runs[execute.jobId];
-    expect(secondRun).toMatchObject({ revision: 2, phase: "REVIEWING" });
-    expect(secondRun?.candidate?.sha256).not.toBe(firstEvidence.candidate?.sha256);
+    expect(secondRun).toMatchObject({
+      phase: "REVIEWING",
+      taskManifest: firstEvidence.taskManifest,
+      taskSource: firstEvidence.taskSource,
+      workspace: { relativePath: firstEvidence.workspace }
+    });
+    expect(secondRun?.candidate?.sha256).not.toBe(firstEvidence.candidate.sha256);
     expect(secondRun?.pendingAction?.candidateHash).not.toBe(firstEvidence.candidateHash);
     expect(secondRun?.workerAttempts.at(-1)?.attemptId).not.toBe(firstEvidence.attemptId);
-    expect(secondRun?.workerAttempts.at(-1)?.piSessionId).not.toBe(firstEvidence.sessionId);
+    expect(secondRun?.workerAttempts.at(-1)?.piSessionId).toBe(firstEvidence.sessionId);
 
     adapter.release(2);
     await adapter.waitForCalls(3);
     const thirdRun = (await store.readState()).runs[execute.jobId];
-    expect(thirdRun).toMatchObject({ revision: 3, phase: "REVIEWING" });
+    expect(thirdRun).toMatchObject({ phase: "REVIEWING" });
     expect(thirdRun?.pendingAction).not.toHaveProperty("claimId");
     expect(thirdRun?.pendingAction).not.toHaveProperty("claimExpiresAt");
     expect(thirdRun?.reviewHistory?.map((entry) => entry.reviewerSessionId))
       .toEqual(["reviewer-session-s1", "reviewer-session-s1"]);
     expect(adapter.calls.map((call) => call.mode)).toEqual(["CREATE", "RESUME", "RESUME"]);
-    expect(adapter.calls[0]?.tasksSource).toBe(tasksSource);
-    expect(adapter.calls[1]?.tasksSource).toBe(tasksSource);
-    expect(adapter.calls[0]?.implementationSource).toContain('implementedRevision = "1"');
-    expect(adapter.calls[1]?.implementationSource).toContain('implementedRevision = "stable"');
+    expect(adapter.calls.map((call) => call.tasksSource)).toEqual([
+      tasksSource,
+      tasksSource,
+      tasksSource
+    ]);
+    expect(adapter.calls[0]?.implementationSource).toContain('implementationMarker = "1"');
+    expect(adapter.calls[1]?.implementationSource).toContain('implementationMarker = "stable"');
+    expect(adapter.calls[2]?.implementationSource).toContain('implementationMarker = "stable"');
+    expect(provider.starts.map((start) => start.generation)).toEqual([0, 1, 2]);
+    expect(new Set(provider.starts.map((start) => start.workspaceDir)).size).toBe(1);
+    expect(new Set(provider.starts.map((start) => start.sessionId)).size).toBe(1);
+    expect(provider.starts[0]?.resumeSession).toBeUndefined();
+    expect(provider.starts[1]?.resumeSession?.expectedPiSessionId).toBe(firstEvidence.sessionId);
+    expect(provider.starts[2]?.resumeSession?.expectedPiSessionId).toBe(firstEvidence.sessionId);
+    expect(provider.starts[1]?.prompt).toContain("LEADER_EXPECTATION_MISSED");
+    expect(provider.starts[2]?.prompt).toContain("REPAIR_REQUIRED");
+    expect(provider.starts[1]?.restoredSession).toContain('"generation":0');
+    expect(provider.starts[2]?.restoredSession).toContain('"generation":0');
+    expect(provider.starts[2]?.restoredSession).toContain('"generation":1');
 
     adapter.release(3);
-    await waitForState(
+    const completed = await waitForState(
       store,
       execute.jobId,
       (state) => state.runs[execute.jobId]?.phase === "COMPLETED",
       15_000
     );
-    expect(provider.starts.map((start) => start.revision)).toEqual([1, 2, 3]);
+    expect(completed.runs[execute.jobId]).toMatchObject({ phase: "COMPLETED" });
   }, 30_000);
 
   it("pauses at the repair limit and later detects no progress", async () => {
@@ -444,7 +502,7 @@ describe("production daemon Review repair loop", () => {
       tasks: "## M01 · Core\n\n- [ ] T001 Edit `sum.js` — 验收：Reviewer confirms the requested behavior"
     });
     await writeFile(resolve(harness.projectDir, "tasks.md"), tasksSource, "utf8");
-    const provider = new RepairLoopProvider((revision) => revision <= 2 ? "stable" : "changed");
+    const provider = new RepairLoopProvider(() => "stable");
     // The adapter is constructed before the Run exists, so it reads the Run
     // identity through a holder that the execute call fills in later.
     const reviewRef: { store?: StateStore; jobId?: string } = {};
@@ -511,9 +569,11 @@ describe("production daemon Review repair loop", () => {
       "CREATE",
       ...Array.from({ length: adapter.calls.length - 1 }, () => "RESUME" as const)
     ]);
-    expect(adapter.calls).toHaveLength(18);
-    expect(provider.starts.map((start) => start.revision))
-      .toEqual(Array.from({ length: 18 }, (_, index) => index + 1));
+    expect(adapter.calls).toHaveLength(16);
+    expect(provider.starts).toHaveLength(16);
+    expect(provider.starts.map((start) => start.generation))
+      .toEqual(Array.from({ length: 16 }, (_, index) => index));
+    expect(new Set(provider.starts.map((start) => start.sessionId)).size).toBe(1);
   }, 90_000);
 
   it("uses only execute plus review_turn while daemon Review repairs and publishes", async () => {
@@ -523,13 +583,13 @@ describe("production daemon Review repair loop", () => {
       tasks: "## M01 · Core\n\n- [ ] T001 Edit `sum.js` — 验收：Reviewer confirms the requested behavior"
     });
     await writeFile(resolve(harness.projectDir, "tasks.md"), tasksSource, "utf8");
-    const provider = new RepairLoopProvider((revision) => revision === 1 ? "1" : "stable");
+    const provider = new RepairLoopProvider((generation) => generation === 0 ? "1" : "stable");
     // The adapter is constructed before the Run exists, so it reads the Run
     // identity through a holder that the execute call fills in later.
     const reviewRef: { store?: StateStore; jobId?: string } = {};
     const adapter = new ScriptedReviewAdapter(
       new Map([
-        [1, { verdict: "REQUEST_CHANGES", findingCodes: ["FIRST_REVISION_INCOMPLETE"] }],
+        [1, { verdict: "REQUEST_CHANGES", findingCodes: ["FIRST_ATTEMPT_INCOMPLETE"] }],
         [2, { verdict: "APPROVE" }]
       ]),
       async () => {
@@ -653,8 +713,36 @@ describe("production daemon Review repair loop", () => {
     expect(done.result.review?.tasks.every(
       (task) => task.completionPercentage === 100 && task.issues.length === 0
     )).toBe(true);
+
+    const completedRun = (await store.readState()).runs[jobId];
+    if (completedRun === undefined) throw new Error("completed run missing");
+    const sessionArtifacts = completedRun.workerAttempts.flatMap((attempt) =>
+      attempt.sessionArtifact === undefined ? [] : [attempt.sessionArtifact]
+    );
+    expect(sessionArtifacts).toHaveLength(2);
+    const sessionArtifactPaths = new Set(
+      sessionArtifacts.map((artifact) => artifact.relativePath)
+    );
+    const status = await runtime.handle({
+      id: "status-with-private-session",
+      method: "smartflow_status",
+      payload: { projectId: execute.projectId, jobId }
+    }) as RunSummary;
+    expect(status.activeAttempt).not.toHaveProperty("sessionArtifact");
+    const result = await runtime.handle({
+      id: "result-with-private-session",
+      method: "smartflow_result",
+      payload: { projectId: execute.projectId, jobId }
+    }) as ResultOutput;
+    expect(result.artifacts.some(
+      (artifact) => sessionArtifactPaths.has(artifact.relativePath)
+    )).toBe(false);
+    expect(done.result.artifacts.some(
+      (artifact) => sessionArtifactPaths.has(artifact.relativePath)
+    )).toBe(false);
+
     expect(await readFile(resolve(harness.projectDir, "sum.js"), "utf8"))
-      .toContain('implementedRevision = "stable"');
+      .toContain('implementationMarker = "stable"');
     expect(provider.starts).toHaveLength(2);
     expect(new Set(toolNames)).toEqual(new Set([
       "smartflow_execute",
@@ -718,7 +806,6 @@ describe("production daemon Review repair loop", () => {
         projectId: execute.projectId,
         jobId: execute.jobId,
         reason: "user canceled daemon review",
-        expectedRevision: reviewingRun.revision,
         expectedStateVersion: reviewing.stateVersion
       }
     })).resolves.toMatchObject({ phase: "CANCELING" });

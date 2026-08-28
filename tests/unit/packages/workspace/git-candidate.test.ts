@@ -8,8 +8,8 @@ import { afterEach, expect, it } from "vitest";
 
 import {
   buildGitCandidate,
-  buildGitTreePatch,
-  verifyCandidate
+  verifyCandidate,
+  verifyCandidateSnapshotBindings
 } from "../../../../packages/workspace/src/candidate-builder.js";
 import { probeGitRepository } from "../../../../packages/workspace/src/git-capability.js";
 import { materializeGitSnapshot } from "../../../../packages/workspace/src/git-materializer.js";
@@ -23,7 +23,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-it("keeps the formal Candidate cumulative and generates tree patches on demand", async () => {
+it("keeps the Job Candidate cumulative through snapshot-bound operations", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "smartflow-candidate-source-"));
   const data = await mkdtemp(resolve(tmpdir(), "smartflow-candidate-data-"));
   roots.push(root, data);
@@ -36,73 +36,76 @@ it("keeps the formal Candidate cumulative and generates tree patches on demand",
   }
   const runDirectory = resolve(data, "run-1");
   const store = await initializeGitObjectStore(runDirectory);
+  const indexPath = resolve(runDirectory, "current.index");
+  const workspace = resolve(runDirectory, "workspace");
   const baseline = await captureGitSnapshot({
     projectRoot: root,
     dataDirectory: runDirectory,
     runGitDirectory: store.gitDirectory,
-    indexPath: resolve(runDirectory, "revision-1", "baseline.index"),
+    indexPath,
     repositoryId: capabilities.repositoryId,
     snapshotKind: "RUN_BASELINE",
-    revision: 1,
     includedPathPolicyHash: capabilities.inclusionPolicyHash
   });
-  const workspace1 = resolve(runDirectory, "revision-1", "workspace");
   await materializeGitSnapshot({
     snapshot: baseline,
     runGitDirectory: store.gitDirectory,
     dataDirectory: runDirectory,
-    destination: workspace1
+    destination: workspace
   });
-  await writeFile(resolve(workspace1, "value.txt"), "B middle\n", "utf8");
+  await writeFile(resolve(workspace, "value.txt"), "B middle\n", "utf8");
   const result1 = await captureGitSnapshot({
-    projectRoot: workspace1,
+    projectRoot: workspace,
     dataDirectory: runDirectory,
     activeWorktreeRoot: root,
     includeAllFiles: true,
     runGitDirectory: store.gitDirectory,
-    indexPath: resolve(runDirectory, "revision-1", "result.index"),
+    indexPath,
     repositoryId: capabilities.repositoryId,
-    snapshotKind: "REVISION_RESULT",
-    revision: 1,
+    snapshotKind: "RUN_RESULT",
     includedPathPolicyHash: capabilities.inclusionPolicyHash
   });
 
-  const workspace2 = resolve(runDirectory, "revision-2", "workspace");
+  await rm(workspace, { recursive: true, force: true });
   await materializeGitSnapshot({
     snapshot: result1,
     runGitDirectory: store.gitDirectory,
     dataDirectory: runDirectory,
-    destination: workspace2
+    destination: workspace
   });
-  await writeFile(resolve(workspace2, "value.txt"), "C final\n", "utf8");
+  await writeFile(resolve(workspace, "value.txt"), "C final\n", "utf8");
   const result2 = await captureGitSnapshot({
-    projectRoot: workspace2,
+    projectRoot: workspace,
     dataDirectory: runDirectory,
     activeWorktreeRoot: root,
     includeAllFiles: true,
     runGitDirectory: store.gitDirectory,
-    indexPath: resolve(runDirectory, "revision-2", "result.index"),
+    indexPath,
     repositoryId: capabilities.repositoryId,
-    snapshotKind: "REVISION_RESULT",
-    revision: 2,
+    snapshotKind: "RUN_RESULT",
     includedPathPolicyHash: capabilities.inclusionPolicyHash
   });
   const built = await buildGitCandidate({
     runBaseline: baseline,
-    revisionInput: result1,
-    revisionResult: result2
+    runResult: result2
   });
 
   expect(verifyCandidate(built.candidate)).toBe(true);
+  expect(verifyCandidateSnapshotBindings({
+    candidate: built.candidate,
+    runBaseline: baseline,
+    runResult: result2
+  })).toBe(true);
+  expect(Object.keys(built.candidate).sort()).toEqual([
+    "candidateHash",
+    "operations",
+    "resultSnapshotHash",
+    "runBaselineSnapshotHash"
+  ]);
   expect(built.candidate).toMatchObject({
-    schemaVersion: 3,
-    revision: 2,
     runBaselineSnapshotHash: baseline.snapshotHash,
-    inputSnapshotHash: result1.snapshotHash,
     resultSnapshotHash: result2.snapshotHash
   });
-  expect(built.candidate).not.toHaveProperty("runBaselineTreeId");
-  expect(built.candidate).not.toHaveProperty("evidenceArtifactHash");
   expect(built.candidate.operations).toHaveLength(1);
   expect(built.candidate.operations[0]).toMatchObject({
     kind: "MODIFY",
@@ -110,20 +113,4 @@ it("keeps the formal Candidate cumulative and generates tree patches on demand",
     oldEntry: { sha256: baseline.entries[0]?.sha256 },
     newEntry: { sha256: result2.entries[0]?.sha256 }
   });
-  const [incrementalPatch, cumulativePatch] = await Promise.all([
-    buildGitTreePatch({
-      runGitDirectory: store.gitDirectory,
-      baseTreeId: result1.treeId,
-      resultTreeId: result2.treeId
-    }),
-    buildGitTreePatch({
-      runGitDirectory: store.gitDirectory,
-      baseTreeId: baseline.treeId,
-      resultTreeId: result2.treeId
-    })
-  ]);
-  expect(incrementalPatch.toString("utf8")).toContain("-B middle");
-  expect(incrementalPatch.toString("utf8")).toContain("+C final");
-  expect(cumulativePatch.toString("utf8")).toContain("-A before");
-  expect(cumulativePatch.toString("utf8")).toContain("+C final");
 });

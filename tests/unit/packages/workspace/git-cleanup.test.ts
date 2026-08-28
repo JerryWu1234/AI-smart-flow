@@ -15,17 +15,17 @@ afterEach(async () => {
 it("retains active Git state and idempotently removes only terminal temporary state", async () => {
   const data = await mkdtemp(resolve(tmpdir(), "smartflow-cleanup-"));
   roots.push(data);
-  const revisionRoot = resolve(data, "runs/job-1/revision-1");
-  const workspace = resolve(revisionRoot, "workspace");
-  const orphanWorkspace = resolve(revisionRoot, "workspace-orphan");
-  const index = resolve(revisionRoot, "result.index");
-  const orphanIndex = resolve(revisionRoot, "orphan.index");
-  const objectDirectory = resolve(data, "runs/job-1/git-object-store/objects");
-  const auditArtifact = resolve(revisionRoot, "snapshots/baseline.json");
+  const runRoot = resolve(data, "runs/job-1");
+  const workspace = resolve(runRoot, "workspace");
+  const orphanWorkspace = resolve(runRoot, "workspace-orphan");
+  const index = resolve(runRoot, "current.index");
+  const orphanIndex = resolve(runRoot, "orphan.index");
+  const objectDirectory = resolve(runRoot, "git-object-store/objects");
+  const auditArtifact = resolve(runRoot, "snapshots/run-baseline.json");
   await mkdir(workspace, { recursive: true });
   await mkdir(orphanWorkspace, { recursive: true });
   await mkdir(objectDirectory, { recursive: true });
-  await mkdir(resolve(revisionRoot, "snapshots"), { recursive: true });
+  await mkdir(resolve(runRoot, "snapshots"), { recursive: true });
   await Promise.all([
     writeFile(resolve(workspace, "file.txt"), "temporary"),
     writeFile(index, "index"),
@@ -35,11 +35,9 @@ it("retains active Git state and idempotently removes only terminal temporary st
   ]);
   const gitWorkspace = {
     objectDirectory: "runs/job-1/git-object-store/objects",
-    revisions: {
-      "1": {
-        indexPath: "runs/job-1/revision-1/result.index",
-        workspacePath: "runs/job-1/revision-1/workspace"
-      }
+    current: {
+      indexPath: "runs/job-1/current.index",
+      workspacePath: "runs/job-1/workspace"
     }
   };
 

@@ -6,7 +6,6 @@ export interface PublishAttemptRecord {
   operationId: string;
   operationsHash: string;
   adapterId: string;
-  revision: number;
   status: "PREPARED" | "SUBMITTED" | "COMMITTED" | "CONFLICT" | "UNKNOWN";
   result?: PublishResult;
 }
@@ -45,10 +44,9 @@ export type PublishServiceResult =
       conflicts?: PreflightConflict[];
     };
 
-export interface PublishBindings {
+interface PublishBindings {
   projectId: string;
   jobId: string;
-  revision: number;
   candidateHash: string;
   reviewHash: string;
 }
@@ -84,11 +82,18 @@ export class PublishService {
     bindings: PublishBindings,
     operations: ApplyOperation[],
     adapter: WorkspaceApplyAdapter | undefined,
+    // Deliberate deterministic seams for the post-apply and pre-apply crash windows.
     afterAdapterApply?: (result: PublishResult) => Promise<void>,
     beforeAdapterApply?: () => Promise<void>
   ): Promise<PublishServiceResult> {
     const hash = operationsHash(operations);
-    const operationId = stableOperationId({ ...bindings, operationsHash: hash });
+    const operationId = stableOperationId({
+      projectId: bindings.projectId,
+      jobId: bindings.jobId,
+      candidateHash: bindings.candidateHash,
+      reviewHash: bindings.reviewHash,
+      operationsHash: hash
+    });
     if (adapter === undefined) return { status: "MANUAL_PUBLISH_REQUIRED", reason: "PUBLISH_ADAPTER_UNAVAILABLE" };
     const capabilities = await adapter.probe();
     const supportedBatch = capabilities.atomicBatchCas || capabilities.preflightBatchWrite === true;
@@ -135,7 +140,6 @@ export class PublishService {
         operationId,
         operationsHash: hash,
         adapterId: capabilities.adapterId,
-        revision: bindings.revision,
         status: "PREPARED"
       });
     }

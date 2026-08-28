@@ -38,13 +38,12 @@ it("materializes a Git tree as a normal workspace below the Run Data Dir", async
     projectRoot: root,
     dataDirectory: runDirectory,
     runGitDirectory: store.gitDirectory,
-    indexPath: resolve(runDirectory, "revision-1", "input.index"),
+    indexPath: resolve(runDirectory, "current.index"),
     repositoryId: capabilities.repositoryId,
-    snapshotKind: "REVISION_INPUT",
-    revision: 1,
+    snapshotKind: "RUN_BASELINE",
     includedPathPolicyHash: capabilities.inclusionPolicyHash
   });
-  const destination = resolve(runDirectory, "revision-1", "workspace");
+  const destination = resolve(runDirectory, "workspace");
   await materializeGitSnapshot({
     snapshot,
     runGitDirectory: store.gitDirectory,

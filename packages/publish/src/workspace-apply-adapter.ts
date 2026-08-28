@@ -13,7 +13,7 @@ import {
 } from "./preflight.js";
 import { observedFile, sha256 as hash } from "./internal-utils.js";
 
-export interface ApplyPathResult {
+interface ApplyPathResult {
   path: string;
   status: "COMMITTED" | "CONFLICT" | "UNRESOLVED";
   observedHash: string | null;
@@ -47,7 +47,7 @@ export interface WorkspaceApplyCapabilities {
   reason?: string;
 }
 
-export interface PublishBlobReader {
+interface PublishBlobReader {
   read(ref: ArtifactRef): Promise<Uint8Array>;
 }
 

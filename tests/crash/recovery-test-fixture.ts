@@ -17,8 +17,8 @@ import { frozenPiRuntimeConfig } from "@smartflow/provider-pi";
 import { StateStore, canonicalHash, type RunRecord } from "@smartflow/state-store";
 import { compileTaskManifest } from "@smartflow/task-manifest";
 import {
+  buildGitCandidate,
   initializeGitObjectStore,
-  type GitCandidate,
   type GitWorkspaceSnapshot
 } from "@smartflow/workspace";
 import {
@@ -46,7 +46,6 @@ export async function createLifecycleStore(
   const compiled = compileTaskManifest(tasksSource, {
     projectId,
     jobId: "job-1",
-    revision: 1,
     canonicalTaskPath: "tasks.md",
     providerRuntimeConfig: frozenPiRuntimeConfig({
       api: "openai-completions",
@@ -61,16 +60,15 @@ export async function createLifecycleStore(
     approval: {
       kind: "USER",
       approvedAt: "2026-07-20T00:00:00.000Z",
-      parentRevision: null,
       authorizedCriterionIds: []
     }
   });
   const taskManifest = await store.writeArtifact(
-    "runs/job-1/revision-1/task-manifest.json",
+    "runs/job-1/task-manifest.json",
     compiled.artifactBytes
   );
   const taskSource = await store.writeArtifact(
-    "runs/job-1/revision-1/task-source.md",
+    "runs/job-1/task-source.md",
     Buffer.from(tasksSource, "utf8")
   );
 
@@ -92,13 +90,11 @@ export async function createLifecycleStore(
     repositoryId: "1".repeat(64),
     activeWorktreeRoot: ".",
     snapshotKind: "RUN_BASELINE" as const,
-    revision: 1,
     treeId: "1".repeat(40),
     includedPathPolicyHash: "2".repeat(64),
     entries: []
   };
   const baseline: GitWorkspaceSnapshot = {
-    schemaVersion: 1,
     ...baselineBody,
     snapshotHash: canonicalHash(baselineBody),
     createdAt: snapshotCreatedAt
@@ -114,86 +110,39 @@ export async function createLifecycleStore(
   const resultBody = {
     repositoryId: baseline.repositoryId,
     activeWorktreeRoot: ".",
-    snapshotKind: "REVISION_RESULT" as const,
-    revision: 1,
+    snapshotKind: "RUN_RESULT" as const,
     treeId: "2".repeat(40),
     includedPathPolicyHash: baseline.includedPathPolicyHash,
     entries: [resultEntry]
   };
   const resultSnapshot: GitWorkspaceSnapshot = {
-    schemaVersion: 1,
     ...resultBody,
     snapshotHash: canonicalHash(resultBody),
     createdAt: snapshotCreatedAt
   };
-  const operations = [{
-      kind: "ADD" as const,
-      path: "sum.js",
-      newEntry: {
-        path: "sum.js",
-        kind: "FILE" as const,
-        sha256: sourceHash,
-        size: sourceBytes.byteLength,
-        mode: 0o644
-      }
-    }];
-  const evidenceBytes = Buffer.from(JSON.stringify({ fixture: "git-evidence" }), "utf8");
-  const evidenceArtifactHash = createHash("sha256").update(evidenceBytes).digest("hex");
-  const candidateHashBody = {
-    revision: 1,
-    runBaselineSnapshotHash: baseline.snapshotHash,
-    inputSnapshotHash: baseline.snapshotHash,
-    resultSnapshotHash: resultSnapshot.snapshotHash,
-    operations,
-    evidenceArtifactHash
-  };
-  const candidateHash = canonicalHash(candidateHashBody);
-  const candidate: GitCandidate = {
-    schemaVersion: 2,
-    revision: 1,
-    baselineHash: baseline.snapshotHash,
-    operations,
-    hash: candidateHash,
-    runBaselineSnapshotHash: baseline.snapshotHash,
-    inputSnapshotHash: baseline.snapshotHash,
-    resultSnapshotHash: resultSnapshot.snapshotHash,
-    runBaselineTreeId: baseline.treeId,
-    inputTreeId: baseline.treeId,
-    resultTreeId: resultSnapshot.treeId,
-    blobs: { "sum.js": { oldBlobId: null, newBlobId: resultEntry.blobId } },
-    modes: { "sum.js": { oldMode: null, newMode: resultEntry.mode } },
-    evidenceArtifactHash,
-    candidateHash
-  };
+  const { candidate } = await buildGitCandidate({
+    runBaseline: baseline,
+    runResult: resultSnapshot
+  });
+  const baselineBytes = Buffer.from(JSON.stringify(baseline), "utf8");
+  const resultSnapshotBytes = Buffer.from(JSON.stringify(resultSnapshot), "utf8");
+  const resultArtifactHash = createHash("sha256").update(resultSnapshotBytes).digest("hex");
   const baselineRef = await store.writeArtifact(
-    "runs/job-1/revision-1/snapshots/baseline.json",
-    Buffer.from(JSON.stringify(baseline), "utf8")
+    "runs/job-1/snapshots/run-baseline.json",
+    baselineBytes
   );
   const resultSnapshotRef = await store.writeArtifact(
-    "runs/job-1/revision-1/snapshots/result.json",
-    Buffer.from(JSON.stringify(resultSnapshot), "utf8")
-  );
-  const incrementalPatchRef = await store.writeArtifact(
-    "runs/job-1/revision-1/patches/incremental.patch",
-    Buffer.from("+sum.js", "utf8")
-  );
-  const cumulativePatchRef = await store.writeArtifact(
-    "runs/job-1/revision-1/patches/cumulative.patch",
-    Buffer.from("+sum.js", "utf8")
-  );
-  const evidenceRef = await store.writeArtifact(
-    "runs/job-1/revision-1/git-evidence/evidence.json",
-    evidenceBytes
+    `runs/job-1/snapshots/run-result-${resultArtifactHash}.json`,
+    resultSnapshotBytes
   );
   const candidateRef = await store.writeArtifact(
-    "runs/job-1/revision-1/candidate.json",
+    `runs/job-1/candidates/candidate-${candidate.candidateHash}.json`,
     Buffer.from(JSON.stringify(candidate), "utf8")
   );
 
   const reviewAction = createReviewHostAction({
-    revision: 1,
     taskSourceHash: taskSource.sha256.replace(/^sha256:/u, ""),
-    candidateHash: candidate.hash,
+    candidateHash: candidate.candidateHash,
     changedPaths: ["sum.js"],
     piSessionId: "pi-session-old"
   }, new Date(Date.now() + 60_000).toISOString());
@@ -207,24 +156,20 @@ export async function createLifecycleStore(
     }
   );
   const reviewBody = {
-    schemaVersion: 2 as const,
-    revision: 1,
     claimId: "claim-old",
     reviewAttemptId: "review-attempt-1",
     taskSourceHash: taskSource.sha256.replace(/^sha256:/u, ""),
-    candidateHash: candidate.hash,
+    candidateHash: candidate.candidateHash,
     reviewerSessionId: "reviewer-session-1",
     piSessionId: "pi-session-old",
     gate: reviewGate
   };
   const reviewDecision = { ...reviewBody, reviewHash: canonicalHash(reviewBody) };
   const reviewRef = await store.writeArtifact(
-    "runs/job-1/revision-1/reviews/review-attempt-1.json",
+    "runs/job-1/reviews/review-attempt-1.json",
     Buffer.from(JSON.stringify(reviewDecision), "utf8")
   );
   const leaderBody = {
-    schemaVersion: 2,
-    revision: 1,
     reviewHash: reviewDecision.reviewHash,
     decision: "accept",
     reason: "recovery fixture accepted",
@@ -232,7 +177,7 @@ export async function createLifecycleStore(
   };
   const leaderDecision = { ...leaderBody, decisionHash: canonicalHash(leaderBody) };
   const leaderDecisionRef = await store.writeArtifact(
-    `runs/job-1/revision-1/leader-decisions/${leaderDecision.decisionHash}.json`,
+    `runs/job-1/leader-decisions/${leaderDecision.decisionHash}.json`,
     Buffer.from(JSON.stringify(leaderDecision), "utf8")
   );
 
@@ -254,8 +199,7 @@ export async function createLifecycleStore(
   const publishOperationId = stableOperationId({
     projectId,
     jobId: "job-1",
-    revision: 1,
-    candidateHash: candidate.hash,
+    candidateHash: candidate.candidateHash,
     reviewHash: reviewDecision.reviewHash,
     operationsHash: publishOperationsHash
   });
@@ -269,6 +213,25 @@ export async function createLifecycleStore(
   ]).has(phase);
   const hasDecision = new Set<RunPhase>(["READY_TO_PUBLISH", "PUBLISHING"]).has(phase);
   const hasLeader = phase === "READY_TO_PUBLISH" || phase === "PUBLISHING";
+  const completedSessionArtifact = hasCandidate
+    ? await store.writeArtifact(
+        "runs/job-1/attempts/attempt-old/session-artifact.json",
+        Buffer.from(JSON.stringify({
+          jobId: "job-1",
+          attemptId: "attempt-old",
+          generation: 0,
+          piSessionId: "pi-session-old",
+          providerRuntimeConfigHash: compiled.manifest.providerRuntimeConfigHash,
+          terminalStatus: "COMPLETED",
+          sessionFileRelativePath: "sessions/pi-session-old.jsonl",
+          sessionJsonlBase64: Buffer.from(
+            '{"type":"session","id":"pi-session-old"}\n',
+            "utf8"
+          ).toString("base64"),
+          createdAt: "2026-07-20T00:00:00.000Z"
+        }), "utf8")
+      )
+    : undefined;
   const basePendingAction = pendingAction;
   const run = createRunRecord({
     phase,
@@ -276,7 +239,7 @@ export async function createLifecycleStore(
     taskManifest,
     taskSource,
     approvedTasks: {
-      path: tasksPath,
+      path: resolve(store.dataDirectory, taskSource.relativePath),
       sourceHash: compiled.manifest.sourceHash
     },
     ...(hasBaseline
@@ -287,41 +250,41 @@ export async function createLifecycleStore(
             inclusionPolicyHash: baseline.includedPathPolicyHash,
             objectDirectory,
             runBaselineSnapshot: baselineRef,
-            revisions: {
-              "1": {
-                revision: 1,
-                indexPath: "runs/job-1/revision-1/result.index",
-                workspacePath: "runs/job-1/revision-1/workspace",
-                inputSnapshot: baselineRef,
-                ...(hasCandidate
-                  ? {
-                      resultSnapshot: resultSnapshotRef,
-                      candidate: candidateRef,
-                      incrementalPatch: incrementalPatchRef,
-                      cumulativePatch: cumulativePatchRef,
-                      evidence: evidenceRef
-                    }
-                  : {})
-              }
+            current: {
+              indexPath: "runs/job-1/current.index",
+              workspacePath: "runs/job-1/workspace",
+              inputSnapshot: baselineRef,
+              ...(hasCandidate
+                ? {
+                    resultSnapshot: resultSnapshotRef,
+                    candidate: candidateRef
+                  }
+                : {})
             }
           },
           workspace: {
-            relativePath: "runs/job-1/revision-1/workspace",
-            baselineHash: baseline.snapshotHash,
-            generation: 3,
-            sandboxId: "sandbox-1",
-            mutable: true as const
+            relativePath: "runs/job-1/workspace"
           },
           workerAttempts: [{
             attemptId: "attempt-old",
-            generation: 3,
-            revision: 1,
+            generation: 0,
             providerRuntimeConfigHash: compiled.manifest.providerRuntimeConfigHash,
             piSessionId: "pi-session-old",
-            status: "RUNNING" as const,
-            containmentId: "sandbox-1",
-            processIdentity: { pid: 2_147_483_647, startToken: "test-process-start" },
-            startedAt: "2026-07-20T00:00:00.000Z"
+            startedAt: "2026-07-20T00:00:00.000Z",
+            ...(completedSessionArtifact === undefined
+              ? {
+                  status: "RUNNING" as const,
+                  containmentId: "sandbox-1",
+                  processIdentity: {
+                    pid: 2_147_483_647,
+                    startToken: "test-process-start"
+                  }
+                }
+              : {
+                  status: "COMPLETED" as const,
+                  sessionArtifact: completedSessionArtifact,
+                  endedAt: "2026-07-20T00:01:00.000Z"
+                })
           }]
         }
       : {}),
@@ -334,7 +297,7 @@ export async function createLifecycleStore(
             reviewAttemptId: "review-attempt-1",
             reviewerSessionId: "reviewer-session-1",
             taskSourceHash: taskSource.sha256.replace(/^sha256:/u, ""),
-            candidateHash: candidate.hash,
+            candidateHash: candidate.candidateHash,
             reviewHash: reviewDecision.reviewHash
           }]
         }
@@ -346,7 +309,6 @@ export async function createLifecycleStore(
             operationId: publishOperationId,
             operationsHash: publishOperationsHash,
             adapterId: "recovery-test-adapter",
-            revision: 1,
             status: "SUBMITTED" as const
           }
         }

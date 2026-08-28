@@ -4,7 +4,7 @@ export interface DraftDiff {
 }
 
 export interface TasksDraft {
-  revision: number;
+  draftNumber: number;
   source: string;
   diff: DraftDiff;
 }
@@ -25,7 +25,7 @@ export class PlanningSession {
     if (source.trim().length === 0) throw new Error("tasks.md draft must not be empty");
     const previous = this.drafts.at(-1)?.source ?? "";
     const draft: TasksDraft = {
-      revision: this.drafts.length + 1,
+      draftNumber: this.drafts.length + 1,
       source,
       diff: lineDiff(previous, source)
     };

@@ -13,7 +13,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { StateStoreError } from "./errors.js";
 import { projectStateSchema, type ProjectState } from "./schema.js";
 
-const DATABASE_SCHEMA_VERSION = 4;
+const DATABASE_SCHEMA_VERSION = 5;
 const SQLITE_BUSY_TIMEOUT_MS = 500;
 const MUTATION_LEASE_WAIT_MS = 5_000;
 const MUTATION_LEASE_TTL_MS = 30_000;
@@ -23,7 +23,6 @@ const MUTATION_LEASE_POLL_MS = 25;
 const DATABASE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS project_state (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-  document_schema_version INTEGER NOT NULL,
   state_version INTEGER NOT NULL CHECK (state_version >= 0),
   project_fence INTEGER NOT NULL CHECK (project_fence >= 0),
   state_json TEXT NOT NULL,
@@ -46,7 +45,6 @@ CREATE TABLE IF NOT EXISTS mutation_lease (
 `;
 
 interface StateRow {
-  document_schema_version: number;
   state_version: number;
   project_fence: number;
   state_json: string;
@@ -108,16 +106,6 @@ function parseJson(text: string, source: string): unknown {
 
 function parseStateDocument(text: string, source: string): ParsedStateDocument {
   const value = parseJson(text, source);
-  const schemaVersion = typeof value === "object" && value !== null &&
-    "schemaVersion" in value
-    ? (value as { schemaVersion?: unknown }).schemaVersion
-    : undefined;
-  if (typeof schemaVersion === "number" && schemaVersion !== 6) {
-    throw new StateStoreError(
-      "STATE_MIGRATION_UNSUPPORTED",
-      `Unsupported SmartFlow project state schema version: ${String(schemaVersion)}`
-    );
-  }
   try {
     return { state: projectStateSchema.parse(value) };
   } catch (error) {
@@ -131,7 +119,7 @@ function parseStateDocument(text: string, source: string): ParsedStateDocument {
 
 function stateRow(database: DatabaseSync): StateRow | undefined {
   return database.prepare(`
-    SELECT document_schema_version, state_version, project_fence, state_json, updated_at
+    SELECT state_version, project_fence, state_json, updated_at
     FROM project_state
     WHERE singleton = 1
   `).get() as StateRow | undefined;
@@ -139,7 +127,6 @@ function stateRow(database: DatabaseSync): StateRow | undefined {
 
 function parseStateRow(row: StateRow, databasePath: string): ParsedStateDocument {
   if (
-    typeof row.document_schema_version !== "number" ||
     typeof row.state_version !== "number" ||
     typeof row.project_fence !== "number" ||
     typeof row.state_json !== "string" ||
@@ -149,7 +136,6 @@ function parseStateRow(row: StateRow, databasePath: string): ParsedStateDocument
   }
   const parsed = parseStateDocument(row.state_json, databasePath);
   if (
-    parsed.state.schemaVersion !== row.document_schema_version ||
     parsed.state.stateVersion !== row.state_version ||
     parsed.state.projectFence !== row.project_fence ||
     parsed.state.updatedAt !== row.updated_at
@@ -166,14 +152,12 @@ function insertState(database: DatabaseSync, state: ProjectState): void {
   database.prepare(`
     INSERT INTO project_state (
       singleton,
-      document_schema_version,
       state_version,
       project_fence,
       state_json,
       updated_at
-    ) VALUES (1, ?, ?, ?, ?, ?)
+    ) VALUES (1, ?, ?, ?, ?)
   `).run(
-    state.schemaVersion,
     state.stateVersion,
     state.projectFence,
     canonicalJson(state),
@@ -188,14 +172,12 @@ function updateState(
 ): void {
   const result = database.prepare(`
     UPDATE project_state
-    SET document_schema_version = ?,
-        state_version = ?,
+    SET state_version = ?,
         project_fence = ?,
         state_json = ?,
         updated_at = ?
     WHERE singleton = 1 AND state_version = ?
   `).run(
-    state.schemaVersion,
     state.stateVersion,
     state.projectFence,
     canonicalJson(state),
@@ -558,6 +540,31 @@ export class StateStore {
       data,
       hooks
     );
+  }
+
+  public async readArtifactAt(
+    relativePath: string
+  ): Promise<{ ref: ArtifactRef; bytes: Uint8Array } | undefined> {
+    const path = resolve(this.dataDirectory, relativePath);
+    const rel = relative(this.dataDirectory, path);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new StateStoreError("STATE_INVALID", "Artifact path escapes the Data Directory");
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = await readFile(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    return {
+      ref: {
+        relativePath: rel.split(sep).join("/"),
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        size: bytes.byteLength
+      },
+      bytes
+    };
   }
 
   public async readArtifact(ref: ArtifactRef): Promise<Uint8Array> {

@@ -21,7 +21,7 @@ import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-ha
 import { createLifecycleStore } from "./recovery-test-fixture.js";
 
 const runtime: RecoveryRuntime = {
-  inspectWorker: () => Promise.resolve("RESUMABLE"),
+  inspectWorker: () => Promise.resolve("STOPPED"),
   reconcilePublish: (): Promise<PublishRecoveryObservation> => Promise.resolve({ status: "PENDING" }),
   continueCancellation: () => Promise.resolve("BLOCKED")
 };
@@ -64,7 +64,6 @@ async function putDaemonReviewingOwner(
           stage: "AWAITING_REVIEW",
           turnToken: "durable-review-turn",
           hostTurnId: DAEMON_REVIEWER_HOST_TURN_ID,
-          revision: run.revision,
           reviewAttemptId: action.reviewAttemptId,
           startedAt,
           deadlineAt
@@ -78,7 +77,6 @@ async function putDaemonReviewingOwner(
 
 const stableActions: ReadonlyArray<[RunPhase, RecoveryAction]> = [
   ["PREPARING", "REBUILD_WORKSPACE"],
-  ["RUNNING", "RESUME_WORKER"],
   ["FIXING", "PREPARE_REPAIR"],
   ["REVIEW_PENDING", "RUN_REVIEW"],
   ["READY_TO_PUBLISH", "RECHECK_PUBLISH_READINESS"],
@@ -150,12 +148,12 @@ describe("phase-complete crash recovery", () => {
     const store = await createLifecycleStore(harness, "PUBLISHING");
     const state = await store.readState();
     const run = state.runs["job-1"];
-    const revision = run?.gitWorkspace?.revisions["1"];
+    const current = run?.gitWorkspace?.current;
     if (
       run?.publish === undefined ||
       run.candidate === undefined ||
       run.gitWorkspace === undefined ||
-      revision?.resultSnapshot === undefined
+      current?.resultSnapshot === undefined
     ) throw new Error("publish cleanup fixture missing");
     const publish = { ...run.publish, adapterId: "filesystem-preflight-batch-v1" };
     const setupAt = new Date().toISOString();
@@ -178,11 +176,11 @@ describe("phase-complete crash recovery", () => {
       new TextDecoder().decode(await store.readArtifact(run.candidate))
     ) as Candidate;
     const resultSnapshot = JSON.parse(
-      new TextDecoder().decode(await store.readArtifact(revision.resultSnapshot))
+      new TextDecoder().decode(await store.readArtifact(current.resultSnapshot))
     ) as GitWorkspaceSnapshot;
     const operations = gitPublishOperations(candidate, resultSnapshot);
-    const workspacePath = resolve(store.dataDirectory, revision.workspacePath);
-    const indexPath = resolve(store.dataDirectory, revision.indexPath);
+    const workspacePath = resolve(store.dataDirectory, current.workspacePath);
+    const indexPath = resolve(store.dataDirectory, current.indexPath);
     const gitDirectory = dirname(resolve(store.dataDirectory, run.gitWorkspace.objectDirectory));
     await mkdir(workspacePath, { recursive: true });
     await writeFile(resolve(workspacePath, "temporary.txt"), "temporary", "utf8");
@@ -233,7 +231,7 @@ describe("phase-complete crash recovery", () => {
     await expect(access(workspacePath)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(access(indexPath)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(access(gitDirectory)).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(store.readArtifact(revision.resultSnapshot)).resolves.toBeInstanceOf(Uint8Array);
+    await expect(store.readArtifact(current.resultSnapshot)).resolves.toBeInstanceOf(Uint8Array);
 
     await expect(new RecoveryManager(store, committedRuntime).recover(run.jobId))
       .resolves.toMatchObject({ phase: "COMPLETED", action: "NONE" });
@@ -249,7 +247,7 @@ describe("phase-complete crash recovery", () => {
     if (run?.review === undefined) throw new Error("review hash fixture missing");
     const review = parseArtifact(await store.readArtifact(run.review));
     const staleReviewRef = await store.writeArtifact(
-      "runs/job-1/revision-1/reviews/stale-review-hash.json",
+      "runs/job-1/reviews/stale-review-hash.json",
       Buffer.from(JSON.stringify({ ...review, claimId: "claim-tampered" }), "utf8")
     );
     const updatedAt = new Date().toISOString();
@@ -279,7 +277,7 @@ describe("phase-complete crash recovery", () => {
     if (run?.leaderDecision === undefined) throw new Error("leader hash fixture missing");
     const decision = parseArtifact(await store.readArtifact(run.leaderDecision));
     const staleDecisionRef = await store.writeArtifact(
-      "runs/job-1/revision-1/leader-decisions/stale-decision-hash.json",
+      "runs/job-1/leader-decisions/stale-decision-hash.json",
       Buffer.from(JSON.stringify({ ...decision, reason: "tampered after approval" }), "utf8")
     );
     const updatedAt = new Date().toISOString();
@@ -316,7 +314,7 @@ describe("phase-complete crash recovery", () => {
       decisionHash: canonicalHash(decisionBody)
     };
     const pausedDecisionRef = await store.writeArtifact(
-      `runs/job-1/revision-1/leader-decisions/${pausedDecision.decisionHash}.json`,
+      `runs/job-1/leader-decisions/${pausedDecision.decisionHash}.json`,
       Buffer.from(JSON.stringify(pausedDecision), "utf8")
     );
     const updatedAt = new Date().toISOString();
@@ -368,7 +366,7 @@ describe("phase-complete crash recovery", () => {
     };
     const repairReview = { ...reviewBody, reviewHash: canonicalHash(reviewBody) };
     const repairReviewRef = await store.writeArtifact(
-      "runs/job-1/revision-1/reviews/repair-review.json",
+      "runs/job-1/reviews/repair-review.json",
       Buffer.from(JSON.stringify(repairReview), "utf8")
     );
     const leaderBody = parseArtifact(await store.readArtifact(run.leaderDecision));
@@ -378,7 +376,7 @@ describe("phase-complete crash recovery", () => {
     leaderBody.reason = "repair before another review";
     const repairDecision = { ...leaderBody, decisionHash: canonicalHash(leaderBody) };
     const repairDecisionRef = await store.writeArtifact(
-      `runs/job-1/revision-1/leader-decisions/${repairDecision.decisionHash}.json`,
+      `runs/job-1/leader-decisions/${repairDecision.decisionHash}.json`,
       Buffer.from(JSON.stringify(repairDecision), "utf8")
     );
     const updatedAt = new Date().toISOString();
@@ -413,14 +411,14 @@ describe("phase-complete crash recovery", () => {
     expect((await store.readState()).stateVersion).toBe(beforeRecovery.stateVersion);
   });
 
-  it("blocks a valid but unrelated Result Snapshot Artifact", async () => {
+  it("blocks a baseline Artifact bound as the current Result Snapshot", async () => {
     const harness = await createRuntimeHarness();
     harnesses.push(harness);
     const store = await createLifecycleStore(harness, "READY_TO_PUBLISH");
     const state = await store.readState();
     const run = state.runs["job-1"];
-    const revision = run?.gitWorkspace?.revisions["1"];
-    if (run?.gitWorkspace === undefined || revision === undefined) {
+    const current = run?.gitWorkspace?.current;
+    if (run?.gitWorkspace === undefined || current === undefined) {
       throw new Error("snapshot binding fixture missing");
     }
     const updatedAt = new Date().toISOString();
@@ -433,10 +431,7 @@ describe("phase-complete crash recovery", () => {
           ...run,
           gitWorkspace: {
             ...run.gitWorkspace,
-            revisions: {
-              ...run.gitWorkspace.revisions,
-              "1": { ...revision, resultSnapshot: revision.inputSnapshot }
-            }
+            current: { ...current, resultSnapshot: current.inputSnapshot }
           },
           updatedAt
         }
@@ -447,7 +442,7 @@ describe("phase-complete crash recovery", () => {
     await expect(new RecoveryManager(store, runtime).recover("job-1")).resolves.toMatchObject({
       phase: "PAUSED",
       action: "BLOCKED",
-      reason: "ARTIFACT_SEMANTIC_MISMATCH:candidateSnapshots"
+      reason: "ARTIFACT_SEMANTIC_MISMATCH:gitWorkspace.current.resultSnapshot"
     });
   });
 

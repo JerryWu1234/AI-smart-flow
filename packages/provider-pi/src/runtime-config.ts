@@ -5,7 +5,7 @@ import { PI_MINIMUM_ATTEMPT_DEADLINE_MS } from "./heartbeat.js";
 export const PI_CODING_AGENT_VERSION = "0.83.0";
 export const PI_NODE_MINIMUM = "22.19.0";
 export const PI_INTERNAL_PROVIDER_ID = "smartflow-mcp";
-export const PI_API_KEY_ENVIRONMENT_VARIABLE = "SMARTFLOW_PI_API_KEY";
+export const API_KEY_ENVIRONMENT_VARIABLE = "API_KEY";
 
 export const PI_MODEL_APIS = [
   "openai-completions",

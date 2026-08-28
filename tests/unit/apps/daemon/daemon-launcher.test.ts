@@ -57,10 +57,10 @@ describe("daemon launcher", () => {
       10_000,
       "fingerprint-b",
       {
-        SMARTFLOW_PI_API: "openai-responses",
-        SMARTFLOW_PI_BASE_URL: "https://models.example.test/v1",
-        SMARTFLOW_PI_MODEL: "second-model",
-        SMARTFLOW_PI_API_KEY: "secret-value"
+        API: "openai-responses",
+        BASE_URL: "https://models.example.test/v1",
+        MODEL: "second-model",
+        API_KEY: "secret-value"
       }
     );
 

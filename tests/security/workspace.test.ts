@@ -34,14 +34,14 @@ it("rejects external symlinks and cross-Run Git output paths", async () => {
   }
   const runDirectory = resolve(data, "runs/job-1");
   const objectStore = await initializeGitObjectStore(runDirectory);
+  const indexPath = resolve(runDirectory, "current.index");
   await expect(captureGitSnapshot({
     projectRoot: project,
     dataDirectory: runDirectory,
     runGitDirectory: objectStore.gitDirectory,
-    indexPath: resolve(runDirectory, "revision-1/baseline.index"),
+    indexPath,
     repositoryId: capabilities.repositoryId,
     snapshotKind: "RUN_BASELINE",
-    revision: 1,
     includedPathPolicyHash: capabilities.inclusionPolicyHash
   })).rejects.toMatchObject({ code: "EXTERNAL_SYMLINK" });
 
@@ -50,10 +50,9 @@ it("rejects external symlinks and cross-Run Git output paths", async () => {
     projectRoot: project,
     dataDirectory: runDirectory,
     runGitDirectory: objectStore.gitDirectory,
-    indexPath: resolve(runDirectory, "revision-1/baseline.index"),
+    indexPath,
     repositoryId: capabilities.repositoryId,
     snapshotKind: "RUN_BASELINE",
-    revision: 1,
     includedPathPolicyHash: capabilities.inclusionPolicyHash
   });
   await expect(materializeGitSnapshot({
@@ -69,7 +68,6 @@ it("rejects external symlinks and cross-Run Git output paths", async () => {
     indexPath: resolve(otherRun, "foreign.index"),
     repositoryId: capabilities.repositoryId,
     snapshotKind: "RUN_BASELINE",
-    revision: 1,
     includedPathPolicyHash: capabilities.inclusionPolicyHash
   })).rejects.toMatchObject({ code: "PATH_OUTSIDE_WORKSPACE" });
 });

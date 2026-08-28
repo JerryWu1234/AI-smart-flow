@@ -2,33 +2,30 @@ import { readFile } from "node:fs/promises";
 
 import { parse } from "yaml";
 
-export const REVIEW_STRATEGIES = ["codex"] as const;
+export const REVIEW_STRATEGIES = ["codex", "codex-desktop"] as const;
 export type ReviewStrategy = (typeof REVIEW_STRATEGIES)[number];
 export const DEFAULT_REVIEW_STRATEGY: ReviewStrategy = "codex";
 
 export interface SmartFlowConfig {
-  workspace: { mode: "git-tree" };
   review: {
     strategy: ReviewStrategy;
-    onUnavailable: "pause";
     noProgressThreshold: 15;
+    // Optional overrides passed through without a value allow list. The Review
+    // Agent owns which values it accepts and supplies its own defaults.
     model?: string;
+    effort?: string;
     deadlineMs: number;
     maxAttempts: number;
   };
-  publish: { mode: "auto-after-review"; onConflict: "pause" };
 }
 
 export const defaultSmartFlowConfig: SmartFlowConfig = {
-  workspace: { mode: "git-tree" },
   review: {
     strategy: DEFAULT_REVIEW_STRATEGY,
-    onUnavailable: "pause",
     noProgressThreshold: 15,
     deadlineMs: 45 * 60_000,
     maxAttempts: 3
-  },
-  publish: { mode: "auto-after-review", onConflict: "pause" }
+  }
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -46,35 +43,36 @@ function exactKeys(record: Record<string, unknown>, allowed: readonly string[], 
 
 export function parseSmartFlowConfig(value: unknown): SmartFlowConfig {
   if (!isRecord(value)) throw new Error("SmartFlow configuration must be an object");
-  exactKeys(value, ["workspace", "review", "publish"], "root");
-  const workspace = value.workspace ?? defaultSmartFlowConfig.workspace;
+  exactKeys(value, ["review"], "root");
   const review = value.review ?? defaultSmartFlowConfig.review;
-  const publish = value.publish ?? defaultSmartFlowConfig.publish;
-  if (!isRecord(workspace) || !isRecord(review) || !isRecord(publish)) {
-    throw new Error("SmartFlow configuration sections must be objects");
+  if (!isRecord(review)) {
+    throw new Error("SmartFlow review configuration must be an object");
   }
-  exactKeys(workspace, ["mode"], "workspace");
   exactKeys(
     review,
-    ["strategy", "onUnavailable", "noProgressThreshold", "model", "deadlineMs", "maxAttempts"],
+    [
+      "strategy",
+      "noProgressThreshold",
+      "model",
+      "effort",
+      "deadlineMs",
+      "maxAttempts"
+    ],
     "review"
   );
-  exactKeys(publish, ["mode", "onConflict"], "publish");
-  const workspaceMode = workspace.mode ?? "git-tree";
   const reviewStrategy = review.strategy ?? DEFAULT_REVIEW_STRATEGY;
-  const reviewUnavailable = review.onUnavailable ?? "pause";
   const noProgressThreshold = review.noProgressThreshold ?? 15;
   const model = review.model;
+  const effort = review.effort;
   const deadlineMs = review.deadlineMs ?? 45 * 60_000;
   const maxAttempts = review.maxAttempts ?? 3;
-  const publishMode = publish.mode ?? "auto-after-review";
-  const publishConflict = publish.onConflict ?? "pause";
   if (
-    workspaceMode !== "git-tree" ||
     !isReviewStrategy(reviewStrategy) ||
-    reviewUnavailable !== "pause" ||
     noProgressThreshold !== 15 ||
-    (model !== undefined && (typeof model !== "string" || model.trim().length === 0)) ||
+    (model !== undefined &&
+      (typeof model !== "string" || model.trim().length === 0)) ||
+    (effort !== undefined &&
+      (typeof effort !== "string" || effort.trim().length === 0)) ||
     typeof deadlineMs !== "number" ||
     !Number.isSafeInteger(deadlineMs) ||
     deadlineMs < 30_000 ||
@@ -82,23 +80,19 @@ export function parseSmartFlowConfig(value: unknown): SmartFlowConfig {
     typeof maxAttempts !== "number" ||
     !Number.isSafeInteger(maxAttempts) ||
     maxAttempts < 1 ||
-    maxAttempts > 10 ||
-    publishMode !== "auto-after-review" ||
-    publishConflict !== "pause"
+    maxAttempts > 10
   ) {
     throw new Error("SmartFlow configuration contains unsupported values");
   }
   return {
-    workspace: { mode: workspaceMode },
     review: {
       strategy: reviewStrategy,
-      onUnavailable: reviewUnavailable,
       noProgressThreshold,
-      ...(model === undefined ? {} : { model: model.trim() }),
+      ...(typeof model === "string" ? { model: model.trim() } : {}),
+      ...(typeof effort === "string" ? { effort: effort.trim() } : {}),
       deadlineMs,
       maxAttempts
-    },
-    publish: { mode: publishMode, onConflict: publishConflict }
+    }
   };
 }
 

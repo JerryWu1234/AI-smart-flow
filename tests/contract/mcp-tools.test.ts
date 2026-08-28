@@ -22,7 +22,6 @@ class FakeDaemonGateway implements DaemonGateway {
       const response = {
         projectId: "project-1",
         jobId: "job-1",
-        revision: 1,
         stateVersion: 1,
         phase: "PREPARING"
       };
@@ -52,7 +51,6 @@ class FakeDaemonGateway implements DaemonGateway {
       return Promise.resolve({
         projectId: request.projectId,
         jobId: request.jobId,
-        revision: 1,
         stateVersion: 2,
         phase: "CANCELING"
       });
@@ -102,14 +100,23 @@ describe("SmartFlow MCP handlers", () => {
     });
   });
 
-  it("requires mutation CAS fields before forwarding", async () => {
+  it("requires state-version CAS and rejects removed Revision CAS", async () => {
     const handlers = createToolHandlers(new FakeDaemonGateway());
     await expect(
       handlers.smartflow_cancel({
         requestId: "request-2",
         projectId: "project-1",
         jobId: "job-1",
+        reason: "stop"
+      })
+    ).rejects.toMatchObject({ name: "ZodError" });
+    await expect(
+      handlers.smartflow_cancel({
+        requestId: "request-2-legacy-cas",
+        projectId: "project-1",
+        jobId: "job-1",
         expectedStateVersion: 1,
+        expectedRevision: 1,
         reason: "stop"
       })
     ).rejects.toMatchObject({ name: "ZodError" });
@@ -122,7 +129,6 @@ describe("SmartFlow MCP handlers", () => {
         requestId: "request-3",
         projectId: "other-project",
         jobId: "job-1",
-        expectedRevision: 1,
         expectedStateVersion: 1,
         reason: "stop"
       })

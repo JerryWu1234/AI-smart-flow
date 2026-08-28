@@ -3,6 +3,7 @@ import { lstat, realpath } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 
 import { runGitCommand } from "./git-command.js";
+import { SMARTFLOW_CONTROL_PLANE_PATH_PREFIXES } from "./git-snapshot.js";
 import { canonical } from "./internal-utils.js";
 
 export type GitPauseCode =
@@ -27,6 +28,7 @@ export interface GitCapabilities {
     untrackedNonIgnored: true;
     ignored: false;
     sensitive: false;
+    excludedPathPrefixes: typeof SMARTFLOW_CONTROL_PLANE_PATH_PREFIXES;
   };
   inclusionPolicyHash: string;
 }
@@ -40,10 +42,9 @@ const inclusionPolicy = {
   dirty: true,
   untrackedNonIgnored: true,
   ignored: false,
-  sensitive: false
+  sensitive: false,
+  excludedPathPrefixes: SMARTFLOW_CONTROL_PLANE_PATH_PREFIXES
 } as const;
-
-
 
 const inclusionPolicyHash = createHash("sha256")
   .update(canonical(inclusionPolicy), "utf8")

@@ -7,9 +7,9 @@ describe("SmartFlow doctor classification", () => {
     const report = await runDoctor({
       projectRoot: process.cwd(),
       environment: {
-        SMARTFLOW_PI_API: "openai-completions",
-        SMARTFLOW_PI_MODEL: "model-test",
-        SMARTFLOW_PI_API_KEY: "doctor-secret-canary"
+        API: "openai-completions",
+        MODEL: "model-test",
+        API_KEY: "doctor-secret-canary"
       }
     });
     expect(report).toMatchObject({ status: "blocking-unavailable", ready: false });
@@ -18,11 +18,10 @@ describe("SmartFlow doctor classification", () => {
       "config",
       "dataDirectory",
       "ready",
-      "schemaVersion",
       "status"
     ]);
     expect(report.capabilities[0]?.id).toBe("config");
-    expect(report.capabilities[0]?.summary).toMatch(/SMARTFLOW_PI_BASE_URL is required/u);
+    expect(report.capabilities[0]?.summary).toMatch(/BASE_URL is required/u);
     expect(JSON.stringify(report)).not.toContain("doctor-secret-canary");
   });
 

@@ -15,15 +15,12 @@ const manifestTaskSchema = z
 
 export const taskManifestSchema = z
   .object({
-    schemaVersion: z.literal(3),
     projectId: z.string().min(1),
     jobId: z.string().min(1),
     runId: z.string().min(1),
-    revision: z.number().int().positive(),
-    revisionId: z.string().min(1),
     canonicalTaskPath: z.string().min(1),
     taskSourceArtifact: z.object({
-      relativePath: z.string().regex(/^runs\/[^/]+\/revision-\d+\/task-source\.md$/u),
+      relativePath: z.string().min(1),
       sha256: z.string().regex(/^[a-f0-9]{64}$/u),
       size: z.number().int().nonnegative()
     }).strict(),
@@ -36,23 +33,26 @@ export const taskManifestSchema = z
     tasks: z.array(manifestTaskSchema).min(1),
     approval: z
       .object({
-        kind: z.enum(["USER", "LEADER_REPAIR"]),
+        kind: z.literal("USER"),
         approvedAt: z.iso.datetime({ offset: true }),
-        parentRevision: z.number().int().positive().nullable(),
         authorizedCriterionIds: z.array(z.string().min(1))
       })
       .strict()
   })
   .strict()
   .superRefine((manifest, context) => {
-    if (
-      manifest.runId !== manifest.jobId ||
-      manifest.revisionId !== `${manifest.runId}:revision-${String(manifest.revision)}`
-    ) {
+    if (manifest.runId !== manifest.jobId) {
       context.addIssue({
         code: "custom",
-        path: ["revisionId"],
-        message: "runId/revisionId must bind the current Run Revision"
+        path: ["runId"],
+        message: "runId must equal jobId"
+      });
+    }
+    if (manifest.taskSourceArtifact.relativePath !== `runs/${manifest.jobId}/task-source.md`) {
+      context.addIssue({
+        code: "custom",
+        path: ["taskSourceArtifact", "relativePath"],
+        message: "task source Artifact path must be bound to jobId"
       });
     }
     if (

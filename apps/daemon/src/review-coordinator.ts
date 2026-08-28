@@ -34,7 +34,6 @@ export interface ReviewMutation<T> {
 export interface BeginReviewInput {
   projectId: string;
   jobId: string;
-  expectedRevision: number;
   hostTurnId: typeof DAEMON_REVIEWER_HOST_TURN_ID;
   turnToken: string;
   deadlineAt: string;
@@ -49,7 +48,6 @@ export interface BeginReviewOutput {
 export interface FinalizeReviewInput {
   projectId: string;
   jobId: string;
-  expectedRevision: number;
   hostTurnId: typeof DAEMON_REVIEWER_HOST_TURN_ID;
   turnToken: string;
   reviewerSessionId: string;
@@ -102,14 +100,13 @@ function stringField(record: Record<string, unknown> | undefined, key: string): 
 
 function currentRun(
   state: ProjectState,
-  input: { projectId: string; jobId: string; expectedRevision: number }
+  input: { projectId: string; jobId: string }
 ): RunRecord {
   const run = state.runs[input.jobId];
   if (
     state.projectId !== input.projectId ||
     run === undefined ||
-    state.activeRunsByTaskPath[run.canonicalTaskPath] !== input.jobId ||
-    run.revision !== input.expectedRevision
+    state.activeRunsByTaskPath[run.canonicalTaskPath] !== input.jobId
   ) {
     throw new Error("REVIEW_BINDING_STALE");
   }
@@ -141,7 +138,6 @@ export function pendingReviewAction(run: RunRecord): HostAction | undefined {
   const parsed = hostActionSchema.safeParse({
     type: pending.type,
     actionId: pending.actionId,
-    revision: pending.revision,
     taskSourceHash: pending.taskSourceHash,
     candidateHash: pending.candidateHash,
     reviewAttemptId: pending.reviewAttemptId,
@@ -190,7 +186,6 @@ export class ReviewCoordinator {
       stage: "AWAITING_REVIEW",
       turnToken: input.turnToken,
       hostTurnId: input.hostTurnId,
-      revision: run.revision,
       reviewAttemptId: action.reviewAttemptId,
       startedAt: now.toISOString(),
       deadlineAt: input.deadlineAt
@@ -264,8 +259,6 @@ export class ReviewCoordinator {
       reviewResult
     );
     const reviewBody = {
-      schemaVersion: 2 as const,
-      revision: run.revision,
       claimId: turn.turnToken,
       reviewAttemptId: action.reviewAttemptId,
       taskSourceHash: action.taskSourceHash,
@@ -279,7 +272,7 @@ export class ReviewCoordinator {
       reviewHash: hash(reviewBody)
     });
     const reviewArtifact = await this.store.writeArtifact(
-      `runs/${run.jobId}/revision-${String(run.revision)}/reviews/${action.reviewAttemptId}.json`,
+      `runs/${run.jobId}/reviews/${action.reviewAttemptId}.json`,
       Buffer.from(canonical(reviewDecision), "utf8")
     );
 
@@ -289,8 +282,6 @@ export class ReviewCoordinator {
     });
     assertLeaderDecision(gate, plan.decision);
     const leaderBody = {
-      schemaVersion: 2 as const,
-      revision: run.revision,
       reviewHash: reviewDecision.reviewHash,
       decision: plan.decision,
       reason: plan.reason,
@@ -302,7 +293,7 @@ export class ReviewCoordinator {
       decisionHash
     });
     const leaderDecision = await this.store.writeArtifact(
-      `runs/${run.jobId}/revision-${String(run.revision)}/leader-decisions/${decisionHash}.json`,
+      `runs/${run.jobId}/leader-decisions/${decisionHash}.json`,
       Buffer.from(canonical(leaderDecisionValue), "utf8")
     );
 
@@ -320,7 +311,6 @@ export class ReviewCoordinator {
           stage: "AWAITING_USER_INPUT",
           turnToken: turn.turnToken,
           hostTurnId: turn.hostTurnId,
-          revision: run.revision,
           pauseCode,
           startedAt: now.toISOString()
         };
@@ -398,8 +388,6 @@ export class ReviewCoordinator {
     });
     assertLeaderDecision(decision.gate, plan.decision);
     const leaderBody = {
-      schemaVersion: 2 as const,
-      revision: run.revision,
       reviewHash: decision.reviewHash,
       decision: plan.decision,
       reason: plan.reason,
@@ -411,7 +399,7 @@ export class ReviewCoordinator {
       decisionHash
     });
     const leaderDecision = await this.store.writeArtifact(
-      `runs/${run.jobId}/revision-${String(run.revision)}/leader-decisions/${decisionHash}.json`,
+      `runs/${run.jobId}/leader-decisions/${decisionHash}.json`,
       Buffer.from(canonical(leaderDecisionValue), "utf8")
     );
     const phase: RunRecord["phase"] = plan.kind === "ACCEPT"
@@ -428,7 +416,6 @@ export class ReviewCoordinator {
           stage: "AWAITING_USER_INPUT",
           turnToken: run.hostTurn.turnToken,
           hostTurnId: run.hostTurn.hostTurnId,
-          revision: run.revision,
           pauseCode,
           startedAt: now.toISOString()
         };
@@ -501,7 +488,7 @@ export class ReviewCoordinator {
       hostTurn: undefined,
       pause: {
         code: "APPROVED_SOURCE_DRIFT",
-        resumeActions: ["approve_new_manifest_revision", "restore_approved_tasks", "cancel"]
+        resumeActions: ["restore_approved_tasks", "cancel"]
       },
       ...(refreshedAction === undefined ? {} : { pendingAction: refreshedAction }),
       recovery: {
@@ -559,7 +546,6 @@ export class ReviewCoordinator {
         stage: "AWAITING_USER_INPUT",
         turnToken: turn.turnToken,
         hostTurnId: turn.hostTurnId,
-        revision: run.revision,
         pauseCode: "HOST_REVIEW_UNAVAILABLE",
         startedAt: now.toISOString()
       },

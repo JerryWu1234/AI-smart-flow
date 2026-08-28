@@ -9,7 +9,7 @@ export {
   PI_HEARTBEAT_STATUS_KEY
 } from "./heartbeat.js";
 
-const PI_API_KEY_ENVIRONMENT_VARIABLE = "SMARTFLOW_PI_API_KEY";
+const API_KEY_ENVIRONMENT_VARIABLE = "API_KEY";
 const PI_INTERNAL_PROVIDER_ID = "smartflow-mcp";
 const PI_MODEL_APIS = [
   "openai-completions",
@@ -88,26 +88,26 @@ function integer(
 export function createMcpModelRegistration(
   environment: Readonly<Record<string, string | undefined>> = process.env
 ): McpModelRegistration {
-  required(environment, PI_API_KEY_ENVIRONMENT_VARIABLE);
-  const apiValue = required(environment, "SMARTFLOW_PI_API");
+  required(environment, API_KEY_ENVIRONMENT_VARIABLE);
+  const apiValue = required(environment, "API");
   if (!(PI_MODEL_APIS as readonly string[]).includes(apiValue)) {
-    throw new Error("PI_MODEL_EXTENSION_INVALID: SMARTFLOW_PI_API is unsupported");
+    throw new Error("PI_MODEL_EXTENSION_INVALID: API is unsupported");
   }
-  const baseUrl = required(environment, "SMARTFLOW_PI_BASE_URL");
+  const baseUrl = required(environment, "BASE_URL");
   let parsedBaseUrl: URL;
   try {
     parsedBaseUrl = new URL(baseUrl);
   } catch {
-    throw new Error("PI_MODEL_EXTENSION_INVALID: SMARTFLOW_PI_BASE_URL is invalid");
+    throw new Error("PI_MODEL_EXTENSION_INVALID: BASE_URL is invalid");
   }
   if (
     !new Set(["http:", "https:"]).has(parsedBaseUrl.protocol) ||
     parsedBaseUrl.username.length > 0 ||
     parsedBaseUrl.password.length > 0
   ) {
-    throw new Error("PI_MODEL_EXTENSION_INVALID: SMARTFLOW_PI_BASE_URL is invalid");
+    throw new Error("PI_MODEL_EXTENSION_INVALID: BASE_URL is invalid");
   }
-  const modelId = required(environment, "SMARTFLOW_PI_MODEL");
+  const modelId = required(environment, "MODEL");
   const contextWindow = integer(environment, "SMARTFLOW_PI_CONTEXT_WINDOW");
   const maxTokens = integer(environment, "SMARTFLOW_PI_MAX_TOKENS");
   const thinkingLevel = required(environment, "SMARTFLOW_PI_THINKING");
@@ -130,7 +130,7 @@ export function createMcpModelRegistration(
       name: "SmartFlow MCP Model",
       api,
       baseUrl,
-      apiKey: `$${PI_API_KEY_ENVIRONMENT_VARIABLE}`,
+      apiKey: `$${API_KEY_ENVIRONMENT_VARIABLE}`,
       models: [{
         id: modelId,
         name: modelId,

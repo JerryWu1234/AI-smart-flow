@@ -14,24 +14,16 @@ import {
 
 const workspaceRefSchema = z
   .object({
-    relativePath: z.string().min(1),
-    baselineHash: z.string().regex(/^[a-f0-9]{64}$/u),
-    generation: z.number().int().nonnegative(),
-    sandboxId: z.string().min(1),
-    mutable: z.literal(true)
+    relativePath: z.string().min(1)
   })
   .strict();
 
-const gitRevisionWorkspaceSchema = z.object({
-  revision: z.number().int().positive(),
+const gitCurrentWorkspaceSchema = z.object({
   indexPath: z.string().min(1),
   workspacePath: z.string().min(1),
   inputSnapshot: artifactRefSchema,
   resultSnapshot: artifactRefSchema.optional(),
-  candidate: artifactRefSchema.optional(),
-  incrementalPatch: artifactRefSchema.optional(),
-  cumulativePatch: artifactRefSchema.optional(),
-  evidence: artifactRefSchema.optional()
+  candidate: artifactRefSchema.optional()
 }).strict();
 
 const gitRunWorkspaceSchema = z.object({
@@ -39,7 +31,7 @@ const gitRunWorkspaceSchema = z.object({
   inclusionPolicyHash: z.string().regex(/^[a-f0-9]{64}$/u),
   objectDirectory: z.string().min(1),
   runBaselineSnapshot: artifactRefSchema,
-  revisions: z.record(z.string(), gitRevisionWorkspaceSchema)
+  current: gitCurrentWorkspaceSchema
 }).strict();
 
 const publishAttemptSchema = z
@@ -47,7 +39,6 @@ const publishAttemptSchema = z
     operationId: z.string().min(1),
     operationsHash: z.string().regex(/^[a-f0-9]{64}$/u),
     adapterId: z.string().min(1),
-    revision: z.number().int().positive(),
     status: z.enum(["PREPARED", "SUBMITTED", "COMMITTED", "CONFLICT", "UNKNOWN"]),
     result: publishResultSchema.optional()
   })
@@ -87,7 +78,6 @@ const workerAttemptSchema = piWorkerAttemptSchema;
 const hostTurnIdentitySchema = z.object({
   turnToken: z.string().min(1).max(256),
   hostTurnId: z.string().min(1).max(256),
-  revision: z.number().int().positive(),
   startedAt: z.iso.datetime({ offset: true })
 });
 
@@ -110,7 +100,6 @@ const runRecordSchema = z
     canonicalTaskPath: z.string().min(1),
     fence: z.number().int().positive(),
     phase: runPhaseSchema,
-    revision: z.number().int().positive(),
     taskManifest: artifactRefSchema,
     taskSource: artifactRefSchema,
     approvedTasks: canonicalRecordSchema.optional(),
@@ -142,36 +131,6 @@ const runRecordSchema = z
   })
   .strict()
   .superRefine((run, context) => {
-    if (run.gitWorkspace !== undefined) {
-      const revisions = Object.values(run.gitWorkspace.revisions)
-        .sort((left, right) => left.revision - right.revision);
-      for (const [key, revision] of Object.entries(run.gitWorkspace.revisions)) {
-        if (key !== String(revision.revision)) {
-          context.addIssue({
-            code: "custom",
-            path: ["gitWorkspace", "revisions", key, "revision"],
-            message: "Git Revision record key must equal its revision"
-          });
-        }
-      }
-      for (const [index, revision] of revisions.entries()) {
-        const expectedInput = index === 0
-          ? run.gitWorkspace.runBaselineSnapshot
-          : revisions[index - 1]?.resultSnapshot;
-        if (
-          revision.revision !== index + 1 ||
-          expectedInput === undefined ||
-          !artifactRefsEqual(revision.inputSnapshot, expectedInput)
-        ) {
-          context.addIssue({
-            code: "custom",
-            path: ["gitWorkspace", "revisions", String(revision.revision), "inputSnapshot"],
-            message: "Git Revision input must form an unbroken Baseline to Result chain"
-          });
-        }
-      }
-    }
-
     const attemptIds = new Set<string>();
     let activeAttempts = 0;
     for (const [index, attempt] of run.workerAttempts.entries()) {
@@ -183,22 +142,8 @@ const runRecordSchema = z
         });
       }
       attemptIds.add(attempt.attemptId);
-      if (attempt.revision > run.revision) {
-        context.addIssue({
-          code: "custom",
-          path: ["workerAttempts", index, "revision"],
-          message: "Pi Attempt cannot target a future Revision"
-        });
-      }
       if (attempt.status === "PREPARING" || attempt.status === "RUNNING") {
         activeAttempts += 1;
-        if (attempt.revision !== run.revision) {
-          context.addIssue({
-            code: "custom",
-            path: ["workerAttempts", index, "revision"],
-            message: "active Pi Attempt must target the current Revision"
-          });
-        }
       }
     }
     if (activeAttempts > 1) {
@@ -211,7 +156,6 @@ const runRecordSchema = z
   });
 
 export const projectStateSchema = z.object({
-    schemaVersion: z.literal(6),
     projectId: z.string().min(1),
     canonicalProjectRoot: z.string().min(1),
     stateVersion: z.number().int().nonnegative(),
@@ -280,13 +224,10 @@ export type ProjectState = z.infer<typeof projectStateSchema>;
 interface RunArtifactBinding {
   name: string;
   ref: ArtifactRef;
-  revision: number;
   semantic:
     | "TASK_MANIFEST"
     | "TASK_SOURCE"
     | "GIT_SNAPSHOT"
-    | "GIT_PATCH"
-    | "GIT_EVIDENCE"
     | "BASELINE"
     | "CANDIDATE"
     | "REVIEW"
@@ -313,7 +254,6 @@ export function runArtifactInventory(run: RunRecord): RunArtifactInventory {
   const add = (
     name: string,
     value: unknown,
-    revision: number,
     semantic: RunArtifactBinding["semantic"],
     required: boolean
   ): ArtifactRef | undefined => {
@@ -326,28 +266,17 @@ export function runArtifactInventory(run: RunRecord): RunArtifactInventory {
       issues.push(`ARTIFACT_REF_INVALID:${name}`);
       return undefined;
     }
-    bindings.push({ name, ref: parsed.data, revision, semantic });
+    bindings.push({ name, ref: parsed.data, semantic });
     return parsed.data;
   };
 
-  add("taskManifest", run.taskManifest, run.revision, "TASK_MANIFEST", true);
-  add("taskSource", run.taskSource, run.revision, "TASK_SOURCE", true);
+  add("taskManifest", run.taskManifest, "TASK_MANIFEST", true);
+  add("taskSource", run.taskSource, "TASK_SOURCE", true);
   if (run.gitWorkspace !== undefined) {
-    add("gitWorkspace.runBaselineSnapshot", run.gitWorkspace.runBaselineSnapshot, 1, "GIT_SNAPSHOT", true);
-    for (const revision of Object.values(run.gitWorkspace.revisions)) {
-      add(
-        `gitWorkspace.revisions.${String(revision.revision)}.inputSnapshot`,
-        revision.inputSnapshot,
-        revision.revision === 1 ? 1 : revision.revision - 1,
-        "GIT_SNAPSHOT",
-        true
-      );
-      add(`gitWorkspace.revisions.${String(revision.revision)}.resultSnapshot`, revision.resultSnapshot, revision.revision, "GIT_SNAPSHOT", false);
-      add(`gitWorkspace.revisions.${String(revision.revision)}.candidate`, revision.candidate, revision.revision, "CANDIDATE", false);
-      add(`gitWorkspace.revisions.${String(revision.revision)}.incrementalPatch`, revision.incrementalPatch, revision.revision, "GIT_PATCH", false);
-      add(`gitWorkspace.revisions.${String(revision.revision)}.cumulativePatch`, revision.cumulativePatch, revision.revision, "GIT_PATCH", false);
-      add(`gitWorkspace.revisions.${String(revision.revision)}.evidence`, revision.evidence, revision.revision, "GIT_EVIDENCE", false);
-    }
+    add("gitWorkspace.runBaselineSnapshot", run.gitWorkspace.runBaselineSnapshot, "GIT_SNAPSHOT", true);
+    add("gitWorkspace.current.inputSnapshot", run.gitWorkspace.current.inputSnapshot, "GIT_SNAPSHOT", true);
+    add("gitWorkspace.current.resultSnapshot", run.gitWorkspace.current.resultSnapshot, "GIT_SNAPSHOT", false);
+    add("gitWorkspace.current.candidate", run.gitWorkspace.current.candidate, "CANDIDATE", false);
   }
 
   const requiresBaseline = new Set([
@@ -365,28 +294,41 @@ export function runArtifactInventory(run: RunRecord): RunArtifactInventory {
   );
   const reviewPaused = run.phase === "PAUSED" && run.pause?.code === "HOST_REVIEW_UNAVAILABLE";
   const repairPaused = run.phase === "PAUSED" && (run.pause?.code.startsWith("REPAIR_") ?? false);
-  const candidate = add("candidate", run.candidate, run.revision, "CANDIDATE", requiresCandidate || publishPaused || reviewPaused || repairPaused);
-  add("baseline", run.baseline, 1, "BASELINE", requiresBaseline || publishPaused || reviewPaused || repairPaused);
-  add("review", run.review, run.revision, "REVIEW", new Set(["READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase) || publishPaused);
-  add("leaderDecision", run.leaderDecision, run.revision, "LEADER_DECISION", new Set(["READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase) || publishPaused);
+  const candidate = add("candidate", run.candidate, "CANDIDATE", requiresCandidate || publishPaused || reviewPaused || repairPaused);
+  add("baseline", run.baseline, "BASELINE", requiresBaseline || publishPaused || reviewPaused || repairPaused);
+  add("review", run.review, "REVIEW", new Set(["READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase) || publishPaused);
+  add("leaderDecision", run.leaderDecision, "LEADER_DECISION", new Set(["READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase) || publishPaused);
 
   const recovery = record(run.recovery);
   const repairDraft = record(recovery?.repairDraft);
   if (repairDraft !== undefined) {
-    add("recovery.repairDraft.sourceArtifact", repairDraft.sourceArtifact, run.revision + 1, "REPAIR_SOURCE", true);
+    add("recovery.repairDraft.sourceArtifact", repairDraft.sourceArtifact, "REPAIR_SOURCE", true);
+  }
+  if (recovery !== undefined && Object.hasOwn(recovery, "repairContinuation")) {
+    const repairContinuation = record(recovery.repairContinuation);
+    if (repairContinuation === undefined) {
+      issues.push("ARTIFACT_REF_INVALID:recovery.repairContinuation.workspaceSeedSnapshot");
+    } else {
+      add(
+        "recovery.repairContinuation.workspaceSeedSnapshot",
+        repairContinuation.workspaceSeedSnapshot,
+        "GIT_SNAPSHOT",
+        true
+      );
+    }
   }
   if (recovery !== undefined && Object.hasOwn(recovery, "untrustedSeedCandidate")) {
-    const nested = add("recovery.untrustedSeedCandidate", recovery.untrustedSeedCandidate, run.revision, "CANDIDATE", true);
+    const nested = add("recovery.untrustedSeedCandidate", recovery.untrustedSeedCandidate, "CANDIDATE", true);
     if (nested !== undefined && (candidate === undefined || !artifactRefsEqual(nested, candidate))) {
       issues.push("ARTIFACT_BINDING_CONFLICT:recovery.untrustedSeedCandidate");
     }
   }
 
   for (const [index, attempt] of run.workerAttempts.entries()) {
-    add(`workerAttempts[${String(index)}].sessionArtifact`, attempt.sessionArtifact, attempt.revision, "PI_SESSION", false);
+    add(`workerAttempts[${String(index)}].sessionArtifact`, attempt.sessionArtifact, "PI_SESSION", false);
   }
   for (const [index, artifact] of (run.lastError?.artifacts ?? []).entries()) {
-    add(`lastError.artifacts[${String(index)}]`, artifact, run.revision, "ERROR_EVIDENCE", true);
+    add(`lastError.artifacts[${String(index)}]`, artifact, "ERROR_EVIDENCE", true);
   }
   return { bindings, issues };
 }

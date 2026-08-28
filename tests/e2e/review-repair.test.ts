@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   assessRepairProgress,
-  deriveRepairApproval,
+  assessRepairScope,
+  renderRepairFeedback,
   type RepairRound
 } from "@smartflow/review";
 import {
@@ -14,18 +15,17 @@ import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
 const baseOptions = {
   projectId: "project-1",
   jobId: "job-1",
-  canonicalTaskPath: "/project/tasks.md",
+  canonicalTaskPath: "tasks.md",
   providerRuntimeConfig: { runtime: "frozen" },
   approval: {
     kind: "USER" as const,
     approvedAt: "2026-07-20T00:00:00.000Z",
-    parentRevision: null,
     authorizedCriterionIds: []
   }
 };
 
 function parentManifest(): TaskManifest {
-  return compileTaskManifest(createTasksSource(), { ...baseOptions, revision: 1 }).manifest;
+  return compileTaskManifest(createTasksSource(), baseOptions).manifest;
 }
 
 function round(hash: string, message = "runBuild still returns success after compilation fails"): RepairRound {
@@ -44,16 +44,13 @@ function round(hash: string, message = "runBuild still returns success after com
   };
 }
 
-function appendRepairTasks(source: string, tasks: string[]): string {
-  return `${source.trimEnd()}\n\n## Review Repair Tasks\n\n${tasks.join("\n")}\n`;
-}
-
 describe("review repair loop", () => {
-  it("emits parser-valid, parent-bound tasks and pauses after fifteen unchanged rounds", () => {
+  it("emits parser-valid criterion-bound draft tasks and pauses after fifteen unchanged rounds", () => {
     const parent = parentManifest();
     const first = assessRepairProgress(round("a"), round("a"), 0, { parentManifest: parent });
     expect(first).toMatchObject({ noProgressCount: 1, pauseRequired: false });
-    expect(first.repairTasks[0]).toMatch(/\[M01\].*parentRevision=1.*criterionId=T001/u);
+    expect(first.repairTasks[0]).toMatch(/\[M01\].*criterionId=T001/u);
+    expect(first.repairTasks[0]).not.toContain("parentRevision");
     expect(first.repairTasks[0]).not.toContain("fingerprint");
     const fourteenth = assessRepairProgress(round("a"), round("a"), 13, {
       parentManifest: parent
@@ -64,25 +61,14 @@ describe("review repair loop", () => {
     });
     expect(fifteenth).toMatchObject({ noProgressCount: 15, pauseRequired: true });
 
-    const proposed = compileTaskManifest(
-      appendRepairTasks(createTasksSource(), first.repairTasks),
-      {
-        ...baseOptions,
-        revision: 2,
-        approval: {
-          kind: "LEADER_REPAIR",
-          approvedAt: "2026-07-20T00:01:00.000Z",
-          parentRevision: 1,
-          authorizedCriterionIds: first.authorizedCriterionIds
-        }
+    expect(() => compileTaskManifest(createTasksSource(), {
+      ...baseOptions,
+      approval: {
+        kind: "LEADER_REPAIR" as "USER",
+        approvedAt: "2026-07-20T00:01:00.000Z",
+        authorizedCriterionIds: first.authorizedCriterionIds
       }
-    ).manifest;
-    expect(deriveRepairApproval(parent, proposed)).toMatchObject({
-      kind: "LEADER_REPAIR",
-      parentRevision: 1,
-      authorizedCriterionIds: ["T001"],
-      reasons: []
-    });
+    })).toThrow();
   });
 
   it("resets no progress when a relevant Candidate file changes", () => {
@@ -143,22 +129,22 @@ describe("review repair loop", () => {
     expect(result).toMatchObject({ noProgressCount: 2, pauseRequired: false });
   });
 
-  it("derives authorization from immutable Manifest diffs, ignoring a forged approval label", () => {
+  it("classifies scope expansion and keeps in-scope feedback on the same immutable Job", () => {
     const parent = parentManifest();
-    const assessment = assessRepairProgress(round("a"), round("b"), 0, { parentManifest: parent });
-    const changedPolicySource = appendRepairTasks(createTasksSource(), assessment.repairTasks);
-    const forged = compileTaskManifest(changedPolicySource, {
-      ...baseOptions,
-      revision: 2,
-      providerRuntimeConfig: { runtime: "changed" },
-      approval: {
-        kind: "LEADER_REPAIR",
-        approvedAt: "2026-07-20T00:01:00.000Z",
-        parentRevision: 1,
-        authorizedCriterionIds: ["T001"]
-      }
-    }).manifest;
-    expect(deriveRepairApproval(parent, forged).kind).toBe("USER");
-    expect(deriveRepairApproval(parent, forged).reasons).toContain("PROVIDER_RUNTIME_CHANGED");
+    expect(assessRepairScope(parent, round("a").tasks)).toEqual({
+      inScope: true,
+      reasons: []
+    });
+    const outOfScope = round("a");
+    const issue = outOfScope.tasks[0]?.issues[0];
+    if (issue === undefined) throw new Error("repair issue fixture missing");
+    issue.path = "packages/other/src/index.ts";
+    expect(assessRepairScope(parent, outOfScope.tasks)).toEqual({
+      inScope: false,
+      reasons: ["REVIEW_ISSUE_PATH_OUT_OF_SCOPE:T001:packages/other/src/index.ts"]
+    });
+    const feedback = renderRepairFeedback(round("a").tasks);
+    expect(feedback).toContain("Continue working on the same approved task");
+    expect(feedback).toContain("Do not modify task.md");
   });
 });

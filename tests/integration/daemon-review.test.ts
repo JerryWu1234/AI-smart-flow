@@ -11,7 +11,6 @@ import {
 import { StructuredLogger } from "@smartflow/observability";
 import type {
   AgentAdapter,
-  AgentProbe,
   AgentRunOutcome,
   AgentRunRequest
 } from "@smartflow/review";
@@ -24,21 +23,9 @@ type RecordedCall =
   | { mode: "RESUME"; sessionId: string; request: AgentRunRequest };
 
 class FakeReviewAdapter implements AgentAdapter {
-  public readonly id = "fake-reviewer";
   public readonly calls: RecordedCall[] = [];
-  public probeCalls = 0;
 
-  public constructor(
-    private readonly outcomes: AgentRunOutcome[],
-    private readonly probes: Array<AgentProbe | Error> = []
-  ) {}
-
-  public probe(): Promise<AgentProbe> {
-    this.probeCalls += 1;
-    const next = this.probes.shift();
-    if (next instanceof Error) return Promise.reject(next);
-    return Promise.resolve(next ?? { available: true, agentId: this.id, version: "test" });
-  }
+  public constructor(private readonly outcomes: AgentRunOutcome[]) {}
 
   public createSession(request: AgentRunRequest): Promise<AgentRunOutcome> {
     this.calls.push({ mode: "CREATE", request });
@@ -66,6 +53,9 @@ interface LogRecord {
   event: string;
   data?: Record<string, unknown>;
 }
+
+const REVIEW_MODEL = "test-review-model";
+const REVIEW_EFFORT = "xhigh";
 
 const activeHarnesses: RuntimeHarness[] = [];
 
@@ -123,6 +113,8 @@ function runner(
   logger?: StructuredLogger
 ): ReviewRunner {
   return new ReviewRunner(store, adapter, {
+    model: REVIEW_MODEL,
+    effort: REVIEW_EFFORT,
     deadlineMs: 60_000,
     maxAttempts,
     ...(logger === undefined ? {} : { logger })
@@ -155,7 +147,6 @@ async function putReviewing(
           stage: "AWAITING_REVIEW",
           turnToken,
           hostTurnId: DAEMON_REVIEWER_HOST_TURN_ID,
-          revision: run.revision,
           reviewAttemptId: action.reviewAttemptId,
           startedAt: now.toISOString(),
           deadlineAt: new Date(now.getTime() + 60_000).toISOString()
@@ -192,13 +183,14 @@ describe("ReviewRunner", () => {
     if (call === undefined) throw new Error("Expected a Review Adapter call");
     expect(call.request.outputSchemaPath).toBe(resolve(
       store.dataDirectory,
-      `runs/job-1/revision-1/reviews/${action.reviewAttemptId}.schema.json`
+      `runs/job-1/reviews/${action.reviewAttemptId}.schema.json`
     ));
     expect(call.request.outputPath).toBe(resolve(
       store.dataDirectory,
-      `runs/job-1/revision-1/reviews/${action.reviewAttemptId}.output.json`
+      `runs/job-1/reviews/${action.reviewAttemptId}.output.json`
     ));
     expect(call.request.outputSchemaPath).not.toBe(call.request.outputPath);
+    expect(call.request).toMatchObject({ model: REVIEW_MODEL, effort: REVIEW_EFFORT });
     const schema = JSON.parse(await readFile(call.request.outputSchemaPath, "utf8")) as {
       required: string[];
       additionalProperties: boolean;
@@ -280,6 +272,13 @@ describe("ReviewRunner", () => {
     });
     expect(adapter.calls[1]?.request.prompt).toContain("## Correction required for this round");
     expect(adapter.calls[1]?.request.prompt).toContain("REVIEW_OUTPUT_INVALID");
+    // The resumed round must carry the same model and effort as the first round.
+    expect(adapter.calls[1]?.request).toMatchObject({
+      model: REVIEW_MODEL,
+      effort: REVIEW_EFFORT
+    });
+    const outcomes = records.filter((record) => record.event === "daemon_review.adapter_outcome");
+    expect(outcomes[0]?.data).toMatchObject({ model: REVIEW_MODEL, effort: REVIEW_EFFORT });
     const rejected = records.find((record) => record.event === "daemon_review.attempt_rejected");
     expect(rejected?.data?.attempt).toBe(1);
     expect(rejected?.data?.willRetry).toBe(true);
@@ -395,11 +394,19 @@ describe("ReviewRunner", () => {
     )).toBe(false);
   });
 
-  it("pauses with a clear reason when the reviewer probe is unavailable", async () => {
+  it("retries real reviewer startup failures and pauses with the final reason", async () => {
     const { store } = await reviewFixture();
-    const adapter = new FakeReviewAdapter([], [
-      { available: false, agentId: "fake-reviewer", reason: "codex executable was not found" },
-      { available: false, agentId: "fake-reviewer", reason: "codex executable was not found" }
+    const adapter = new FakeReviewAdapter([
+      {
+        kind: "FAILED",
+        code: "CODEX_SPAWN_FAILED",
+        message: "codex executable was not found"
+      },
+      {
+        kind: "FAILED",
+        code: "CODEX_SPAWN_FAILED",
+        message: "codex executable was not found"
+      }
     ]);
 
     await expect(runner(store, adapter, 2).run({
@@ -407,8 +414,9 @@ describe("ReviewRunner", () => {
       jobId: "job-1"
     })).resolves.toEqual({ schedule: "none" });
 
-    expect(adapter.probeCalls).toBe(2);
-    expect(adapter.calls).toHaveLength(0);
+    expect(adapter.calls).toHaveLength(2);
+    expect(adapter.calls.every((call) => call.mode === "CREATE")).toBe(true);
+    expect(adapter.calls[1]?.request.prompt).toContain("CODEX_SPAWN_FAILED");
     const paused = (await store.readState()).runs["job-1"];
     expect(paused).toMatchObject({
       phase: "PAUSED",
@@ -417,6 +425,7 @@ describe("ReviewRunner", () => {
         code: "HOST_REVIEW_UNAVAILABLE"
       }
     });
+    expect(paused?.lastError?.message).toContain("CODEX_SPAWN_FAILED");
     expect(paused?.lastError?.message).toContain("codex executable was not found");
     expect(paused?.hostTurn).toBeUndefined();
   });

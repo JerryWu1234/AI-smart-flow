@@ -5,7 +5,7 @@ import { WorkspaceError } from "./errors.js";
 import { runGitCommand } from "./git-command.js";
 import { canonical, isInsideOrEqual as isInside, sha256 as hash } from "./internal-utils.js";
 
-export type GitSnapshotKind = "RUN_BASELINE" | "REVISION_INPUT" | "REVISION_RESULT";
+export type GitSnapshotKind = "RUN_BASELINE" | "RUN_RESULT";
 export type GitFileMode = "100644" | "100755" | "120000";
 
 export interface GitSnapshotEntry {
@@ -19,11 +19,9 @@ export interface GitSnapshotEntry {
 }
 
 export interface GitWorkspaceSnapshot {
-  schemaVersion: 1;
   repositoryId: string;
   activeWorktreeRoot: string;
   snapshotKind: GitSnapshotKind;
-  revision: number;
   treeId: string;
   snapshotHash: string;
   includedPathPolicyHash: string;
@@ -38,11 +36,18 @@ export interface CaptureGitSnapshotInput {
   indexPath: string;
   repositoryId: string;
   snapshotKind: GitSnapshotKind;
-  revision: number;
   includedPathPolicyHash: string;
   activeWorktreeRoot?: string;
   includeAllFiles?: boolean;
   gitBinary?: string;
+}
+
+export const SMARTFLOW_CONTROL_PLANE_PATH_PREFIXES = [".smartflow/tasks/"] as const;
+
+export function isSmartFlowControlPlanePath(path: string): boolean {
+  return SMARTFLOW_CONTROL_PLANE_PATH_PREFIXES.some((prefix) =>
+    path === prefix.slice(0, -1) || path.startsWith(prefix)
+  );
 }
 
 const sensitiveNames = new Set([
@@ -104,7 +109,7 @@ async function effectivePaths(gitBinary: string, root: string): Promise<string[]
     ["-C", root, "ls-files", "-c", "-o", "--exclude-standard", "-z"]
   );
   return [...new Set(result.stdout.toString("utf8").split("\0").filter((path) =>
-    safeRelativePath(path) && !isSensitive(path)
+    safeRelativePath(path) && !isSensitive(path) && !isSmartFlowControlPlanePath(path)
   ))].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
 }
 
@@ -117,7 +122,7 @@ async function allWorkspacePaths(root: string): Promise<string[]> {
       if (child.name === ".git" || child.name === ".smartflow-runtime") continue;
       const absolutePath = resolve(directory, child.name);
       const relativePath = relative(root, absolutePath).split(sep).join("/");
-      if (isSensitive(relativePath)) continue;
+      if (isSensitive(relativePath) || isSmartFlowControlPlanePath(relativePath)) continue;
       if (child.isDirectory()) await visit(absolutePath);
       else paths.push(relativePath);
     }
@@ -129,12 +134,8 @@ async function allWorkspacePaths(root: string): Promise<string[]> {
 export function verifyGitWorkspaceSnapshot(snapshot: GitWorkspaceSnapshot): boolean {
   try {
     if (
-      (snapshot as { schemaVersion?: unknown }).schemaVersion !== 1 ||
       snapshot.activeWorktreeRoot !== "." ||
-      !new Set<GitSnapshotKind>(["RUN_BASELINE", "REVISION_INPUT", "REVISION_RESULT"])
-        .has(snapshot.snapshotKind) ||
-      !Number.isInteger(snapshot.revision) ||
-      snapshot.revision <= 0 ||
+      !new Set<GitSnapshotKind>(["RUN_BASELINE", "RUN_RESULT"]).has(snapshot.snapshotKind) ||
       !/^[a-f0-9]{64}$/u.test(snapshot.repositoryId) ||
       !/^[a-f0-9]{40,64}$/u.test(snapshot.treeId) ||
       !/^[a-f0-9]{64}$/u.test(snapshot.snapshotHash) ||
@@ -173,7 +174,6 @@ export function verifyGitWorkspaceSnapshot(snapshot: GitWorkspaceSnapshot): bool
       repositoryId: snapshot.repositoryId,
       activeWorktreeRoot: snapshot.activeWorktreeRoot,
       snapshotKind: snapshot.snapshotKind,
-      revision: snapshot.revision,
       treeId: snapshot.treeId,
       includedPathPolicyHash: snapshot.includedPathPolicyHash,
       entries: snapshot.entries
@@ -257,13 +257,11 @@ export async function captureGitSnapshot(
     repositoryId: input.repositoryId,
     activeWorktreeRoot,
     snapshotKind: input.snapshotKind,
-    revision: input.revision,
     treeId,
     includedPathPolicyHash: input.includedPathPolicyHash,
     entries
   };
   return {
-    schemaVersion: 1,
     ...hashBody,
     snapshotHash: hash(canonical(hashBody)),
     createdAt: new Date().toISOString()

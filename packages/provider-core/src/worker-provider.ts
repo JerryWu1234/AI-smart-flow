@@ -33,12 +33,15 @@ export interface WorkerContainmentInput {
 export interface WorkerStartInput {
   readonly attemptId: string;
   readonly jobId: string;
-  readonly revision: number;
   readonly generation: number;
   readonly workspaceDir: string;
   readonly prompt: string;
   readonly providerRuntimeConfigHash: string;
   readonly deadlineAt: string;
+  readonly resumeSession?: {
+    readonly expectedPiSessionId: string;
+    readonly sessionFile: string;
+  };
   readonly containment: WorkerContainmentInput;
 }
 
@@ -55,7 +58,7 @@ export type WorkerEvent =
   | { type: "TOOL_STARTED"; attemptId: string; toolName: string; callId: string }
   | { type: "TOOL_FINISHED"; attemptId: string; toolName: string; callId: string; isError: boolean }
   | { type: "BLOCKED"; attemptId: string; code: string; message: string }
-  | { type: "COMPLETED"; attemptId: string; piSessionId: string }
+  | { type: "COMPLETED"; attemptId: string; piSessionId: string; sessionFile?: string }
   | { type: "FAILED"; attemptId: string; code: string; message: string }
   | { type: "TIMED_OUT"; attemptId: string; code: "ATTEMPT_DEADLINE_EXCEEDED" }
   | { type: "CANCELED"; attemptId: string };

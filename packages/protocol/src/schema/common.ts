@@ -36,22 +36,6 @@ export const structuredErrorSchema = z
   })
   .strict();
 
-export const projectSchema = z
-  .object({
-    projectId: identifierSchema,
-    canonicalProjectRoot: z.string().min(1),
-    stateVersion: nonNegativeIntegerSchema,
-    projectFence: nonNegativeIntegerSchema,
-    activeRunsByTaskPath: z.record(z.string().min(1), identifierSchema),
-    publishLease: z.object({
-      jobId: identifierSchema,
-      operationId: identifierSchema,
-      acquiredAt: isoDateTimeSchema
-    }).strict().nullable(),
-    updatedAt: isoDateTimeSchema
-  })
-  .strict();
-
 export const canonicalValueSchema: z.ZodType = z.lazy(() =>
   z.union([
     z.null(),
@@ -75,7 +59,6 @@ export const idempotentReceiptSchema = z
 
 export type ArtifactRef = z.infer<typeof artifactRefSchema>;
 export type StructuredError = z.infer<typeof structuredErrorSchema>;
-export type Project = z.infer<typeof projectSchema>;
 export type IdempotentReceipt = z.infer<typeof idempotentReceiptSchema>;
 
 export function artifactRefsEqual(left: ArtifactRef, right: ArtifactRef): boolean {

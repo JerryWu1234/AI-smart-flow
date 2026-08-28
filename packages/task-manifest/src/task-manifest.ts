@@ -13,16 +13,14 @@ import {
 import { validateTaskSelection } from "./validator.js";
 
 export interface ManifestApproval {
-  kind: "USER" | "LEADER_REPAIR";
+  kind: "USER";
   approvedAt: string;
-  parentRevision: number | null;
   authorizedCriterionIds: string[];
 }
 
 export interface CompileTaskManifestOptions {
   projectId: string;
   jobId: string;
-  revision: number;
   canonicalTaskPath: string;
   providerRuntimeConfig: unknown;
   allowNoChange?: boolean;
@@ -80,15 +78,12 @@ export function compileTaskManifest(
   const frozenProviderRuntimeConfigHash = providerRuntimeConfigHash(options.providerRuntimeConfig);
   const sourceHash = sha256Bytes(document.sourceBytes);
   const manifest = taskManifestSchema.parse({
-    schemaVersion: 3,
     projectId: options.projectId,
     jobId: options.jobId,
     runId: options.jobId,
-    revision: options.revision,
-    revisionId: `${options.jobId}:revision-${String(options.revision)}`,
     canonicalTaskPath: options.canonicalTaskPath,
     taskSourceArtifact: {
-      relativePath: `runs/${options.jobId}/revision-${String(options.revision)}/task-source.md`,
+      relativePath: `runs/${options.jobId}/task-source.md`,
       sha256: sourceHash,
       size: document.sourceBytes.byteLength
     },

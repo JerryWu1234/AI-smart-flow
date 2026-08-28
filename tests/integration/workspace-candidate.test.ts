@@ -6,11 +6,11 @@ import { afterEach, expect, it } from "vitest";
 
 import {
   buildGitCandidate,
-  buildGitTreePatch,
   captureGitSnapshot,
   initializeGitObjectStore,
   materializeGitSnapshot,
-  probeGitRepository
+  probeGitRepository,
+  verifyCandidateSnapshotBindings
 } from "@smartflow/workspace";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 
@@ -36,17 +36,17 @@ it("builds a cumulative Git Candidate without changing the active Workspace or u
   const userIndex = await readFile(resolve(harness.projectDir, ".git/index")).catch(() => Buffer.alloc(0));
   const runDirectory = resolve(harness.dataDir, "runs/job-1");
   const store = await initializeGitObjectStore(runDirectory);
+  const indexPath = resolve(runDirectory, "current.index");
   const baseline = await captureGitSnapshot({
     projectRoot: harness.projectDir,
     dataDirectory: runDirectory,
     runGitDirectory: store.gitDirectory,
-    indexPath: resolve(runDirectory, "revision-1/baseline.index"),
+    indexPath,
     repositoryId: capabilities.repositoryId,
     snapshotKind: "RUN_BASELINE",
-    revision: 1,
     includedPathPolicyHash: capabilities.inclusionPolicyHash
   });
-  const workspace = resolve(runDirectory, "revision-1/workspace");
+  const workspace = resolve(runDirectory, "workspace");
   await materializeGitSnapshot({
     snapshot: baseline,
     runGitDirectory: store.gitDirectory,
@@ -60,33 +60,29 @@ it("builds a cumulative Git Candidate without changing the active Workspace or u
     includeAllFiles: true,
     dataDirectory: runDirectory,
     runGitDirectory: store.gitDirectory,
-    indexPath: resolve(runDirectory, "revision-1/result.index"),
+    indexPath,
     repositoryId: capabilities.repositoryId,
-    snapshotKind: "REVISION_RESULT",
-    revision: 1,
+    snapshotKind: "RUN_RESULT",
     includedPathPolicyHash: capabilities.inclusionPolicyHash
   });
   const candidate = await buildGitCandidate({
     runBaseline: baseline,
-    revisionInput: baseline,
-    revisionResult: result
+    runResult: result
   });
 
   expect(candidate.candidate).toMatchObject({
-    schemaVersion: 3,
     runBaselineSnapshotHash: baseline.snapshotHash,
     resultSnapshotHash: result.snapshotHash
   });
+  expect(verifyCandidateSnapshotBindings({
+    candidate: candidate.candidate,
+    runBaseline: baseline,
+    runResult: result
+  })).toBe(true);
   expect(candidate.candidate.operations).toContainEqual(expect.objectContaining({
     kind: "MODIFY",
     path: "sum.js"
   }));
-  const patch = await buildGitTreePatch({
-    runGitDirectory: store.gitDirectory,
-    baseTreeId: baseline.treeId,
-    resultTreeId: result.treeId
-  });
-  expect(patch.toString("utf8")).toContain("a/sum.js");
   expect(hash(await readFile(activeSourcePath))).toBe(hash(activeSource));
   expect(await readFile(resolve(harness.projectDir, ".git/index")).catch(() => Buffer.alloc(0)))
     .toEqual(userIndex);

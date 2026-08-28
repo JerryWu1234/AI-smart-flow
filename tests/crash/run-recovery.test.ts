@@ -13,10 +13,10 @@ import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-ha
 import { createLifecycleStore } from "./recovery-test-fixture.js";
 
 class Runtime implements RecoveryRuntime {
-  public worker: "RESUMABLE" | "STOPPED" | "UNKNOWN" = "STOPPED";
+  public worker: "STOPPED" | "UNKNOWN" = "STOPPED";
   public inspectedAttempt: WorkerAttempt | undefined;
 
-  public inspectWorker(attempt: WorkerAttempt | undefined): Promise<"RESUMABLE" | "STOPPED" | "UNKNOWN"> {
+  public inspectWorker(attempt: WorkerAttempt | undefined): Promise<"STOPPED" | "UNKNOWN"> {
     this.inspectedAttempt = attempt;
     return Promise.resolve(this.worker);
   }
@@ -37,20 +37,6 @@ afterEach(async () => {
 });
 
 describe("Pi crash recovery", () => {
-  it("resumes the same live Pi session when containment is still resumable", async () => {
-    const harness = await createRuntimeHarness();
-    harnesses.push(harness);
-    const store = await createLifecycleStore(harness, "RUNNING");
-    const runtime = new Runtime();
-    runtime.worker = "RESUMABLE";
-
-    const before = await store.readState();
-    const recovered = await new RecoveryManager(store, runtime).recover("job-1");
-    expect(recovered).toMatchObject({ phase: "RUNNING", action: "RESUME_WORKER" });
-    expect(runtime.inspectedAttempt?.piSessionId).toBe("pi-session-old");
-    expect((await store.readState()).stateVersion).toBe(before.stateVersion);
-  });
-
   it("ends a stopped attempt and prepares one new Agent session after restart", async () => {
     const harness = await createRuntimeHarness();
     harnesses.push(harness);
@@ -63,8 +49,8 @@ describe("Pi crash recovery", () => {
       action: "START_NEW_WORKER_ATTEMPT",
       recoveryEpoch: {
         sourceAttemptId: "attempt-old",
-        sourceGeneration: 3,
-        resetGeneration: 4,
+        sourceGeneration: 0,
+        resetGeneration: 1,
         resetAttemptId: null
       }
     });
@@ -102,17 +88,31 @@ describe("Pi crash recovery", () => {
     const harness = await createRuntimeHarness();
     harnesses.push(harness);
     const endedAt = new Date().toISOString();
-    const store = await createLifecycleStore(harness, "RUNNING", {
-      workerAttempts: [{
-        attemptId: "attempt-timeout",
-        revision: 1,
-        generation: 3,
-        providerRuntimeConfigHash: "a".repeat(64),
-        status: "TIMED_OUT",
-        terminalReason: "ATTEMPT_DEADLINE_EXCEEDED",
-        startedAt: endedAt,
-        endedAt
-      }]
+    const store = await createLifecycleStore(harness, "RUNNING");
+    const initial = await store.readState();
+    const run = initial.runs["job-1"];
+    const attempt = run?.workerAttempts[0];
+    if (run === undefined || attempt === undefined) {
+      throw new Error("timed-out attempt fixture is incomplete");
+    }
+    await store.writeState({
+      ...initial,
+      stateVersion: initial.stateVersion + 1,
+      runs: {
+        ...initial.runs,
+        "job-1": {
+          ...run,
+          workerAttempts: [{
+            ...attempt,
+            attemptId: "attempt-timeout",
+            status: "TIMED_OUT",
+            terminalReason: "ATTEMPT_DEADLINE_EXCEEDED",
+            endedAt
+          }],
+          updatedAt: endedAt
+        }
+      },
+      updatedAt: endedAt
     });
     const runtime = new Runtime();
 
@@ -140,7 +140,7 @@ describe("Pi crash recovery", () => {
     expect(recovered).toMatchObject({
       phase: "PAUSED",
       action: "BLOCKED",
-      reason: "ARTIFACT_INTEGRITY_FAILED:gitWorkspace.revisions.1.candidate"
+      reason: "ARTIFACT_INTEGRITY_FAILED:gitWorkspace.current.candidate"
     });
   });
 });

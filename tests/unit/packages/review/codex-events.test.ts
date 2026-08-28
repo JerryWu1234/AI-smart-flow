@@ -2,13 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import {
   createCodexEventState,
-  parseCodexJsonl,
   reduceCodexEventLine
 } from "@smartflow/review";
 
+function reduceLines(lines: readonly string[]): ReturnType<typeof createCodexEventState> {
+  return lines.reduce(reduceCodexEventLine, createCodexEventState());
+}
+
 describe("Codex JSONL events", () => {
   it("collects session, completion, usage, and the final agent message", () => {
-    const events = parseCodexJsonl([
+    const events = reduceLines([
       "not-json diagnostics from a wrapper",
       JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
       JSON.stringify({ type: "item.started", item: { type: "command_execution" } }),
@@ -17,7 +20,7 @@ describe("Codex JSONL events", () => {
         item: { type: "agent_message", text: "final fallback text" }
       }),
       JSON.stringify({ type: "turn.completed", usage: { input_tokens: 20, output_tokens: 5 } })
-    ].join("\r\n"));
+    ]);
 
     expect(events).toEqual({
       sessionId: "thread-1",
@@ -46,13 +49,13 @@ describe("Codex JSONL events", () => {
   });
 
   it("does not let non-JSON or unknown event lines abort later valid events", () => {
-    expect(() => parseCodexJsonl("{broken\n42\nplain text\n")).not.toThrow();
-    expect(parseCodexJsonl([
+    expect(() => reduceLines(["{broken", "42", "plain text"])).not.toThrow();
+    expect(reduceLines([
       "{broken",
       JSON.stringify({ type: "future.event", value: true }),
       JSON.stringify({ type: "thread.started", thread_id: "thread-2" }),
       JSON.stringify({ type: "turn.completed" })
-    ].join("\n"))).toMatchObject({
+    ])).toMatchObject({
       sessionId: "thread-2",
       turnCompleted: true,
       ignoredLineCount: 1

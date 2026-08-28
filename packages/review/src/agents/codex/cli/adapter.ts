@@ -7,7 +7,6 @@ import { readFile, rm } from "node:fs/promises";
 
 import type {
   AgentAdapter,
-  AgentProbe,
   AgentRunOutcome,
   AgentRunRequest
 } from "../../agent-adapter.js";
@@ -30,7 +29,6 @@ export interface CodexAdapterOptions {
   readonly spawn?: CodexSpawn;
   readonly kill?: CodexKill;
   readonly forceKillAfterMs?: number;
-  readonly probeTimeoutMs?: number;
 }
 
 type InterruptedKind = "TIMED_OUT" | "CANCELED";
@@ -73,51 +71,42 @@ function diagnostics(...values: Array<string | undefined>): string {
   return text.length > 1_000 ? `${text.slice(0, 1_000)}…` : text;
 }
 
-function createArgv(request: AgentRunRequest): string[] {
+// Flags accepted by both `codex exec` and `codex exec resume`. The sandbox is
+// requested through -c because `codex exec resume` rejects --sandbox outright,
+// and a single shared list keeps the two invocations from drifting apart.
+function sharedFlags(request: AgentRunRequest): string[] {
   return [
-    "exec",
     "--json",
-    "--sandbox",
-    "read-only",
+    "--skip-git-repo-check",
+    "--ignore-user-config",
+    "-c",
+    'sandbox_mode="read-only"',
     "--output-schema",
     request.outputSchemaPath,
     "--output-last-message",
     request.outputPath,
-    "--cd",
-    request.cwd,
-    "--skip-git-repo-check",
-    "--ignore-user-config",
     ...(request.model === undefined ? [] : ["-m", request.model]),
-    request.prompt
+    ...(request.effort === undefined
+      ? []
+      : ["-c", `model_reasoning_effort="${request.effort}"`])
   ];
+}
+
+function createArgv(request: AgentRunRequest): string[] {
+  // --cd is create-only; `codex exec resume` rejects it. Both paths still run in
+  // the worktree because run() spawns the process with cwd: request.cwd.
+  return ["exec", ...sharedFlags(request), "--cd", request.cwd, request.prompt];
 }
 
 function resumeArgv(sessionId: string, request: AgentRunRequest): string[] {
-  return [
-    "exec",
-    "resume",
-    sessionId,
-    "--json",
-    "--sandbox",
-    "read-only",
-    "--output-schema",
-    request.outputSchemaPath,
-    "--output-last-message",
-    request.outputPath,
-    "--cd",
-    request.cwd,
-    request.prompt
-  ];
+  return ["exec", "resume", sessionId, ...sharedFlags(request), request.prompt];
 }
 
 export class CodexAdapter implements AgentAdapter {
-  public readonly id = "codex";
-
   private readonly executable: string;
   private readonly spawnProcess: CodexSpawn;
   private readonly killProcess: CodexKill;
   private readonly forceKillAfterMs: number;
-  private readonly probeTimeoutMs: number;
   private readonly activeRuns = new Map<string, ActiveRun>();
   private readonly reservedRunIds = new Set<string>();
 
@@ -126,82 +115,6 @@ export class CodexAdapter implements AgentAdapter {
     this.spawnProcess = options.spawn ?? defaultSpawn;
     this.killProcess = options.kill ?? defaultKill;
     this.forceKillAfterMs = options.forceKillAfterMs ?? 1_000;
-    this.probeTimeoutMs = options.probeTimeoutMs ?? 5_000;
-  }
-
-  public async probe(): Promise<AgentProbe> {
-    let child: ChildProcess;
-    try {
-      child = this.spawnProcess(this.executable, ["--version"], {
-        shell: false,
-        stdio: ["ignore", "pipe", "pipe"]
-      });
-    } catch (error) {
-      return {
-        available: false,
-        agentId: this.id,
-        reason: `Unable to start Codex: ${errorMessage(error)}`
-      };
-    }
-
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr?.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-
-    return await new Promise<AgentProbe>((settle) => {
-      let settled = false;
-      const finish = (probe: AgentProbe): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        settle(probe);
-      };
-      const timer = setTimeout(() => {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          // The process may already have exited between the timeout and the signal.
-        }
-        finish({
-          available: false,
-          agentId: this.id,
-          reason: `Codex version probe timed out after ${String(this.probeTimeoutMs)}ms`
-        });
-      }, this.probeTimeoutMs);
-      timer.unref();
-
-      child.once("error", (error) => {
-        finish({
-          available: false,
-          agentId: this.id,
-          reason: `Unable to start Codex: ${error.message}`
-        });
-      });
-      child.once("close", (exitCode, signal) => {
-        const version = stdout.trim();
-        if (exitCode === 0 && version.length > 0) {
-          finish({ available: true, agentId: this.id, version });
-          return;
-        }
-        const detail = diagnostics(
-          stderr,
-          exitCode === null ? undefined : `exit code ${String(exitCode)}`,
-          signal === null ? undefined : `signal ${signal}`
-        );
-        finish({
-          available: false,
-          agentId: this.id,
-          reason: detail.length > 0 ? `Codex probe failed: ${detail}` : "Codex did not report a version"
-        });
-      });
-    });
   }
 
   public createSession(request: AgentRunRequest): Promise<AgentRunOutcome> {

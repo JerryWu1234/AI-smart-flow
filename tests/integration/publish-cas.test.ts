@@ -107,7 +107,6 @@ class CountingAdapter implements WorkspaceApplyAdapter {
 const bindings = {
   projectId: "project-1",
   jobId: "job-1",
-  revision: 1,
   candidateHash: "a".repeat(64),
   reviewHash: "b".repeat(64)
 };
@@ -117,7 +116,7 @@ async function operationsForRun(
 ): Promise<ApplyOperation[]> {
   const state = await store.readState();
   const run = state.runs["job-1"];
-  const resultSnapshot = run?.gitWorkspace?.revisions[String(run.revision)]?.resultSnapshot;
+  const resultSnapshot = run?.gitWorkspace?.current.resultSnapshot;
   if (run?.candidate === undefined || resultSnapshot === undefined) {
     throw new Error("Git publish source fixture missing");
   }
@@ -151,7 +150,6 @@ async function requestManualConfirmation(
           ...run.recovery,
           manualPublishConfirmation: {
             status: "REQUESTED",
-            revision: run.revision,
             pauseCode: sourcePauseCode,
             requestId: `manual-confirm-${String(state.stateVersion + 1)}`,
             requestedAt: updatedAt
@@ -268,7 +266,7 @@ describe("durable CAS publish", () => {
     }
   });
 
-  it("publishes from the Git object store after the revision worktree is removed", async () => {
+  it("publishes from the Git object store after the Job worktree is removed", async () => {
     const harness = await createRuntimeHarness();
     try {
       const store = await createLifecycleStore(harness, "READY_TO_PUBLISH");
@@ -461,7 +459,6 @@ describe("durable CAS publish", () => {
           requestId: "cancel-pending-publish",
           projectId,
           jobId: "job-1",
-          expectedRevision: 1,
           expectedStateVersion: beforeCancel.stateVersion,
           reason: "cancel while adapter apply is pending"
         }
@@ -689,7 +686,6 @@ describe("durable CAS publish", () => {
           projectId,
           jobId: "job-1",
           resumeAction: "confirm_manual_publish",
-          expectedRevision: 1,
           expectedStateVersion: before.stateVersion
         }
       })).rejects.toMatchObject({ code: "RESUME_CODE_ACTION_MISMATCH" });
@@ -744,7 +740,7 @@ describe("durable CAS publish", () => {
     const hashValue = operationsHash([apply]);
     const operationId = stableOperationId({ ...bindings, operationsHash: hashValue });
     const store = new Store();
-    await store.prepare({ operationId, operationsHash: hashValue, adapterId: "publish-cas-test", revision: 1, status: "SUBMITTED" });
+    await store.prepare({ operationId, operationsHash: hashValue, adapterId: "publish-cas-test", status: "SUBMITTED" });
     let applyCalls = 0;
     const adapter: WorkspaceApplyAdapter = {
       probe: () => Promise.resolve({ expectedOldHashCas: true, atomicBatchCas: true, stableOperationId: true, queryResult: true, adapterId: "publish-cas-test" }),
@@ -840,8 +836,7 @@ describe("durable CAS publish", () => {
       operationId,
       operationsHash: operationsDigest,
       adapterId: "original-adapter",
-      revision: 1,
-      status: "SUBMITTED"
+        status: "SUBMITTED"
     });
     let queryCalls = 0;
     const changedAdapter: WorkspaceApplyAdapter = {

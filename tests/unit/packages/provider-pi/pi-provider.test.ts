@@ -27,16 +27,18 @@ const configuration: PiRuntimeConfiguration = {
   resourcePolicy: "workspace-project-resources"
 };
 
-function input(): WorkerStartInput {
+const sessionFile = "/workspace/.smartflow-runtime/sessions/pi-session-1.jsonl";
+
+function input(resumeSession?: WorkerStartInput["resumeSession"]): WorkerStartInput {
   return {
     attemptId: "attempt-1",
     jobId: "job-1",
-    revision: 1,
     generation: 0,
     workspaceDir: "/workspace",
     prompt: "implement",
     providerRuntimeConfigHash: piRuntimeConfigHash(configuration),
     deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    ...(resumeSession === undefined ? {} : { resumeSession }),
     containment: {
       registryPath: "/workspace/.smartflow-runtime/containments.json",
       homeDirectory: "/workspace/.smartflow-runtime/home",
@@ -51,6 +53,16 @@ class FakeSandbox extends ExecutionSandboxAdapter {
   public terminations = 0;
   public renewals = 0;
   public lastRequest: SandboxedSpawnRequest | undefined;
+  public readonly commandTypes: string[] = [];
+
+  public constructor(
+    private readonly state: { sessionId: string; sessionFile: string } = {
+      sessionId: "pi-session-1",
+      sessionFile
+    }
+  ) {
+    super();
+  }
 
   public override probe(): Promise<SandboxCapabilities> {
     return Promise.resolve({
@@ -76,8 +88,9 @@ class FakeSandbox extends ExecutionSandboxAdapter {
       for (const line of lines) {
         if (line.length === 0) continue;
         const command = JSON.parse(line) as { id: string; type: string };
+        this.commandTypes.push(command.type);
         const data = command.type === "get_state"
-          ? { sessionId: "pi-session-1" }
+          ? this.state
           : command.type === "get_last_assistant_text"
             ? { text: "done" }
             : {};
@@ -149,7 +162,7 @@ describe("Pi Provider", () => {
   it("probes the one-model Extension registration without a model request", async () => {
     const provider = new PiProvider({
       runtimeConfig: configuration,
-      environment: { SMARTFLOW_PI_API_KEY: "test-credential" },
+      environment: { API_KEY: "test-credential" },
       createSandbox: (): ExecutionSandboxAdapter => new FakeSandbox()
     });
     await expect(provider.probe()).resolves.toMatchObject({
@@ -167,7 +180,7 @@ describe("Pi Provider", () => {
     const sandbox = new FakeSandbox();
     const provider = new PiProvider({
       runtimeConfig: configuration,
-      environment: { SMARTFLOW_PI_API_KEY: "test-credential" },
+      environment: { API_KEY: "test-credential" },
       createSandbox: (): ExecutionSandboxAdapter => sandbox
     });
     const events = [];
@@ -184,7 +197,7 @@ describe("Pi Provider", () => {
       piSessionId: "pi-session-1",
       containmentId: "containment-1"
     });
-    expect(events.at(-1)).toMatchObject({ piSessionId: "pi-session-1" });
+    expect(events.at(-1)).toMatchObject({ piSessionId: "pi-session-1", sessionFile });
     expect(sandbox.terminations).toBe(1);
     expect(sandbox.lastRequest?.argv).toEqual(expect.arrayContaining([
       "--extension",
@@ -194,20 +207,71 @@ describe("Pi Provider", () => {
       "--model",
       "test-model"
     ]));
+    expect(sandbox.lastRequest?.argv).not.toContain("--session");
     expect(sandbox.lastRequest?.environment).toMatchObject({
-      SMARTFLOW_PI_API: "openai-completions",
-      SMARTFLOW_PI_BASE_URL: "https://models.example.test/v1",
-      SMARTFLOW_PI_MODEL: "test-model",
-      SMARTFLOW_PI_API_KEY: "test-credential"
+      API: "openai-completions",
+      BASE_URL: "https://models.example.test/v1",
+      MODEL: "test-model",
+      API_KEY: "test-credential"
     });
     expect(sandbox.lastRequest?.argv.join(" ")).not.toContain("test-credential");
+  });
+
+  it("resumes the exact PI session file and preserves its session identity", async () => {
+    const sandbox = new FakeSandbox();
+    const provider = new PiProvider({
+      runtimeConfig: configuration,
+      environment: { API_KEY: "test-credential" },
+      createSandbox: (): ExecutionSandboxAdapter => sandbox
+    });
+    const events = [];
+    for await (const event of provider.start(input({
+      expectedPiSessionId: "pi-session-1",
+      sessionFile
+    }))) events.push(event);
+
+    expect(events[0]).toMatchObject({ type: "STARTED", piSessionId: "pi-session-1" });
+    expect(events.at(-1)).toMatchObject({
+      type: "COMPLETED",
+      piSessionId: "pi-session-1",
+      sessionFile
+    });
+    const sessionIndex = sandbox.lastRequest?.argv.indexOf("--session") ?? -1;
+    expect(sessionIndex).toBeGreaterThan(-1);
+    expect(sandbox.lastRequest?.argv.slice(sessionIndex, sessionIndex + 2))
+      .toEqual(["--session", sessionFile]);
+  });
+
+  it("fails a resumed PI session identity mismatch before sending the prompt", async () => {
+    const sandbox = new FakeSandbox({
+      sessionId: "unexpected-session",
+      sessionFile
+    });
+    const provider = new PiProvider({
+      runtimeConfig: configuration,
+      environment: { API_KEY: "test-credential" },
+      createSandbox: (): ExecutionSandboxAdapter => sandbox
+    });
+    const events = [];
+    for await (const event of provider.start(input({
+      expectedPiSessionId: "pi-session-1",
+      sessionFile
+    }))) events.push(event);
+
+    expect(events).toEqual([expect.objectContaining({
+      type: "FAILED",
+      code: "PI_PROVIDER_FAILED",
+      message: "PI_SESSION_RESUME_ID_MISMATCH"
+    })]);
+    expect(sandbox.commandTypes).toEqual(["get_state"]);
+    expect(sandbox.terminations).toBe(1);
   });
 
   it("cancels the active Pi containment as a full tree", async () => {
     const sandbox = new FakeSandbox();
     const provider = new PiProvider({
       runtimeConfig: configuration,
-      environment: { SMARTFLOW_PI_API_KEY: "test-credential" },
+      environment: { API_KEY: "test-credential" },
       createSandbox: (): ExecutionSandboxAdapter => sandbox
     });
     const iterator = provider.start(input())[Symbol.asyncIterator]();

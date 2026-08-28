@@ -33,14 +33,9 @@ describe("durable Pi cancellation reconciliation", () => {
   it("stops the active Pi Attempt, marks it canceled, and completes idempotently", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
-    const store = await createLifecycleStore(harness, "RUNNING");
+    const store = await createLifecycleStore(harness, "CANCELING");
     const runtime = new Runtime();
     const manager = new CancelManager(store, runtime);
-
-    const requested = await manager.request("job-1", "user requested cancellation");
-    expect(requested.phase).toBe("CANCELING");
-    expect((await manager.request("job-1", "duplicate")).stateVersion)
-      .toBe(requested.stateVersion);
 
     const completed = await manager.reconcile("job-1");
     expect(completed).toMatchObject({ phase: "CANCELED", reconciled: true });
@@ -61,12 +56,11 @@ describe("durable Pi cancellation reconciliation", () => {
   it("fails closed when the Pi process tree cannot be proven stopped", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
-    const store = await createLifecycleStore(harness, "RUNNING");
+    const store = await createLifecycleStore(harness, "CANCELING");
     const runtime = new Runtime();
     runtime.workerStopped = false;
     const manager = new CancelManager(store, runtime);
 
-    await manager.request("job-1", "cancel uncertain process");
     const blocked = await manager.reconcile("job-1");
     expect(blocked).toMatchObject({
       phase: "PAUSED",
@@ -82,11 +76,28 @@ describe("durable Pi cancellation reconciliation", () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const store = await createLifecycleStore(harness, "REVIEWING");
+    const prepared = await store.readState();
+    const preparedRun = prepared.runs["job-1"];
+    if (preparedRun === undefined) throw new Error("run missing");
+    const requestedAt = new Date().toISOString();
+    await store.writeState({
+      ...prepared,
+      stateVersion: prepared.stateVersion + 1,
+      runs: {
+        ...prepared.runs,
+        "job-1": {
+          ...preparedRun,
+          phase: "CANCELING",
+          cancellation: { reason: "cancel review", requestedAt, status: "REQUESTED" },
+          updatedAt: requestedAt
+        }
+      },
+      updatedAt: requestedAt
+    });
     const runtime = new Runtime();
     runtime.actionRevoked = false;
     const manager = new CancelManager(store, runtime);
 
-    await manager.request("job-1", "cancel review");
     const blocked = await manager.reconcile("job-1");
     expect(blocked.blockedReasons).toContain("ACTION_REVOCATION_UNCONFIRMED");
   });

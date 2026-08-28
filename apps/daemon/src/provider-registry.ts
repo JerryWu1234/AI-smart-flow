@@ -37,7 +37,7 @@ export class ProviderRegistry {
       provider: new PiProvider({
         runtimeConfig: configuration.runtimeConfig,
         environment: {
-          SMARTFLOW_PI_API_KEY: configuration.credential
+          API_KEY: configuration.credential
         }
       })
     };

@@ -3,7 +3,11 @@ import { resolve } from "node:path";
 
 import { MetricsRegistry, StructuredLogger } from "@smartflow/observability";
 import type { WorkspaceApplyAdapter } from "@smartflow/publish";
-import { CodexAdapter, type AgentAdapter } from "@smartflow/review";
+import {
+  CodexAdapter,
+  CodexDesktopAdapter,
+  type AgentAdapter
+} from "@smartflow/review";
 
 import {
   loadSmartFlowConfig,
@@ -22,7 +26,8 @@ import {
 } from "./worker-config.js";
 
 const REVIEW_ADAPTER_FACTORIES = {
-  codex: (): AgentAdapter => new CodexAdapter()
+  codex: (): AgentAdapter => new CodexAdapter(),
+  "codex-desktop": (): AgentAdapter => new CodexDesktopAdapter()
 } satisfies Record<ReviewStrategy, () => AgentAdapter>;
 
 export interface SmartFlowDaemonOptions {
@@ -65,14 +70,15 @@ export async function startSmartFlowDaemon(
   const reviewAdapter = options.reviewAdapter ??
     REVIEW_ADAPTER_FACTORIES[config.review.strategy]();
   const composition = new ProductionRuntimeComposition(
+    reviewAdapter,
     logger,
     options.workspaceApplyAdapter,
     initialProviderRuntime.provider,
     providerRuntimeConfig,
     providers.resolve.bind(providers),
-    reviewAdapter,
     {
       ...(config.review.model === undefined ? {} : { model: config.review.model }),
+      ...(config.review.effort === undefined ? {} : { effort: config.review.effort }),
       deadlineMs: config.review.deadlineMs,
       maxAttempts: config.review.maxAttempts
     },

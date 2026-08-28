@@ -227,17 +227,13 @@ describe("installed SmartFlow package", () => {
         "smartflow.mjs"
       );
       await writeFile(smartFlowConfigPath, [
-        "workspace:",
-        "  mode: git-tree",
         "review:",
         "  strategy: codex",
-        "  onUnavailable: pause",
         "  noProgressThreshold: 15",
+        "  model: e2e-review-model",
+        "  effort: low",
         "  deadlineMs: 300000",
         "  maxAttempts: 3",
-        "publish:",
-        "  mode: auto-after-review",
-        "  onConflict: pause",
         ""
       ].join("\n"), "utf8");
       const environment = {
@@ -253,10 +249,10 @@ describe("installed SmartFlow package", () => {
         SMARTFLOW_CONFIG: smartFlowConfigPath,
         SMARTFLOW_DATA_HOME: dataRoot,
         XDG_DATA_HOME: resolve(dataRoot, "xdg"),
-        SMARTFLOW_PI_API: process.env.SMARTFLOW_PI_API ?? "",
-        SMARTFLOW_PI_BASE_URL: process.env.SMARTFLOW_PI_BASE_URL ?? "",
-        SMARTFLOW_PI_MODEL: process.env.SMARTFLOW_PI_MODEL ?? "",
-        SMARTFLOW_PI_API_KEY: process.env.SMARTFLOW_PI_API_KEY ?? "",
+        API: process.env.API ?? "",
+        BASE_URL: process.env.BASE_URL ?? "",
+        MODEL: process.env.MODEL ?? "",
+        API_KEY: process.env.API_KEY ?? "",
         SMARTFLOW_PI_CONTEXT_WINDOW: process.env.SMARTFLOW_PI_CONTEXT_WINDOW ?? "1000000",
         SMARTFLOW_PI_MAX_TOKENS: process.env.SMARTFLOW_PI_MAX_TOKENS ?? "384000",
         SMARTFLOW_PI_THINKING: process.env.SMARTFLOW_PI_THINKING ?? "high",
@@ -397,6 +393,8 @@ describe("installed SmartFlow package", () => {
       for (const [index, reviewTrace] of mainReviewTrace.entries()) {
         expect(reviewTrace.mode).toBe(index === 0 ? "CREATE" : "RESUME");
         expect(reviewTrace.sessionId).toBe(reviewerSessionId);
+        // Configured model and effort must reach every round, resumes included.
+        expect(reviewTrace).toMatchObject({ model: "e2e-review-model", effort: "low" });
         expect(asStringArray(
           reviewTrace.taskIds,
           `installed Daemon Review task IDs ${String(index)}`
@@ -405,8 +403,13 @@ describe("installed SmartFlow package", () => {
       const reviewOutputPaths = mainReviewTrace.map((entry) =>
         String(entry.outputPath).replaceAll("\\", "/")
       );
-      expect(reviewOutputPaths.some((path) => path.includes("/revision-1/reviews/"))).toBe(true);
-      expect(reviewOutputPaths.some((path) => path.includes("/revision-2/reviews/"))).toBe(true);
+      const jobArtifactRoot = `runs/${String(result.jobId)}/`;
+      expect(reviewOutputPaths.every(
+        (path) => path.includes(`/${jobArtifactRoot}reviews/`)
+      )).toBe(true);
+      expect(reviewOutputPaths.some(
+        (path) => /(?:^|\/)revision-\d+(?:\/|$)/u.test(path)
+      )).toBe(false);
       expect(repairMarker).toMatch(/^\/\/ SMARTFLOW_DYNAMIC_REPAIR_[0-9a-f]{20}$/u);
 
       const finalReview = asRecord(result.review, "installed final Review");
@@ -420,27 +423,27 @@ describe("installed SmartFlow package", () => {
       )).toBe(true);
 
       const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
-      // The Revision counter is Daemon state, so the durable artifact layout is the
-      // Host-visible proof that automatic repair produced a second Revision.
-      expect(artifacts
-        .map((artifact) => String(asRecord(artifact, "result artifact").relativePath))
-        .some((relativePath) => relativePath.includes(
-          `runs/${String(result.jobId)}/revision-2/`
-        ))).toBe(true);
+      const artifactPaths = artifacts.map((artifact) =>
+        String(asRecord(artifact, "result artifact").relativePath)
+      );
+      // Durable Review and result artifacts prove automatic repair stayed in one immutable Job.
+      expect(artifactPaths.some(
+        (relativePath) => relativePath.startsWith(`${jobArtifactRoot}reviews/`)
+      )).toBe(true);
+      expect(artifactPaths.every(
+        (relativePath) => !/(?:^|\/)revision-\d+(?:\/|$)/u.test(relativePath)
+      )).toBe(true);
       const taskSourceArtifact = artifacts
         .map((artifact) => asRecord(artifact, "result artifact"))
-        .find((artifact) =>
-          String(artifact.relativePath).includes(`runs/${String(result.jobId)}/`) &&
-          String(artifact.relativePath).endsWith("/task-source.md")
-        );
+        .find((artifact) => artifact.relativePath === `${jobArtifactRoot}task-source.md`);
       if (taskSourceArtifact === undefined) throw new Error("Installed result omitted task source artifact");
+      expect(taskSourceArtifact.relativePath).toBe(`${jobArtifactRoot}task-source.md`);
       expect(await readFile(resolve(
         daemonRoot,
         "projects",
         String(scope.projectId),
         "runs",
         String(result.jobId),
-        "revision-1",
         "task-source.md"
       ), "utf8")).toBe(tasksSource);
       lifecycleStage = "published-result";

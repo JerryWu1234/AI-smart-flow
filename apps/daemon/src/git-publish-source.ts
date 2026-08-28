@@ -1,6 +1,7 @@
 import type { ArtifactRef } from "@smartflow/protocol";
 import type { ApplyOperation } from "@smartflow/publish";
 import {
+  isSmartFlowControlPlanePath,
   readGitBlob,
   type Candidate,
   type GitSnapshotEntry,
@@ -21,15 +22,16 @@ export function gitPublishOperations(
   resultSnapshot: GitWorkspaceSnapshot
 ): ApplyOperation[] {
   if (
-    (candidate.schemaVersion !== 2 && candidate.schemaVersion !== 3) ||
     candidate.resultSnapshotHash !== resultSnapshot.snapshotHash ||
-    candidate.revision !== resultSnapshot.revision ||
-    resultSnapshot.snapshotKind !== "REVISION_RESULT"
+    resultSnapshot.snapshotKind !== "RUN_RESULT"
   ) {
     throw new Error("PUBLISH_GIT_SOURCE_BINDING_INVALID");
   }
   const resultEntries = new Map(resultSnapshot.entries.map((entry) => [entry.path, entry]));
   return candidate.operations.map((candidateOperation) => {
+    if (isSmartFlowControlPlanePath(candidateOperation.path)) {
+      throw new Error(`PUBLISH_CONTROL_PLANE_OPERATION_BLOCKED: ${candidateOperation.path}`);
+    }
     const oldEntry = "oldEntry" in candidateOperation ? candidateOperation.oldEntry : undefined;
     const newEntry = "newEntry" in candidateOperation ? candidateOperation.newEntry : undefined;
     if (oldEntry?.kind === "SYMLINK" || newEntry?.kind === "SYMLINK") {

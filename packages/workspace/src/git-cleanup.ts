@@ -5,10 +5,10 @@ export interface GitCleanupRun {
   phase: string;
   gitWorkspace?: {
     objectDirectory: string;
-    revisions: Record<string, {
+    current: {
       indexPath: string;
       workspacePath: string;
-    }>;
+    };
   } | undefined;
 }
 
@@ -34,18 +34,19 @@ export async function cleanupGitRunTemporaryState(
   }
   const gitWorkspace = run.gitWorkspace;
   if (gitWorkspace === undefined) return;
-  for (const revision of Object.values(gitWorkspace.revisions)) {
-    const indexPath = resolvedChild(dataDirectory, revision.indexPath);
-    const revisionDirectory = dirname(indexPath);
-    await rm(resolvedChild(dataDirectory, revision.workspacePath), { recursive: true, force: true });
-    const entries = await readdir(revisionDirectory, { withFileTypes: true }).catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-      throw error;
-    });
-    for (const entry of entries) {
-      if ((entry.isDirectory() && entry.name.startsWith("workspace-")) || entry.name.endsWith(".index")) {
-        await rm(resolve(revisionDirectory, entry.name), { recursive: true, force: true });
-      }
+  const indexPath = resolvedChild(dataDirectory, gitWorkspace.current.indexPath);
+  const currentDirectory = dirname(indexPath);
+  await rm(resolvedChild(dataDirectory, gitWorkspace.current.workspacePath), {
+    recursive: true,
+    force: true
+  });
+  const entries = await readdir(currentDirectory, { withFileTypes: true }).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  });
+  for (const entry of entries) {
+    if ((entry.isDirectory() && entry.name.startsWith("workspace-")) || entry.name.endsWith(".index")) {
+      await rm(resolve(currentDirectory, entry.name), { recursive: true, force: true });
     }
   }
   const objectDirectory = resolvedChild(dataDirectory, gitWorkspace.objectDirectory);

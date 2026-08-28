@@ -10,10 +10,12 @@ import {
 import { LocalDaemonGateway } from "./local-daemon-gateway.js";
 import { connectSmartFlowStdioServer } from "./server.js";
 
-export * from "./daemon-gateway.js";
-export * from "./local-daemon-gateway.js";
-export * from "./server.js";
-export * from "./tools/index.js";
+export type { DaemonGateway } from "./daemon-gateway.js";
+export {
+  SMARTFLOW_EXECUTE_DESCRIPTION,
+  SMARTFLOW_MCP_INSTRUCTIONS
+} from "./server.js";
+export { createToolHandlers } from "./tools/index.js";
 
 export interface SmartFlowMcpGatewayOptions {
   executablePath: string;

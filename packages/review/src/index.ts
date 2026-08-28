@@ -1,6 +1,31 @@
-export * from "./host-action.js";
-export * from "./repair-loop.js";
-export * from "./review-decision.js";
-export * from "./review-gate.js";
-export * from "./review-prompt.js";
-export * from "./agents/index.js";
+export { createReviewHostAction } from "./host-action.js";
+export {
+  assessRepairProgress,
+  assessRepairScope,
+  renderRepairFeedback,
+  renderRepairTaskLines
+} from "./repair-loop.js";
+export type { RepairRound } from "./repair-loop.js";
+export {
+  planReviewDecision,
+  REPAIR_ROUND_LIMIT
+} from "./review-decision.js";
+export {
+  assertLeaderDecision,
+  evaluateReviewGate
+} from "./review-gate.js";
+export {
+  buildReviewPrompt,
+  reviewOutputJsonSchema
+} from "./review-prompt.js";
+export {
+  CodexAdapter,
+  CodexDesktopAdapter,
+  createCodexEventState,
+  reduceCodexEventLine
+} from "./agents/index.js";
+export type {
+  AgentAdapter,
+  AgentRunOutcome,
+  AgentRunRequest
+} from "./agents/index.js";

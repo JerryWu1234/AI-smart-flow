@@ -30,11 +30,11 @@ export async function materializeGitSnapshot(
     relativeDestination.startsWith(`..${sep}`) ||
     isAbsolute(relativeDestination)
   ) {
-    throw new WorkspaceError("PATH_OUTSIDE_WORKSPACE", "Revision Workspace must be inside its Run Data Dir");
+    throw new WorkspaceError("PATH_OUTSIDE_WORKSPACE", "Run Workspace must be inside its Run Data Dir");
   }
   const destination = resolve(dataDirectory, relativeDestination);
   if (!isInside(dataDirectory, destination)) {
-    throw new WorkspaceError("PATH_OUTSIDE_WORKSPACE", "Revision Workspace must be inside its Run Data Dir");
+    throw new WorkspaceError("PATH_OUTSIDE_WORKSPACE", "Run Workspace must be inside its Run Data Dir");
   }
   let current = dataDirectory;
   for (const part of relativeDestination.split(sep).slice(0, -1)) {
@@ -45,7 +45,7 @@ export async function materializeGitSnapshot(
     });
     if (stats === undefined) break;
     if (stats.isSymbolicLink()) {
-      throw new WorkspaceError("PATH_OUTSIDE_WORKSPACE", "Revision Workspace parent is a symlink");
+      throw new WorkspaceError("PATH_OUTSIDE_WORKSPACE", "Run Workspace parent is a symlink");
     }
   }
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });

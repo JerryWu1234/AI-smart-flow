@@ -15,3 +15,13 @@ export function createTasksSource(overrides: {
 ${tasks}
 `;
 }
+
+export function createHostCanonicalTasksSource(): string {
+  return `# Tasks
+
+## M01 User authentication
+
+- [ ] T001 [M01] Implement login validation in \`src/auth/login.ts\` — 验收：valid users can log in and invalid passwords return an explicit error
+- [ ] T002 [P] [M01] Add login coverage in \`src/auth/login.test.ts\` — 验收：success and failure cases pass
+`;
+}

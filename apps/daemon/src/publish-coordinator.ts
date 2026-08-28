@@ -20,7 +20,6 @@ import {
   type WorkspaceApplyAdapter
 } from "@smartflow/publish";
 import { StateStore, type ProjectState, type RunRecord } from "@smartflow/state-store";
-import { taskManifestSchema } from "@smartflow/task-manifest";
 import {
   cleanupGitRunTemporaryState,
   getCandidateBaselineHash,
@@ -78,7 +77,6 @@ function semanticHash(value: Record<string, unknown>, hashKey: string): boolean 
 
 interface PublishExecutionIdentity {
   fence: number;
-  revision: number;
   generation?: number;
   attemptId?: string;
 }
@@ -87,7 +85,6 @@ function publishIdentity(run: RunRecord): PublishExecutionIdentity {
   const attempt = run.workerAttempts.at(-1);
   return {
     fence: run.fence,
-    revision: run.revision,
     ...(attempt === undefined
       ? {}
       : { generation: attempt.generation }),
@@ -97,13 +94,11 @@ function publishIdentity(run: RunRecord): PublishExecutionIdentity {
 
 function identityGuards(identity: PublishExecutionIdentity): {
   expectedFence: number;
-  expectedRevision: number;
   expectedGeneration?: number;
   expectedAttemptId?: string;
 } {
   return {
     expectedFence: identity.fence,
-    expectedRevision: identity.revision,
     ...(identity.generation === undefined ? {} : { expectedGeneration: identity.generation }),
     ...(identity.attemptId === undefined ? {} : { expectedAttemptId: identity.attemptId })
   };
@@ -119,7 +114,6 @@ function identityMatches(
   return run !== undefined &&
     state.activeRunsByTaskPath[run.canonicalTaskPath] === jobId &&
     run.fence === identity.fence &&
-    run.revision === identity.revision &&
     (identity.generation === undefined || attempt?.generation === identity.generation) &&
     (identity.attemptId === undefined || attempt?.attemptId === identity.attemptId);
 }
@@ -293,7 +287,7 @@ class StateStorePublishAttemptStore implements PublishAttemptStore {
     if (run === undefined) throw new Error("PUBLISH_RUN_MISSING");
     await this.mutations.mutate(
       {
-        requestId: `publish:${attempt.operationId}:begin-recovery:r${String(run.revision)}:${attempt.status}`,
+        requestId: `publish:${attempt.operationId}:begin-recovery:${attempt.status}`,
         payload: attempt,
         expectedJobId: this.jobId,
         ...identityGuards(this.identity),
@@ -362,7 +356,6 @@ function manualPublishRequested(run: RunRecord): boolean {
   if (typeof marker !== "object" || marker === null || Array.isArray(marker)) return false;
   const value = marker as Record<string, unknown>;
   return value.status === "REQUESTED" &&
-    value.revision === run.revision &&
     new Set(["PUBLISH_ADAPTER_UNAVAILABLE", "PUBLISH_PRECHECK_CONFLICT"])
       .has(typeof value.pauseCode === "string" ? value.pauseCode : "");
 }
@@ -397,9 +390,6 @@ export class PublishCoordinator {
       throw new Error(`PUBLISH_ARTIFACT_INTEGRITY_BLOCKED:${artifactFailure}`);
     }
     const identity = publishIdentity(run);
-    const manifest = taskManifestSchema.parse(JSON.parse(
-      new TextDecoder().decode(await this.store.readArtifact(run.taskManifest))
-    ));
     const baseline = JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(run.baseline))
     ) as GitWorkspaceSnapshot;
@@ -419,7 +409,6 @@ export class PublishCoordinator {
     );
     const candidateHash = getCandidateHash(source.candidate);
     if (
-      manifest.revision !== run.revision ||
       !verifyCandidate(source.candidate) ||
       getCandidateBaselineHash(source.candidate) !== baselineHash ||
       !semanticHash(reviewValue as Record<string, unknown>, "reviewHash") ||
@@ -461,7 +450,6 @@ export class PublishCoordinator {
       {
         projectId: state.projectId,
         jobId,
-        revision: run.revision,
         candidateHash,
         reviewHash
       },
@@ -478,7 +466,7 @@ export class PublishCoordinator {
     const phase: RunRecord["phase"] = service.status === "COMMITTED" ? "COMPLETED" : "PAUSED";
     const completed = await this.mutations.mutate(
       {
-        requestId: `publish-result:${jobId}:r${String(run.revision)}:${service.status}`,
+        requestId: `publish-result:${jobId}:${service.status}`,
         payload: service,
         expectedJobId: jobId,
         ...identityGuards(identity),
@@ -553,12 +541,10 @@ export class PublishCoordinator {
       const operationHash = operationsHash(source.operations);
       if (
         typeof reviewHash !== "string" ||
-        run.publish.revision !== run.revision ||
         operationHash !== expectedOperationsHash ||
         stableOperationId({
           projectId: state.projectId,
           jobId,
-          revision: run.revision,
           candidateHash: getCandidateHash(source.candidate),
           reviewHash,
           operationsHash: operationHash
@@ -599,18 +585,22 @@ export class PublishCoordinator {
     const operationId = stableOperationId({
       projectId: state.projectId,
       jobId: run.jobId,
-      revision: run.revision,
       candidateHash,
       reviewHash,
       operationsHash: operationHash
     });
+    const confirmationRequestHash = hash(confirmationRequestId);
     const committed = await this.mutations.mutate<{
       phase: RunRecord["phase"];
       service: PublishServiceResult;
     }>(
       {
-        requestId: `manual-publish-confirm:${run.jobId}:r${String(run.revision)}:${operationId}:${hash(confirmationRequestId)}`,
-        payload: { operationId, operationsHash: operationHash },
+        requestId: `manual-publish-confirm:${run.jobId}:${operationId}:${confirmationRequestHash}`,
+        payload: {
+          operationId,
+          operationsHash: operationHash,
+          confirmationRequestHash
+        },
         expectedJobId: run.jobId,
         ...identityGuards(identity),
         expectedPhases: ["READY_TO_PUBLISH"]
@@ -628,6 +618,9 @@ export class PublishCoordinator {
           !Array.isArray(recovery.manualPublishConfirmation)
           ? recovery.manualPublishConfirmation as Record<string, unknown>
           : {};
+        if (marker.requestId !== confirmationRequestId) {
+          throw new Error("MANUAL_PUBLISH_CONFIRMATION_STALE");
+        }
         if (!observation.matches) {
           const service: PublishServiceResult = {
             status: "MANUAL_PUBLISH_REQUIRED",
@@ -637,6 +630,8 @@ export class PublishCoordinator {
           recovery.manualPublishConfirmation = {
             ...marker,
             status: "MISMATCH",
+            operationId,
+            confirmationRequestHash,
             checkedAt: new Date().toISOString(),
             conflicts: observation.conflicts
           };
@@ -674,7 +669,6 @@ export class PublishCoordinator {
           operationId,
           operationsHash: operationHash,
           adapterId: "manual-confirmation-v1",
-          revision: run.revision,
           status: "COMMITTED",
           result
         };
@@ -760,8 +754,8 @@ export class PublishCoordinator {
     }
     const approvedPath = active.approvedTasks?.path;
     const approvedHash = active.approvedTasks?.sourceHash;
-    const activeResult = active.gitWorkspace?.revisions[String(active.revision)]?.resultSnapshot;
-    const expectedResult = expected.gitWorkspace?.revisions[String(expected.revision)]?.resultSnapshot;
+    const activeResult = active.gitWorkspace?.current.resultSnapshot;
+    const expectedResult = expected.gitWorkspace?.current.resultSnapshot;
     if (
       typeof approvedPath !== "string" ||
       typeof approvedHash !== "string" ||
@@ -779,11 +773,11 @@ export class PublishCoordinator {
   }
 
   private async gitSource(run: RunRecord): Promise<GitPublishSource> {
-    const revisionWorkspace = run.gitWorkspace?.revisions[String(run.revision)];
+    const currentWorkspace = run.gitWorkspace?.current;
     if (
       run.candidate === undefined ||
       run.gitWorkspace === undefined ||
-      revisionWorkspace?.resultSnapshot === undefined
+      currentWorkspace?.resultSnapshot === undefined
     ) {
       throw new Error("PUBLISH_GIT_SOURCE_MISSING");
     }
@@ -791,7 +785,7 @@ export class PublishCoordinator {
       new TextDecoder().decode(await this.store.readArtifact(run.candidate))
     ) as Candidate;
     const resultSnapshot = JSON.parse(
-      new TextDecoder().decode(await this.store.readArtifact(revisionWorkspace.resultSnapshot))
+      new TextDecoder().decode(await this.store.readArtifact(currentWorkspace.resultSnapshot))
     ) as GitWorkspaceSnapshot;
     return {
       candidate,

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { ProjectRuntime } from "@smartflow/daemon";
 import { StructuredLogger } from "@smartflow/observability";
-import { PiEventNormalizer } from "@smartflow/provider-pi";
+import { PiEventNormalizer } from "../../packages/provider-pi/src/event-normalizer.js";
 import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 

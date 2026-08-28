@@ -5,15 +5,13 @@ import type { WorkerStartInput } from "@smartflow/provider-core";
 import type { SandboxedSpawnRequest } from "@smartflow/workspace";
 
 import {
-  PI_API_KEY_ENVIRONMENT_VARIABLE,
+  API_KEY_ENVIRONMENT_VARIABLE,
   PI_INTERNAL_PROVIDER_ID,
   type PiRuntimeConfiguration
 } from "./runtime-config.js";
 
 export interface PiRuntimeResources {
   spawnRequest: SandboxedSpawnRequest;
-  runtimeDirectory: string;
-  sessionDirectory: string;
 }
 
 function piWorkerEntryPath(): string {
@@ -43,14 +41,14 @@ export function piModelEnvironment(
   credential: string
 ): Record<string, string> {
   return {
-    SMARTFLOW_PI_API: configuration.api,
-    SMARTFLOW_PI_BASE_URL: configuration.baseUrl,
-    SMARTFLOW_PI_MODEL: configuration.modelId,
+    API: configuration.api,
+    BASE_URL: configuration.baseUrl,
+    MODEL: configuration.modelId,
     SMARTFLOW_PI_CONTEXT_WINDOW: String(configuration.contextWindow),
     SMARTFLOW_PI_MAX_TOKENS: String(configuration.maxTokens),
     SMARTFLOW_PI_THINKING: configuration.thinkingLevel,
     SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: String(configuration.attemptDeadlineMs),
-    [PI_API_KEY_ENVIRONMENT_VARIABLE]: credential
+    [API_KEY_ENVIRONMENT_VARIABLE]: credential
   };
 }
 
@@ -67,8 +65,6 @@ export function createPiRuntimeResources(
   const homeDirectory = resolve(runtimeDirectory, "home");
   const tempDirectory = resolve(runtimeDirectory, "tmp");
   return {
-    runtimeDirectory,
-    sessionDirectory,
     spawnRequest: {
       attemptId: input.attemptId,
       configHash: input.providerRuntimeConfigHash,
@@ -92,7 +88,10 @@ export function createPiRuntimeResources(
         "--tools",
         "read,bash,edit,write,grep,find,ls",
         "--session-dir",
-        sessionDirectory
+        sessionDirectory,
+        ...(input.resumeSession === undefined
+          ? []
+          : ["--session", input.resumeSession.sessionFile])
       ],
       cwd: input.workspaceDir,
       workspaceRoot: input.workspaceDir,

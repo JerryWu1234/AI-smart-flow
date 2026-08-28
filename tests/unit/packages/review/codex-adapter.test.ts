@@ -9,9 +9,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CodexAdapter,
-  type AgentRunRequest,
-  type CodexKill
+  type AgentRunRequest
 } from "@smartflow/review";
+
+type CodexAdapterOptions = NonNullable<ConstructorParameters<typeof CodexAdapter>[0]>;
+type CodexKill = NonNullable<CodexAdapterOptions["kill"]>;
 
 class FakeChildProcess extends EventEmitter {
   public readonly stdout = new PassThrough();
@@ -68,7 +70,7 @@ function request(root: string, overrides: Partial<AgentRunRequest> = {}): AgentR
   };
 }
 
-function harness(options: { forceKillAfterMs?: number } = {}): Harness {
+function harness(options: { forceKillAfterMs?: number; spawnError?: Error } = {}): Harness {
   const children: FakeChildProcess[] = [];
   const spawn = vi.fn((
     executable: string,
@@ -78,6 +80,7 @@ function harness(options: { forceKillAfterMs?: number } = {}): Harness {
     void executable;
     void argv;
     void spawnOptions;
+    if (options.spawnError !== undefined) throw options.spawnError;
     const child = new FakeChildProcess(4_000 + children.length);
     children.push(child);
     return child.asChildProcess();
@@ -87,10 +90,15 @@ function harness(options: { forceKillAfterMs?: number } = {}): Harness {
     executable: "/fake/codex",
     spawn,
     kill,
-    forceKillAfterMs: options.forceKillAfterMs ?? 1_000,
-    probeTimeoutMs: 1_000
+    forceKillAfterMs: options.forceKillAfterMs ?? 1_000
   });
   return { adapter, children, spawn, kill };
+}
+
+function spawnedArgv(subject: Harness, index = 0): string[] {
+  const argv = subject.spawn.mock.calls[index]?.[1] as readonly string[] | undefined;
+  if (argv === undefined) throw new Error("codex was not spawned");
+  return [...argv];
 }
 
 async function childAt(children: FakeChildProcess[], index = 0): Promise<FakeChildProcess> {
@@ -114,27 +122,25 @@ afterEach(async () => {
 });
 
 describe("CodexAdapter", () => {
-  it("probes the injected executable and reports its version", async () => {
-    const subject = harness();
-    const probe = subject.adapter.probe();
-    const child = await childAt(subject.children);
+  it("reports executable startup failures from the real Review attempt", async () => {
+    const root = await temporaryDirectory();
+    const subject = harness({ spawnError: new Error("spawn ENOENT") });
+    const runRequest = request(root);
 
-    child.stdout.write("codex-cli 0.146.0\n");
-    child.complete(0);
-
-    await expect(probe).resolves.toEqual({
-      available: true,
-      agentId: "codex",
-      version: "codex-cli 0.146.0"
+    await expect(subject.adapter.createSession(runRequest)).resolves.toEqual({
+      kind: "FAILED",
+      code: "CODEX_SPAWN_FAILED",
+      message: "Unable to start Codex: spawn ENOENT"
     });
-    expect(subject.spawn.mock.calls[0]?.[0]).toBe("/fake/codex");
-    expect(subject.spawn.mock.calls[0]?.[1]).toEqual(["--version"]);
+    expect(subject.spawn).toHaveBeenCalledTimes(1);
+    expect(spawnedArgv(subject)[0]).toBe("exec");
+    expect(spawnedArgv(subject)).not.toContain("--version");
   });
 
   it("uses CREATE argv and ignores non-fatal stderr on a successful run", async () => {
     const root = await temporaryDirectory();
     const subject = harness();
-    const runRequest = request(root, { model: "review-model" });
+    const runRequest = request(root, { model: "review-model", effort: "xhigh" });
     const run = subject.adapter.createSession(runRequest);
     const child = await childAt(subject.children);
 
@@ -152,18 +158,20 @@ describe("CodexAdapter", () => {
     expect(subject.spawn.mock.calls[0]?.[1]).toEqual([
       "exec",
       "--json",
-      "--sandbox",
-      "read-only",
+      "--skip-git-repo-check",
+      "--ignore-user-config",
+      "-c",
+      'sandbox_mode="read-only"',
       "--output-schema",
       runRequest.outputSchemaPath,
       "--output-last-message",
       runRequest.outputPath,
-      "--cd",
-      root,
-      "--skip-git-repo-check",
-      "--ignore-user-config",
       "-m",
       "review-model",
+      "-c",
+      'model_reasoning_effort="xhigh"',
+      "--cd",
+      root,
       runRequest.prompt
     ]);
     expect(subject.spawn.mock.calls[0]?.[2]).toMatchObject({
@@ -175,13 +183,14 @@ describe("CodexAdapter", () => {
     expect(subject.spawn.mock.calls[0]?.[1]).not.toContain("--ephemeral");
   });
 
-  it("uses the minimal RESUME argv and preserves the bound session", async () => {
+  it("forwards model and effort on RESUME without flags codex exec resume rejects", async () => {
     const root = await temporaryDirectory();
     const subject = harness();
     const runRequest = request(root, {
       runId: "review-attempt-2",
       prompt: "Correct the rejected review.",
-      model: "must-not-be-forwarded-on-resume"
+      model: "review-model",
+      effort: "low"
     });
     const run = subject.adapter.resume("thread-resume", runRequest);
     const child = await childAt(subject.children);
@@ -194,22 +203,62 @@ describe("CodexAdapter", () => {
       kind: "COMPLETED",
       sessionId: "thread-resume"
     });
-    expect(subject.spawn.mock.calls[0]?.[1]).toEqual([
+    const resumeArgv = spawnedArgv(subject);
+    expect(resumeArgv).toEqual([
       "exec",
       "resume",
       "thread-resume",
       "--json",
-      "--sandbox",
-      "read-only",
+      "--skip-git-repo-check",
+      "--ignore-user-config",
+      "-c",
+      'sandbox_mode="read-only"',
       "--output-schema",
       runRequest.outputSchemaPath,
       "--output-last-message",
       runRequest.outputPath,
-      "--cd",
-      root,
+      "-m",
+      "review-model",
+      "-c",
+      'model_reasoning_effort="low"',
       runRequest.prompt
     ]);
+    // `codex exec resume` rejects both of these outright, so forwarding either
+    // one breaks every repair round.
+    expect(resumeArgv).not.toContain("--sandbox");
+    expect(resumeArgv).not.toContain("--cd");
+    // The worktree still comes from the spawned process instead.
+    expect(subject.spawn.mock.calls[0]?.[2]).toMatchObject({ cwd: root });
   });
+
+  it.each(["CREATE", "RESUME"] as const)(
+    "omits model and effort flags on %s when neither is configured",
+    async (mode) => {
+      const root = await temporaryDirectory();
+      const subject = harness();
+      const runRequest = request(root);
+      const run = mode === "CREATE"
+        ? subject.adapter.createSession(runRequest)
+        : subject.adapter.resume("thread-bare", runRequest);
+      const child = await childAt(subject.children);
+
+      await writeFile(runRequest.outputPath, JSON.stringify({ tasks: [] }), "utf8");
+      emitSuccess(child, "thread-bare");
+      child.complete(0);
+
+      await expect(run).resolves.toMatchObject({ kind: "COMPLETED" });
+      const argv = spawnedArgv(subject);
+      expect(argv).not.toContain("-m");
+      expect(argv.filter((token) => token === "-c")).toHaveLength(1);
+      expect(argv).toContain('sandbox_mode="read-only"');
+      expect(argv.some((token) => token.startsWith("model_reasoning_effort"))).toBe(false);
+      if (mode === "RESUME") {
+        expect(argv).not.toContain("--sandbox");
+        expect(argv).not.toContain("--cd");
+        expect(subject.spawn.mock.calls[0]?.[2]).toMatchObject({ cwd: root });
+      }
+    }
+  );
 
   it("removes stale output and fails when Codex does not produce a new file", async () => {
     const root = await temporaryDirectory();

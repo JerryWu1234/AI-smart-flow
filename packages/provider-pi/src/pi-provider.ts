@@ -20,7 +20,7 @@ import {
 } from "./mcp-model-extension.js";
 import { PiRpcClient } from "./rpc-client.js";
 import {
-  PI_API_KEY_ENVIRONMENT_VARIABLE,
+  API_KEY_ENVIRONMENT_VARIABLE,
   PI_CODING_AGENT_VERSION,
   PI_NODE_MINIMUM,
   parsePiRuntimeConfiguration,
@@ -49,7 +49,6 @@ interface ActiveAttempt {
 export interface PiProviderOptions {
   runtimeConfig: PiRuntimeConfiguration | Readonly<Record<string, unknown>>;
   environment?: Readonly<Record<string, string | undefined>>;
-  workerEntryPath?: string;
   createSandbox?: (registryPath?: string) => ExecutionSandboxAdapter;
 }
 
@@ -94,7 +93,7 @@ export class PiProvider implements WorkerProvider {
   }
 
   public async probe(): Promise<ProviderProbeResult> {
-    const credential = this.environment[PI_API_KEY_ENVIRONMENT_VARIABLE];
+    const credential = this.environment[API_KEY_ENVIRONMENT_VARIABLE];
     const details = {
       sdk: `@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}`,
       nodeMinimum: PI_NODE_MINIMUM,
@@ -116,7 +115,7 @@ export class PiProvider implements WorkerProvider {
       return {
         available: false,
         code: "PROVIDER_UNAVAILABLE",
-        reason: `${PI_API_KEY_ENVIRONMENT_VARIABLE} is missing`,
+        reason: `${API_KEY_ENVIRONMENT_VARIABLE} is missing`,
         capabilities,
         details
       };
@@ -171,7 +170,7 @@ export class PiProvider implements WorkerProvider {
       };
       return;
     }
-    const credential = this.environment[PI_API_KEY_ENVIRONMENT_VARIABLE];
+    const credential = this.environment[API_KEY_ENVIRONMENT_VARIABLE];
     if (credential === undefined || credential.trim().length === 0) {
       yield {
         type: "FAILED",
@@ -217,13 +216,9 @@ export class PiProvider implements WorkerProvider {
       const resources = createPiRuntimeResources(
         input,
         this.configuration,
-        credential,
-        this.options.workerEntryPath
+        credential
       );
       const handle = await sandbox.spawn(resources.spawnRequest);
-      handle.stderr.on("data", (chunk: unknown) => {
-        redactPiValue(String(chunk), redactionRoots, [credential]);
-      });
       handle.stderr.resume();
       active = { handle, canceled: false };
       this.active.set(input.attemptId, active);
@@ -251,6 +246,12 @@ export class PiProvider implements WorkerProvider {
       const piSessionId = state.sessionId;
       if (typeof piSessionId !== "string" || piSessionId.length === 0) {
         throw new Error("PI_SESSION_ID_MISSING");
+      }
+      if (
+        input.resumeSession !== undefined &&
+        piSessionId !== input.resumeSession.expectedPiSessionId
+      ) {
+        throw new Error("PI_SESSION_RESUME_ID_MISMATCH");
       }
       yield {
         type: "STARTED",
@@ -307,6 +308,19 @@ export class PiProvider implements WorkerProvider {
         if (event.type === "agent_end" && event.willRetry !== true) {
           const last = responseData(await client.request({ type: "get_last_assistant_text" })).text;
           const blocked = normalizer.blockedTerminal(typeof last === "string" ? last : "");
+          const finalState = responseData(await client.request({ type: "get_state" }));
+          const finalSessionId = finalState.sessionId;
+          const sessionFile = finalState.sessionFile;
+          if (
+            typeof finalSessionId !== "string" ||
+            finalSessionId.length === 0 ||
+            finalSessionId !== piSessionId
+          ) {
+            throw new Error("PI_SESSION_ID_CHANGED");
+          }
+          if (typeof sessionFile !== "string" || sessionFile.length === 0) {
+            throw new Error("PI_SESSION_FILE_MISSING");
+          }
           terminal = true;
           const stopped = await handle.terminate();
           if (!stopped.treeEmpty) throw new Error("PI_CONTAINMENT_RECONCILIATION_REQUIRED");
@@ -320,7 +334,14 @@ export class PiProvider implements WorkerProvider {
           } else if (active.canceled) {
             yield { type: "CANCELED", attemptId: input.attemptId };
           } else if (blocked !== undefined) yield blocked;
-          else yield { type: "COMPLETED", attemptId: input.attemptId, piSessionId };
+          else {
+            yield {
+              type: "COMPLETED",
+              attemptId: input.attemptId,
+              piSessionId: finalSessionId,
+              sessionFile
+            };
+          }
         } else {
           nextEvent = iterator.next();
         }

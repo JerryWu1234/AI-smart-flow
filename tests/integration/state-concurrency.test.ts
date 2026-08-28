@@ -2,11 +2,8 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { ProjectMutationExecutor } from "@smartflow/daemon";
 import {
-  ProjectMutationExecutor,
-} from "@smartflow/daemon";
-import {
-  ProjectMutationSession,
   StateStore,
   StateStoreError,
   type ProjectState,
@@ -61,7 +58,6 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
         requestId: "publish-submit-handoff",
         payload: { status: "SUBMITTED" },
         expectedJobId: "job-1",
-        expectedRevision: 1,
         expectedPhases: ["PUBLISHING"]
       },
       (state) => ({ nextState: state, response: { status: "SUBMITTED" } }),
@@ -84,7 +80,6 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
         requestId: "cancel-during-publish-handoff",
         payload: { phase: "CANCELING" },
         expectedJobId: "job-1",
-        expectedRevision: 1,
         expectedPhases: ["PUBLISHING"]
       },
       (state) => {
@@ -142,23 +137,40 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
     expect((await store.readState()).stateVersion).toBe(state.stateVersion + 1);
   });
 
-  it("preempts an older writer fence and replays the original canonical response", async () => {
+  it("advances the active run fence and replays the original canonical response", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const store = new StateStore(resolve(harness.dataDir, "state-concurrency"));
-    await store.initialize(
-      activeState()
+    await store.initialize(activeState());
+    const initial = await store.readState();
+    const initialRun = initial.runs["job-1"];
+    if (initialRun === undefined) throw new Error("run missing");
+    const staleFence = initialRun.fence;
+    const executor = new ProjectMutationExecutor(store);
+    const advanced = await executor.mutate(
+      {
+        requestId: "advance-writer-fence",
+        payload: { writer: "writer-2" },
+        expectedJobId: "job-1",
+        expectedFence: staleFence,
+        advanceFence: true
+      },
+      (state, context) => ({
+        nextState: state,
+        response: { fence: context.fence }
+      })
     );
-    const opened = await Promise.all([
-      ProjectMutationSession.open(store, "writer-1"),
-      ProjectMutationSession.open(store, "writer-2")
-    ]);
-    const [superseded, session] = [...opened].sort((left, right) => left.fence - right.fence);
-    if (superseded === undefined || session === undefined) throw new Error("sessions missing");
-    expect(session.fence).toBe(superseded.fence + 1);
+    const activeFence = advanced.state.runs["job-1"]?.fence;
+    if (activeFence === undefined) throw new Error("advanced run missing");
+    expect(activeFence).toBe(staleFence + 1);
     await expectStateError(
-      superseded.mutate(
-        { requestId: "superseded-writer", payload: {} },
+      executor.mutate(
+        {
+          requestId: "superseded-writer",
+          payload: {},
+          expectedJobId: "job-1",
+          expectedFence: staleFence
+        },
         (state) => ({ nextState: state, response: { accepted: false } })
       ),
       "STALE_FENCE"
@@ -168,9 +180,9 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
       requestId: "request-1",
       payload: { operation: "start", jobId: "job-1" },
       expectedJobId: "job-1",
-      expectedRevision: 1
+      expectedFence: activeFence
     };
-    const first = await session.mutate(request, (state, context) => {
+    const first = await executor.mutate(request, (state, context) => {
       mutations += 1;
       return {
         nextState: state,
@@ -181,7 +193,7 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
         }
       };
     });
-    const replay = await session.mutate(request, () => {
+    const replay = await executor.mutate(request, () => {
       mutations += 1;
       throw new Error("replayed mutation must not run");
     });
@@ -189,55 +201,59 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
     expect(replay.response).toEqual(first.response);
     expect(mutations).toBe(1);
     await expectStateError(
-      session.mutate({ ...request, payload: { operation: "different" } }, () => {
+      executor.mutate({ ...request, payload: { operation: "different" } }, () => {
         throw new Error("must not run");
       }),
       "IDEMPOTENCY_KEY_REUSED"
     );
-    await session.close();
-    await superseded.close();
   });
 
-  it("rejects stale stateVersion, revision, and fence", async () => {
+  it("rejects stale stateVersion and fence", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const store = new StateStore(resolve(harness.dataDir, "state-cas"));
-    await store.initialize(
-      activeState()
-    );
-    const session = await ProjectMutationSession.open(store, "writer-1");
+    await store.initialize(activeState());
+    const initial = await store.readState();
+    const run = initial.runs["job-1"];
+    if (run === undefined) throw new Error("run missing");
+    const executor = new ProjectMutationExecutor(store);
     await expectStateError(
-      session.mutate(
-        { requestId: "stale-state", payload: {}, expectedStateVersion: 0 },
+      executor.mutate(
+        {
+          requestId: "stale-state",
+          payload: {},
+          expectedStateVersion: initial.stateVersion + 1
+        },
         () => {
           throw new Error("must not run");
         }
       ),
       "STATE_VERSION_MISMATCH"
     );
+    await store.writeState({
+      ...initial,
+      projectFence: initial.projectFence + 1,
+      stateVersion: initial.stateVersion + 1,
+      runs: {
+        ...initial.runs,
+        "job-1": { ...run, fence: run.fence + 1 }
+      },
+      updatedAt: new Date().toISOString()
+    });
     await expectStateError(
-      session.mutate(
-        { requestId: "stale-revision", payload: {}, expectedJobId: "job-1", expectedRevision: 2 },
+      executor.mutate(
+        {
+          requestId: "stale-fence",
+          payload: {},
+          expectedJobId: "job-1",
+          expectedFence: run.fence
+        },
         () => {
           throw new Error("must not run");
         }
       ),
-      "REVISION_MISMATCH"
-    );
-    const state = await store.readState();
-    await store.writeState({
-      ...state,
-      projectFence: session.fence + 1,
-      stateVersion: state.stateVersion + 1,
-      updatedAt: new Date().toISOString()
-    });
-    await expectStateError(
-      session.mutate({ requestId: "stale-fence", payload: {} }, () => {
-        throw new Error("must not run");
-      }),
       "STALE_FENCE"
     );
-    await expect(session.close()).resolves.toBeUndefined();
   });
 
   it("serializes background and cancel mutations without overwriting CANCELING", async () => {
@@ -255,7 +271,6 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
         requestId: "cancel-job-1",
         payload: { jobId: "job-1", reason: "test" },
         expectedJobId: "job-1",
-        expectedRevision: 1
       },
       async (state) => {
         cancelBuilds += 1;
@@ -278,7 +293,6 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
         requestId: "worker-terminal-job-1",
         payload: { jobId: "job-1", event: "completed" },
         expectedJobId: "job-1",
-        expectedRevision: 1
       },
       (state) => {
         const run = state.runs["job-1"];
@@ -300,7 +314,6 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
         requestId: "cancel-job-1",
         payload: { jobId: "job-1", reason: "test" },
         expectedJobId: "job-1",
-        expectedRevision: 1
       },
       () => {
         cancelBuilds += 1;
@@ -322,7 +335,6 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
           workerAttempts: [{
             attemptId: "attempt-old",
             generation: 4,
-            revision: 1,
             providerRuntimeConfigHash: "a".repeat(64),
             status: "RUNNING",
             piSessionId: "pi-session-old",
@@ -338,7 +350,6 @@ describe("single writer, fence, CAS, and idempotent receipts", () => {
       payload: { callback: "worker", result: "accepted" },
       expectedJobId: "job-1",
       expectedFence: 3,
-      expectedRevision: 1,
       expectedGeneration: 4,
       expectedAttemptId: "attempt-old",
       expectedPhases: ["RUNNING"] as const

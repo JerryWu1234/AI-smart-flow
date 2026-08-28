@@ -1,5 +1,5 @@
 import type { TaskReview } from "@smartflow/protocol";
-import type { ManifestTask, TaskManifest } from "@smartflow/task-manifest";
+import type { TaskManifest } from "@smartflow/task-manifest";
 
 export interface RepairRound {
   failureIds: string[];
@@ -20,16 +20,9 @@ export interface RepairAssessment {
   authorizedCriterionIds: string[];
 }
 
-export interface DerivedRepairApproval {
-  kind: "USER" | "LEADER_REPAIR";
-  parentRevision: number | null;
-  authorizedCriterionIds: string[];
+export interface RepairScopeAssessment {
+  inScope: boolean;
   reasons: string[];
-}
-
-interface RepairBinding {
-  parentRevision: number;
-  criterionId: string;
 }
 
 function stableProblems(round: RepairRound): Set<string> {
@@ -56,10 +49,6 @@ function relevantPathsChanged(previous: RepairRound, current: RepairRound): bool
   );
 }
 
-function taskForCriterion(manifest: TaskManifest, criterionId: string): ManifestTask | undefined {
-  return manifest.tasks.find((task) => task.id === criterionId);
-}
-
 function safeInline(value: string): string {
   return value
     .replace(/[\r\n`]+/gu, " ")
@@ -74,13 +63,70 @@ function repairTaskLine(
   issue: TaskReview["issues"][number],
   taskNumber: number
 ): string {
-  const parentTask = taskForCriterion(manifest, task.id);
-  if (parentTask === undefined) throw new Error("REPAIR_PARENT_TASK_MISSING");
+  const parentTask = manifest.tasks.find((candidate) => candidate.id === task.id);
+  const module = parentTask?.module ?? manifest.tasks[0]?.module;
+  if (module === undefined) throw new Error("REPAIR_PARENT_TASK_MISSING");
   const suggestedFix = issue.suggestedFix;
   const guidance = suggestedFix === null
     ? safeInline(issue.message)
     : `${safeInline(issue.message)}；建议：${safeInline(suggestedFix)}`;
-  return `- [ ] T${String(taskNumber).padStart(3, "0")} [${parentTask.module}] Repair \`${safeInline(issue.path)}\` — 验收：${guidance}; parentRevision=${String(manifest.revision)}; criterionId=${task.id}`;
+  return `- [ ] T${String(taskNumber).padStart(3, "0")} [${module}] Repair \`${safeInline(issue.path)}\` — 验收：${guidance}; criterionId=${task.id}`;
+}
+
+export function assessRepairScope(
+  manifest: TaskManifest,
+  tasks: readonly TaskReview[]
+): RepairScopeAssessment {
+  const manifestTasks = new Map(manifest.tasks.map((task) => [task.id, task] as const));
+  const reasons: string[] = [];
+  for (const reviewTask of tasks) {
+    const manifestTask = manifestTasks.get(reviewTask.id);
+    if (manifestTask === undefined) {
+      reasons.push(`REVIEW_TASK_OUT_OF_SCOPE:${reviewTask.id}`);
+      continue;
+    }
+    for (const issue of reviewTask.issues) {
+      if (!manifestTask.filePaths.includes(issue.path)) {
+        reasons.push(`REVIEW_ISSUE_PATH_OUT_OF_SCOPE:${reviewTask.id}:${issue.path}`);
+      }
+    }
+  }
+  return { inScope: reasons.length === 0, reasons };
+}
+
+export function renderRepairTaskLines(
+  manifest: TaskManifest,
+  tasks: readonly TaskReview[],
+  firstTaskNumber = 900
+): string[] {
+  const issues = tasks.flatMap((task) =>
+    task.issues.map((issue) => ({ task, issue }))
+  );
+  return issues.map(({ task, issue }, index) =>
+    repairTaskLine(manifest, task, issue, firstTaskNumber + index)
+  );
+}
+
+export function renderRepairFeedback(tasks: readonly TaskReview[]): string {
+  const issues = tasks.flatMap((task) => task.issues.map((issue) => ({ task, issue })));
+  if (issues.length === 0) throw new Error("REPAIR_REVIEW_HAS_NO_ISSUES");
+  return [
+    "Continue working on the same approved task in the current workspace.",
+    "",
+    "The reviewer found these issues in your latest implementation:",
+    "",
+    ...issues.flatMap(({ task, issue }, index) => [
+      ...(index === 0 ? [] : [""]),
+      `Task ${task.id} — ${String(task.completionPercentage)}% complete`,
+      `File: ${safeInline(issue.path)}`,
+      `Problem: ${safeInline(issue.message)}`,
+      ...(issue.suggestedFix === null
+        ? []
+        : [`Suggested fix: ${safeInline(issue.suggestedFix)}`])
+    ]),
+    "",
+    "Fix all reported issues. Re-check the complete original task.md and stop when the implementation is ready for another review. Do not modify task.md."
+  ].join("\n");
 }
 
 export function assessRepairProgress(
@@ -96,12 +142,11 @@ export function assessRepairProgress(
   const noProgressCount = currentProblems.size === 0 || problemsReduced || pathsChanged
     ? 0
     : existingNoProgressCount + 1;
-  const issues = current.tasks.flatMap((task) =>
-    task.issues.map((issue) => ({ task, issue }))
-  );
   const firstTaskNumber = context.firstTaskNumber ?? 900;
-  const repairTasks = issues.map(({ task, issue }, index) =>
-    repairTaskLine(context.parentManifest, task, issue, firstTaskNumber + index)
+  const repairTasks = renderRepairTaskLines(
+    context.parentManifest,
+    current.tasks,
+    firstTaskNumber
   );
   const authorizedCriterionIds = [...new Set(
     current.tasks.filter((task) => task.issues.length > 0).map((task) => task.id)
@@ -111,77 +156,5 @@ export function assessRepairProgress(
     pauseRequired: noProgressCount >= (context.noProgressThreshold ?? 15),
     repairTasks,
     authorizedCriterionIds
-  };
-}
-
-function repairBinding(task: ManifestTask): RepairBinding | undefined {
-  const text = task.acceptanceCriteria.join("; ");
-  const parentRevision = /(?:^|;)\s*parentRevision=(\d+)(?:;|$)/u.exec(text)?.[1];
-  const criterionId = /(?:^|;)\s*criterionId=([^;]+)(?:;|$)/u.exec(text)?.[1]?.trim();
-  if (parentRevision === undefined || criterionId === undefined) return undefined;
-  return {
-    parentRevision: Number.parseInt(parentRevision, 10),
-    criterionId
-  };
-}
-
-function same(valueA: unknown, valueB: unknown): boolean {
-  return JSON.stringify(valueA) === JSON.stringify(valueB);
-}
-
-export function deriveRepairApproval(
-  previous: TaskManifest,
-  proposed: TaskManifest
-): DerivedRepairApproval {
-  const reasons: string[] = [];
-  if (proposed.revision !== previous.revision + 1) reasons.push("REVISION_NOT_NEXT");
-  if (proposed.providerRuntimeConfigHash !== previous.providerRuntimeConfigHash) {
-    reasons.push("PROVIDER_RUNTIME_CHANGED");
-  }
-  if (proposed.allowNoChange !== previous.allowNoChange) {
-    reasons.push("NO_CHANGE_ALLOWANCE_CHANGED");
-  }
-
-  const authorizedCriterionIds = new Set<string>();
-  const previousTasks = new Map(previous.tasks.map((task) => [task.id, task] as const));
-  const proposedTaskIds = new Set(proposed.tasks.map((task) => task.id));
-  for (const task of previous.tasks) {
-    if (!proposedTaskIds.has(task.id)) reasons.push(`PARENT_TASK_REMOVED:${task.id}`);
-  }
-  for (const task of proposed.tasks) {
-    const parentVersion = previousTasks.get(task.id);
-    if (parentVersion !== undefined) {
-      if (!same(task, parentVersion)) reasons.push(`PARENT_TASK_CHANGED:${task.id}`);
-      continue;
-    }
-    const binding = repairBinding(task);
-    if (binding === undefined) {
-      reasons.push(`REPAIR_BINDING_MISSING:${task.id}`);
-      continue;
-    }
-    authorizedCriterionIds.add(binding.criterionId);
-    const parentTask = taskForCriterion(previous, binding.criterionId);
-    if (binding.parentRevision !== previous.revision) {
-      reasons.push(`PARENT_REVISION_MISMATCH:${task.id}`);
-    }
-    if (parentTask === undefined) {
-      reasons.push(`CRITERION_OUT_OF_SCOPE:${task.id}`);
-      continue;
-    }
-    if (
-      task.module !== parentTask.module ||
-      !task.filePaths.every((path) => parentTask.filePaths.includes(path))
-    ) {
-      reasons.push(`TASK_SCOPE_EXPANDED:${task.id}`);
-    }
-  }
-  const kind = reasons.length === 0 && proposed.tasks.length > previous.tasks.length
-    ? "LEADER_REPAIR"
-    : "USER";
-  return {
-    kind,
-    parentRevision: kind === "LEADER_REPAIR" ? previous.revision : null,
-    authorizedCriterionIds: kind === "LEADER_REPAIR" ? [...authorizedCriterionIds].sort() : [],
-    reasons
   };
 }

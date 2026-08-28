@@ -4,7 +4,6 @@ import {
   artifactRefSchema,
   identifierSchema,
   nonNegativeIntegerSchema,
-  positiveIntegerSchema,
   sha256Schema,
   structuredErrorSchema
 } from "./common.js";
@@ -19,7 +18,6 @@ const stateMutationSchema = z
     requestId: identifierSchema,
     projectId: identifierSchema,
     jobId: identifierSchema,
-    expectedRevision: positiveIntegerSchema,
     expectedStateVersion: nonNegativeIntegerSchema
   })
   .strict();
@@ -28,7 +26,6 @@ const mutationResultSchema = z
   .object({
     projectId: identifierSchema,
     jobId: identifierSchema,
-    revision: positiveIntegerSchema,
     stateVersion: nonNegativeIntegerSchema,
     phase: runPhaseSchema
   })
@@ -65,7 +62,6 @@ export const statusInputSchema = z
 export const statusOutputSchema = runSummarySchema;
 
 export const resumeActionSchema = z.enum([
-  "approve_new_manifest_revision",
   "cancel",
   "retry_provider_probe",
   "retry_git_probe",
@@ -79,21 +75,8 @@ export const resumeActionSchema = z.enum([
   "confirm_manual_publish"
 ]);
 
-const reviewTurnMutableActionSchema = resumeActionSchema;
-
-export const revisionApprovalSchema = z
-  .object({
-    kind: z.enum(["USER", "LEADER_REPAIR"]),
-    parentRevision: positiveIntegerSchema.nullable(),
-    authorizedCriterionIds: z.array(z.string().min(1))
-  })
-  .strict();
-
 export const resumeInputSchema = stateMutationSchema.extend({
-  resumeAction: resumeActionSchema,
-  tasksPath: tasksPathSchema.optional(),
-  approvedSourceHash: sha256Schema.optional(),
-  approval: revisionApprovalSchema.optional()
+  resumeAction: resumeActionSchema
 });
 export const resumeOutputSchema = mutationResultSchema;
 
@@ -108,17 +91,12 @@ export const repairDraftSchema = z
   .object({
     sourceArtifact: artifactRefSchema,
     sourceHash: sha256Schema,
+    baseTaskSourceHash: sha256Schema,
+    baseTaskManifestHash: sha256Schema,
     suggestedTasksPath: z.string().min(1),
     appendText: z.string().min(1),
     addedTaskLines: z.array(z.string().min(1)).min(1),
-    reasons: z.array(z.string().min(1)),
-    approval: z
-      .object({
-        kind: z.enum(["USER", "LEADER_REPAIR"]),
-        parentRevision: positiveIntegerSchema.nullable(),
-        authorizedCriterionIds: z.array(z.string().min(1))
-      })
-      .strict()
+    reasons: z.array(z.string().min(1))
   })
   .strict();
 export const publishOutcomeSchema = z
@@ -187,37 +165,6 @@ export const resultOutputSchema = z
   })
   .strict();
 
-const reviewTurnRevisionApprovalAnswerSchema = z.object({
-  action: z.literal("approve_new_manifest_revision"),
-  tasksPath: tasksPathSchema,
-  approvedSourceHash: sha256Schema,
-  approval: revisionApprovalSchema
-}).strict();
-
-const reviewTurnAnswerSchema = z.union([
-  reviewTurnMutableActionSchema.exclude(["approve_new_manifest_revision"]),
-  reviewTurnRevisionApprovalAnswerSchema
-]);
-
-const reviewTurnRevisionApprovalFormSchema = z.object({
-  tasksPath: tasksPathSchema.nullable(),
-  approvedSourceHash: sha256Schema.nullable(),
-  approval: revisionApprovalSchema.nullable()
-}).strict();
-
-const reviewTurnRevisionApprovalRequiredInputSchema = z.discriminatedUnion("mode", [
-  z.object({
-    mode: z.literal("COLLECT"),
-    action: z.literal("approve_new_manifest_revision"),
-    inputForm: reviewTurnRevisionApprovalFormSchema
-  }).strict(),
-  z.object({
-    mode: z.literal("CONFIRM"),
-    action: z.literal("approve_new_manifest_revision"),
-    answer: reviewTurnRevisionApprovalAnswerSchema
-  }).strict()
-]);
-
 export const reviewTurnInputSchema = z
   .object({
     requestId: identifierSchema,
@@ -225,7 +172,7 @@ export const reviewTurnInputSchema = z
     jobId: identifierSchema,
     hostTurnId: identifierSchema,
     turnToken: identifierSchema.optional(),
-    answer: reviewTurnAnswerSchema.optional()
+    answer: resumeActionSchema.optional()
   })
   .strict()
   .superRefine((input, context) => {
@@ -256,10 +203,9 @@ const reviewTurnUserInputRequiredSchema = z.object({
     .strict(),
   result: resultOutputSchema,
   options: z.array(z.object({
-    answer: reviewTurnMutableActionSchema,
+    answer: resumeActionSchema,
     description: z.string().min(1)
   }).strict()).min(1),
-  requiredInput: reviewTurnRevisionApprovalRequiredInputSchema.optional(),
   worktreePath: z.string().min(1).optional()
 }).strict();
 

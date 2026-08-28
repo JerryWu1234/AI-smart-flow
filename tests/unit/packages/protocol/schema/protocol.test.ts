@@ -7,6 +7,7 @@ import {
   hostActionSchema,
   mcpToolSchemas,
   piWorkerAttemptSchema,
+  publicPiWorkerAttemptSchema,
   publishResultSchema,
   resumeInputSchema,
   reviewResultSchema,
@@ -137,77 +138,55 @@ describe("SmartFlow protocol schemas", () => {
     expect(reviewTurnOutputSchema.parse(publishUserInput)).toEqual(publishUserInput);
 
     const repairDraft = {
-      sourceArtifact: { relativePath: "runs/job-1/repair.md", sha256: digest, size: 10 },
+      sourceArtifact: {
+        relativePath: `runs/job-1/repair-drafts/${digest}.md`,
+        sha256: digest,
+        size: 10
+      },
       sourceHash: digest,
+      baseTaskSourceHash: "b".repeat(64),
+      baseTaskManifestHash: "c".repeat(64),
       suggestedTasksPath: "tasks.md",
       appendText: "repair task",
       addedTaskLines: ["- [ ] T002 repair"],
-      reasons: ["scope change"],
-      approval: {
-        kind: "USER" as const,
-        parentRevision: 1,
-        authorizedCriterionIds: ["T002"]
-      }
+      reasons: ["scope change"]
     };
-    const confirmAnswer = {
-      action: "approve_new_manifest_revision" as const,
-      tasksPath: "tasks.md",
-      approvedSourceHash: digest,
-      approval: repairDraft.approval
-    };
-    const userApproval = {
+    const repairPause = {
       kind: "USER_INPUT_REQUIRED" as const,
       turnToken: "turn-user",
       pause: { code: "REPAIR_USER_APPROVAL_REQUIRED", message: "Approval required" },
       result: {
         ...pausedResult,
-        nextActions: ["approve_new_manifest_revision", "cancel"],
+        nextActions: ["cancel"],
         repairDraft
       },
       options: [
-        { answer: "approve_new_manifest_revision" as const, description: "Approve revision" },
-        { answer: "cancel" as const, description: "Cancel the run" }
-      ],
-      requiredInput: {
-        mode: "CONFIRM" as const,
-        action: "approve_new_manifest_revision" as const,
-        answer: confirmAnswer
-      }
+        { answer: "cancel" as const, description: "Cancel this Job before starting a new one" }
+      ]
     };
-    expect(reviewTurnOutputSchema.parse(userApproval)).toEqual(userApproval);
+    expect(reviewTurnOutputSchema.parse(repairPause)).toEqual(repairPause);
     // The repair draft is carried once, inside result.
-    expect(reviewTurnOutputSchema.safeParse({ ...userApproval, repairDraft }).success).toBe(false);
-    // The constant field list is gone from requiredInput.
-    expect(reviewTurnOutputSchema.safeParse({
-      ...userApproval,
-      requiredInput: {
-        ...userApproval.requiredInput,
-        fields: ["tasksPath", "approvedSourceHash", "approval"]
-      }
-    }).success).toBe(false);
+    expect(reviewTurnOutputSchema.safeParse({ ...repairPause, repairDraft }).success).toBe(false);
 
-    const collectApproval = {
-      ...userApproval,
-      turnToken: "turn-generic-approval",
-      pause: { code: "APPROVED_SOURCE_DRIFT", message: "Approval required" },
-      result: {
-        ...pausedResult,
-        nextActions: ["approve_new_manifest_revision", "cancel"]
-      },
-      requiredInput: {
-        mode: "COLLECT" as const,
-        action: "approve_new_manifest_revision" as const,
-        inputForm: {
-          tasksPath: null,
-          approvedSourceHash: null,
-          approval: null
-        }
-      }
+    const removedManifestApprovalAnswer = {
+      action: "approve_new_manifest_revision" as const,
+      tasksPath: "tasks.md",
+      approvedSourceHash: digest
     };
-    expect(reviewTurnOutputSchema.parse(collectApproval)).toEqual(collectApproval);
     expect(reviewTurnOutputSchema.safeParse({
-      ...collectApproval,
-      requiredInput: { ...collectApproval.requiredInput, inputForm: {} }
+      ...repairPause,
+      options: [
+        { answer: "approve_new_manifest_revision", description: "Approve replacement" },
+        { answer: "cancel", description: "Cancel" }
+      ]
+    }).success).toBe(false);
+    expect(reviewTurnOutputSchema.safeParse({
+      ...repairPause,
+      requiredInput: {
+        mode: "CONFIRM",
+        action: "approve_new_manifest_revision",
+        answer: removedManifestApprovalAnswer
+      }
     }).success).toBe(false);
 
     const inspectionActions = [
@@ -221,13 +200,17 @@ describe("SmartFlow protocol schemas", () => {
       requestId: "resume-request-1",
       projectId: "project-1",
       jobId: "job-1",
-      expectedRevision: 1,
       expectedStateVersion: 3
     };
     expect(resumeInputSchema.safeParse({
       ...resumeInput,
       resumeAction: "cancel"
     }).success).toBe(true);
+    expect(resumeInputSchema.safeParse({
+      ...resumeInput,
+      expectedRevision: 1,
+      resumeAction: "cancel"
+    }).success).toBe(false);
     for (const resumeAction of [
       "resume",
       "leader_append_repair_tasks",
@@ -276,8 +259,8 @@ describe("SmartFlow protocol schemas", () => {
     }).success).toBe(true);
     expect(reviewTurnInputSchema.safeParse({
       ...baseInput,
-      answer: confirmAnswer
-    }).success).toBe(true);
+      answer: removedManifestApprovalAnswer
+    }).success).toBe(false);
     expect(reviewTurnInputSchema.safeParse({
       ...baseInput,
       answer: "cancel",
@@ -290,13 +273,12 @@ describe("SmartFlow protocol schemas", () => {
     }).success).toBe(false);
   });
 
-  it("records Pi Attempt session/containment identity", () => {
+  it("separates internal Pi session state from the public Attempt schema", () => {
     const attempt = {
       attemptId: "attempt-1",
-      revision: 1,
       generation: 0,
       providerRuntimeConfigHash: digest,
-      status: "RUNNING",
+      status: "RUNNING" as const,
       piSessionId: "pi-session-1",
       containmentId: "containment-1",
       processIdentity: { pid: 123, startToken: "123:started" },
@@ -311,6 +293,40 @@ describe("SmartFlow protocol schemas", () => {
     expect(piWorkerAttemptSchema.safeParse({
       ...attempt,
       brokerSession: { status: "ACTIVE" }
+    }).success).toBe(false);
+
+    const publicCompletedAttempt = {
+      attemptId: attempt.attemptId,
+      generation: attempt.generation,
+      providerRuntimeConfigHash: attempt.providerRuntimeConfigHash,
+      status: "COMPLETED" as const,
+      piSessionId: attempt.piSessionId,
+      containmentId: attempt.containmentId,
+      processIdentity: attempt.processIdentity,
+      startedAt: attempt.startedAt,
+      endedAt: "2026-08-04T00:01:00Z"
+    };
+    const sessionArtifact = {
+      relativePath: "runs/job-1/attempts/attempt-1/session-artifact.json",
+      sha256: "b".repeat(64),
+      size: 128
+    };
+    expect(piWorkerAttemptSchema.safeParse(publicCompletedAttempt).success).toBe(false);
+    expect(piWorkerAttemptSchema.safeParse({
+      ...publicCompletedAttempt,
+      sessionArtifact
+    }).success).toBe(true);
+    expect(publicPiWorkerAttemptSchema.safeParse(publicCompletedAttempt).success).toBe(true);
+    expect(publicPiWorkerAttemptSchema.safeParse({
+      ...publicCompletedAttempt,
+      sessionArtifact
+    }).success).toBe(false);
+    expect(mcpToolSchemas.smartflow_status.output.safeParse({
+      projectId: "project-1",
+      jobId: "job-1",
+      phase: "RUNNING",
+      stateVersion: 1,
+      activeAttempt: { ...publicCompletedAttempt, sessionArtifact }
     }).success).toBe(false);
   });
 
@@ -329,7 +345,6 @@ describe("SmartFlow protocol schemas", () => {
       hostActionSchema.parse({
         type: "REVIEW",
         actionId: "a1",
-        revision: 1,
         effectHash: "not-a-review-context",
         expiresAt: "2026-07-20T00:00:00Z"
       })
@@ -340,7 +355,6 @@ describe("SmartFlow protocol schemas", () => {
     const action = {
       type: "REVIEW",
       actionId: "action-1",
-      revision: 1,
       taskSourceHash: digest,
       candidateHash: digest,
       reviewAttemptId: "review-attempt-1",
@@ -442,8 +456,6 @@ describe("SmartFlow protocol schemas", () => {
 
   it("strictly models durable Review, Leader, and Publish evidence", () => {
     const review = {
-      schemaVersion: 2,
-      revision: 1,
       claimId: "claim-1",
       reviewAttemptId: "review-1",
       taskSourceHash: digest,
@@ -478,8 +490,6 @@ describe("SmartFlow protocol schemas", () => {
       }
     }).success).toBe(false);
     expect(durableLeaderDecisionSchema.parse({
-      schemaVersion: 2,
-      revision: 1,
       reviewHash: review.reviewHash,
       decision: "accept",
       reason: "review accepted",
@@ -487,13 +497,12 @@ describe("SmartFlow protocol schemas", () => {
       decisionHash: "c".repeat(64)
     })).toBeDefined();
     expect(durableLeaderDecisionSchema.safeParse({
-      schemaVersion: 1,
-      revision: 1,
       reviewHash: review.reviewHash,
       decision: "repair",
-      reason: "legacy leader artifact",
+      reason: "strict leader artifact",
       decidedAt: "2026-07-21T10:00:00+08:00",
-      decisionHash: "c".repeat(64)
+      decisionHash: "c".repeat(64),
+      unexpected: true
     }).success).toBe(false);
     expect(publishResultSchema.parse({
       operationId: "publish-1",

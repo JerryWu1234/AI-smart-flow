@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { access, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
@@ -23,6 +23,7 @@ import type {
   ReviewTurnOutput,
   RunPhase
 } from "@smartflow/protocol";
+import { CodexAdapter } from "@smartflow/review";
 import { StateStore } from "@smartflow/state-store";
 import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
 import { createLifecycleStore } from "../crash/recovery-test-fixture.js";
@@ -39,7 +40,6 @@ class LifecycleError extends Error {
 
 class LifecycleGateway implements HostGateway {
   public phase: RunPhase = "PREPARING";
-  public revision = 1;
   public stateVersion = 0;
   public executeCalls = 0;
   private readonly receipts = new Map<string, unknown>();
@@ -99,9 +99,6 @@ class LifecycleGateway implements HostGateway {
 
   private assertMutation(request: Record<string, unknown>): void {
     this.assertRun(request);
-    if (request.expectedRevision !== this.revision) {
-      throw new LifecycleError("REVISION_MISMATCH", "Stale revision");
-    }
     if (request.expectedStateVersion !== this.stateVersion) {
       throw new LifecycleError("STATE_VERSION_MISMATCH", "Stale stateVersion");
     }
@@ -111,7 +108,6 @@ class LifecycleGateway implements HostGateway {
     return {
       projectId: "project-1",
       jobId: "job-1",
-      revision: this.revision,
       stateVersion: this.stateVersion,
       phase: this.phase
     };
@@ -167,10 +163,9 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     await gateway.call("smartflow_resume", {
       projectId: "project-1",
       jobId: "job-1",
-      expectedRevision: 1,
       expectedStateVersion: gateway.stateVersion,
       requestId: "resume-1",
-      resumeAction: "approve_new_manifest_revision"
+      resumeAction: "retry"
     });
     expect(gateway.phase).toBe("RUNNING");
 
@@ -178,7 +173,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       gateway.call("smartflow_cancel", {
         projectId: "other-project",
         jobId: "job-1",
-        expectedRevision: 1,
         expectedStateVersion: gateway.stateVersion,
         requestId: "cross-project",
         reason: "stop"
@@ -187,7 +181,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     await gateway.call("smartflow_cancel", {
       projectId: "project-1",
       jobId: "job-1",
-      expectedRevision: 1,
       expectedStateVersion: gateway.stateVersion,
       requestId: "cancel-1",
       reason: "stop"
@@ -248,11 +241,10 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       const execute = await firstClient.call("smartflow_execute", request) as {
         projectId: string;
         jobId: string;
-        revision: number;
         stateVersion: number;
         phase: RunPhase;
       };
-      expect(execute).toMatchObject({ revision: 1, stateVersion: 1, phase: "PREPARING" });
+      expect(execute).toMatchObject({ stateVersion: 1, phase: "PREPARING" });
       expect(await firstClient.call("smartflow_execute", request)).toEqual(execute);
       const deadline = Date.now() + 2_000;
       let status: unknown;
@@ -493,56 +485,43 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     await expect(access(dataDirectory)).rejects.toBeDefined();
 
     await expect(execute("tasks.md", "valid-relative-path"))
-      .resolves.toMatchObject({ phase: "PREPARING", revision: 1 });
+      .resolves.toMatchObject({ phase: "PREPARING" });
   });
 
-  it("applies the same tasksPath guard before a new Revision resume mutation", async () => {
+  it("rejects removed immutable-Job replacement fields before any mutation", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
-    await mkdir(resolve(harness.projectDir, "revision-directory"));
-    const dataDirectory = resolve(harness.dataDir, "revision-tasks-path");
+    const dataDirectory = resolve(harness.dataDir, "legacy-resume-payload");
     const projectId = `project-${createHash("sha256")
       .update(harness.projectDir, "utf8")
       .digest("hex")
       .slice(0, 40)}`;
     const store = await createLifecycleStore(harness, "PAUSED", {
       pause: {
-        code: "POLICY_CHANGE_REQUIRED",
-        resumeActions: ["approve_new_manifest_revision", "cancel"]
+        code: "REPAIR_USER_APPROVAL_REQUIRED",
+        resumeActions: ["inspect_repair_diff", "cancel"]
       }
     }, {
       dataDirectory: resolve(dataDirectory, "projects", projectId),
       projectId
     });
-    const initialState = await store.readState();
-    const state = await store.writeState({
-      ...initialState,
-      canonicalProjectRoot: await realpath(harness.projectDir),
-      stateVersion: initialState.stateVersion + 1,
-      updatedAt: new Date().toISOString()
-    });
+    const before = await store.readState();
     const runtime = new ProjectRuntime({ dataDirectory });
-    const resume = (tasksPath: string, requestId: string): Promise<unknown> => runtime.handle({
-      id: requestId,
+
+    await expect(runtime.handle({
+      id: "legacy-manifest-replacement",
       method: "smartflow_resume",
       payload: {
-        requestId,
+        requestId: "legacy-manifest-replacement",
         projectId,
         jobId: "job-1",
         resumeAction: "approve_new_manifest_revision",
-        tasksPath,
+        tasksPath: "tasks.md",
         approvedSourceHash: "0".repeat(64),
         approval: { kind: "USER", parentRevision: null, authorizedCriterionIds: [] },
-        expectedRevision: 1,
-        expectedStateVersion: state.stateVersion
+        expectedStateVersion: before.stateVersion
       }
-    });
-    const before = await store.readState();
-    await expect(resume(resolve(harness.projectDir, "sum.js"), "revision-absolute"))
-      .rejects.toMatchObject({ code: "TASKS_PATH_UNSAFE" });
-    expect(await store.readState()).toEqual(before);
-    await expect(resume("revision-directory", "revision-directory"))
-      .rejects.toMatchObject({ code: "TASKS_PATH_NOT_REGULAR" });
+    })).rejects.toMatchObject({ name: "ZodError" });
     expect(await store.readState()).toEqual(before);
   });
 
@@ -574,7 +553,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         requestId: "execute-late-failure",
         expectedStateVersion: 0
       }
-    }) as { projectId: string; jobId: string; revision: number; stateVersion: number };
+    }) as { projectId: string; jobId: string; stateVersion: number };
     await started;
     await runtime.handle({
       id: "ipc-cancel-late-failure",
@@ -582,7 +561,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       payload: {
         projectId: execute.projectId,
         jobId: execute.jobId,
-        expectedRevision: execute.revision,
         expectedStateVersion: execute.stateVersion,
         requestId: "cancel-before-late-failure",
         reason: "race test"
@@ -756,13 +734,13 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       const reviewState = await store.readState();
       const reviewRun = reviewState.runs["job-1"];
       if (reviewRun === undefined) throw new Error("review source drift run is missing");
-      const composition = new ProductionRuntimeComposition();
+      const composition = new ProductionRuntimeComposition(new CodexAdapter());
       await composition.review({
         store,
         projectId,
         jobId: "job-1",
-        expectedFence: reviewRun.fence,
-        expectedRevision: reviewRun.revision
+        scheduledStateVersion: reviewState.stateVersion,
+        expectedFence: reviewRun.fence
       });
       const firstPrompt = await runtime.handle({
         id: requestId,
@@ -779,7 +757,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         phase: "PAUSED",
         pause: {
           code: "APPROVED_SOURCE_DRIFT",
-          resumeActions: ["approve_new_manifest_revision", "restore_approved_tasks", "cancel"]
+          resumeActions: ["restore_approved_tasks", "cancel"]
         }
       });
       expect(pausedRun?.leaderDecision).toBeUndefined();
@@ -816,7 +794,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       }) as ReviewTurnOutput;
       expect(requested).toEqual({ kind: "NOT_READY", retryAfterMs: 30_000 });
       expect((await store.readState()).runs["job-1"]).toMatchObject({
-        revision: 1,
         phase: "REVIEW_PENDING"
       });
       expect(pipelineCalls).toBe(0);
@@ -872,7 +849,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         projectId,
         jobId: "job-1",
         resumeAction: "retry_publish",
-        expectedRevision: 1,
         expectedStateVersion: state.stateVersion + 1
       }
     })).rejects.toMatchObject({
@@ -924,7 +900,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         projectId,
         jobId: "job-1",
         resumeAction: "retry_host_review",
-        expectedRevision: 1,
         expectedStateVersion: state.stateVersion + 1
       }
     })).rejects.toMatchObject({
@@ -968,7 +943,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
             stage: "AWAITING_USER_INPUT",
             turnToken: "turn-owner",
             hostTurnId: "host-owner",
-            revision: 1,
             pauseCode: "HOST_REVIEW_UNAVAILABLE",
             startedAt
           }
@@ -987,7 +961,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         projectId,
         jobId: "job-1",
         resumeAction: "retry_host_review",
-        expectedRevision: 1,
         expectedStateVersion: paused.stateVersion
       }
     })).rejects.toMatchObject({ code: "HOST_TURN_ACTIVE" });
@@ -1001,7 +974,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         projectId,
         jobId: "job-1",
         reason: "attacker cancellation",
-        expectedRevision: 1,
         expectedStateVersion: paused.stateVersion
       }
     })).rejects.toMatchObject({ code: "HOST_TURN_ACTIVE" });
@@ -1049,7 +1021,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         projectId,
         jobId: "job-1",
         resumeAction: "inspect_processes",
-        expectedRevision: 1,
         expectedStateVersion: paused.stateVersion
       }
     })).rejects.toMatchObject({ name: "ZodError" });
@@ -1063,7 +1034,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         projectId,
         jobId: "job-1",
         resumeAction: "resume_review_decision",
-        expectedRevision: 1,
         expectedStateVersion: paused.stateVersion
       }
     })).rejects.toMatchObject({ code: "RESUME_CODE_ACTION_MISMATCH" });
@@ -1128,7 +1098,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         projectId,
         jobId: "job-1",
         resumeAction: "retry_provider",
-        expectedRevision: 1,
         expectedStateVersion: paused.stateVersion
       }
     });
@@ -1164,7 +1133,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         projectId,
         jobId: "job-1",
         resumeAction: "cancel",
-        expectedRevision: 1,
         expectedStateVersion: cancelState.stateVersion
       }
     });
@@ -1228,7 +1196,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         projectId: leaderProjectId,
         jobId: "job-1",
         resumeAction: "resume_review_decision",
-        expectedRevision: 1,
         expectedStateVersion: leaderPaused.stateVersion
       }
     });
@@ -1238,7 +1205,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     expect(publishCalls).toBe(1);
   });
 
-  it("rejects retry_cancel combined with Revision approval fields", async () => {
+  it("rejects retry_cancel combined with removed manifest-replacement fields", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const dataDirectory = resolve(harness.dataDir, "cancel-resume-payload");
@@ -1270,20 +1237,19 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     const runtime = new ProjectRuntime({ dataDirectory });
 
     await expect(runtime.handle({
-      id: "retry-cancel-with-revision-payload",
+      id: "retry-cancel-with-removed-manifest-fields",
       method: "smartflow_resume",
       payload: {
-        requestId: "retry-cancel-with-revision-payload",
+        requestId: "retry-cancel-with-removed-manifest-fields",
         projectId,
         jobId: "job-1",
         resumeAction: "retry_cancel",
         tasksPath: "tasks.md",
         approvedSourceHash: "0".repeat(64),
         approval: { kind: "USER", parentRevision: null, authorizedCriterionIds: [] },
-        expectedRevision: 1,
         expectedStateVersion: state.stateVersion + 1
       }
-    })).rejects.toMatchObject({ code: "RESUME_ACTION_PAYLOAD_MISMATCH" });
+    })).rejects.toMatchObject({ name: "ZodError" });
     expect(await store.readState()).toEqual(before);
   });
 });

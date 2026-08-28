@@ -21,13 +21,11 @@ afterEach(async () => {
 const compileOptions = {
   projectId: "project-1",
   jobId: "job-1",
-  revision: 1,
-  canonicalTaskPath: "/project/tasks.md",
+  canonicalTaskPath: "tasks.md",
   providerRuntimeConfig: { model: "test-model" },
   approval: {
     kind: "USER" as const,
     approvedAt: "2026-07-20T10:00:00+08:00",
-    parentRevision: null,
     authorizedCriterionIds: []
   }
 };

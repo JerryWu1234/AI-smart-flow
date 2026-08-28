@@ -5,7 +5,6 @@ export type LogLevel = "debug" | "info" | "warn" | "error";
 export interface CorrelationIds {
   projectId?: string;
   jobId?: string;
-  revision?: number;
   attemptId?: string;
   effectId?: string;
   actionId?: string;

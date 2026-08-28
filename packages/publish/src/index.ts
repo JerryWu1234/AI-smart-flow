@@ -1,5 +1,5 @@
 export { observeTargetState, operationsHash, stableOperationId } from "./preflight.js";
-export type { ApplyOperation, TargetStateObservation } from "./preflight.js";
+export type { ApplyOperation } from "./preflight.js";
 export { PublishService } from "./publish-service.js";
 export type {
   PublishAttemptRecord,

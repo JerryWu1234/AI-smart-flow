@@ -3,7 +3,7 @@ import type { ArtifactRef } from "@smartflow/protocol";
 import type { ProjectState, RunRecord } from "../../../packages/state-store/src/schema.js";
 
 const fixtureArtifact: ArtifactRef = {
-  relativePath: "runs/job-1/revision-1/task-manifest.json",
+  relativePath: "runs/job-1/task-manifest.json",
   sha256: "a".repeat(64),
   size: 128
 };
@@ -14,10 +14,9 @@ export function createRunRecord(overrides: Partial<RunRecord> = {}): RunRecord {
     canonicalTaskPath: "/project/tasks.md",
     fence: 1,
     phase: "PREPARING",
-    revision: 1,
     taskManifest: fixtureArtifact,
     taskSource: {
-      relativePath: "runs/job-1/revision-1/task-source.md",
+      relativePath: "runs/job-1/task-source.md",
       sha256: "b".repeat(64),
       size: 64
     },
@@ -43,7 +42,6 @@ export function createProjectState(overrides: Partial<ProjectState> = {}): Proje
       .map((run) => [run.canonicalTaskPath, run.jobId])
   );
   return {
-    schemaVersion: 6,
     projectId: "project-1",
     canonicalProjectRoot: "/project/source",
     stateVersion: 0,

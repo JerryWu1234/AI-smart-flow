@@ -1,9 +1,10 @@
-import { readFile } from "node:fs/promises";
 import { relative, sep } from "node:path";
 
 import {
   assessRepairProgress,
-  deriveRepairApproval,
+  assessRepairScope,
+  renderRepairFeedback,
+  renderRepairTaskLines,
   type RepairRound
 } from "@smartflow/review";
 import {
@@ -13,17 +14,24 @@ import {
 } from "@smartflow/protocol";
 import { StateStore, type RunRecord } from "@smartflow/state-store";
 import {
-  compileTaskManifest,
+  sha256Bytes,
   taskManifestSchema,
   type TaskManifest
 } from "@smartflow/task-manifest";
 import { getCandidateHash, type Candidate } from "@smartflow/workspace";
 
-import { createApprovedRevision } from "./approved-revision.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
 
 export type RepairPreparationResult =
-  | { phase: "PREPARING"; revision: number }
+  | {
+      phase: "PREPARING";
+      prompt: string;
+      resumeSession: {
+        sourceAttemptId: string;
+        expectedPiSessionId: string;
+        sessionArtifact: NonNullable<RunRecord["workerAttempts"][number]["sessionArtifact"]>;
+      };
+    }
   | {
       phase: "PAUSED";
       code: "REPAIR_NO_PROGRESS" | "REPAIR_USER_APPROVAL_REQUIRED";
@@ -61,7 +69,6 @@ export class RepairCoordinator {
 
   public constructor(
     private readonly store: StateStore,
-    private readonly providerRuntimeConfig: Readonly<Record<string, unknown>>,
     private readonly noProgressThreshold = 15
   ) {
     this.mutations = new ProjectMutationExecutor(store);
@@ -129,7 +136,7 @@ export class RepairCoordinator {
         completionPercentage: 0,
         issues: [{
           path,
-          message: "The current Candidate requires a corrective revision",
+          message: "The current Candidate requires a corrective pass",
           suggestedFix: "Implement the approved task acceptance criteria in the named file"
         }]
       }];
@@ -139,6 +146,59 @@ export class RepairCoordinator {
       tasks,
       relevantPathHashes: candidatePathHashes(candidate)
     };
+    const scope = assessRepairScope(parentManifest, tasks);
+    if (!scope.inScope) {
+      const repairModule = parentManifest.tasks[0]?.module;
+      if (repairModule === undefined) throw new Error("REPAIR_PARENT_TASK_MISSING");
+      const addedTaskLines = renderRepairTaskLines(
+        parentManifest,
+        tasks,
+        nextTaskNumber(parentManifest)
+      );
+      const appendText = [
+        "",
+        "",
+        `## Review Follow-up Tasks · ${repairModule}`,
+        "",
+        ...addedTaskLines,
+        ""
+      ].join("\n");
+      const parentSource = new TextDecoder().decode(
+        await this.store.readArtifact(run.taskSource)
+      );
+      const repairSource = `${parentSource.trimEnd()}${appendText}`;
+      const repairSourceBytes = Buffer.from(repairSource, "utf8");
+      const draftHash = sha256Bytes(repairSourceBytes);
+      const sourceArtifact = await this.store.writeArtifact(
+        `runs/${jobId}/repair-drafts/${draftHash}.md`,
+        repairSourceBytes
+      );
+      const projectRelativePath = relative(state.canonicalProjectRoot, run.canonicalTaskPath)
+        .split(sep)
+        .join("/");
+      await this.pause(
+        run,
+        currentRound,
+        run.noProgressCount,
+        "REPAIR_USER_APPROVAL_REQUIRED",
+        {
+          repairDraft: {
+            sourceArtifact,
+            sourceHash: draftHash,
+            baseTaskSourceHash: parentManifest.sourceHash,
+            baseTaskManifestHash: run.taskManifest.sha256.replace(/^sha256:/u, ""),
+            suggestedTasksPath: projectRelativePath,
+            appendText,
+            addedTaskLines,
+            reasons: scope.reasons
+          },
+          repairRound: currentRound,
+          untrustedSeedCandidate: run.candidate
+        }
+      );
+      return { phase: "PAUSED", code: "REPAIR_USER_APPROVAL_REQUIRED" };
+    }
+
     const previousRound = parsePreviousRound(run);
     const assessed = assessRepairProgress(
       previousRound ?? currentRound,
@@ -155,131 +215,109 @@ export class RepairCoordinator {
       return { phase: "PAUSED", code: "REPAIR_NO_PROGRESS" };
     }
 
-    const approvedSourcePath = run.approvedTasks?.path;
-    if (typeof approvedSourcePath !== "string") throw new Error("REPAIR_APPROVED_SOURCE_MISSING");
-    const repairModule = parentManifest.tasks[0]?.module;
-    if (repairModule === undefined) throw new Error("REPAIR_PARENT_TASK_MISSING");
-    const parentSource = await readFile(approvedSourcePath, "utf8");
-    const appendText = [
-      "",
-      "",
-      `## Review Repair Tasks · ${repairModule} · Revision ${String(run.revision + 1)}`,
-      "",
-      ...assessed.repairTasks,
-      ""
-    ].join("\n");
-    const repairSource = `${parentSource.trimEnd()}${appendText}`;
-    const provisional = compileTaskManifest(repairSource, {
-      projectId: state.projectId,
-      jobId,
-      revision: run.revision + 1,
-      canonicalTaskPath: parentManifest.canonicalTaskPath,
-      providerRuntimeConfig: this.providerRuntimeConfig,
-      allowNoChange: parentManifest.allowNoChange,
-      approval: {
-        kind: "LEADER_REPAIR",
-        approvedAt: new Date().toISOString(),
-        parentRevision: run.revision,
-        authorizedCriterionIds: assessed.authorizedCriterionIds
-      }
-    });
-    const derived = deriveRepairApproval(parentManifest, provisional.manifest);
-    if (derived.kind === "LEADER_REPAIR") {
-      const attempt = run.workerAttempts.at(-1);
-      const approval = {
-        kind: "LEADER_REPAIR" as const,
-        parentRevision: derived.parentRevision,
-        authorizedCriterionIds: derived.authorizedCriterionIds
-      };
-      const mutation = await this.mutations.mutate(
-        {
-          requestId: `repair:${run.jobId}:r${String(run.revision)}:apply:${provisional.manifest.sourceHash}`,
-          payload: {
-            kind: "apply-approved-repair",
-            sourceHash: provisional.manifest.sourceHash,
-            approval,
-            round: currentRound,
-            noProgressCount: assessed.noProgressCount
-          },
-          expectedJobId: run.jobId,
-          expectedFence: run.fence,
-          expectedRevision: run.revision,
-          ...(attempt === undefined ? {} : { expectedGeneration: attempt.generation }),
-          ...(attempt === undefined ? {} : { expectedAttemptId: attempt.attemptId }),
-          expectedPhases: ["FIXING"]
-        },
-        async (current) => {
-          const active = current.runs[run.jobId];
-          if (active === undefined || active.phase !== "FIXING") {
-            throw new Error("REPAIR_RUN_CHANGED");
-          }
-          const repairRun: RunRecord = {
-            ...active,
-            noProgressCount: assessed.noProgressCount,
-            recovery: {
-              ...active.recovery,
-              repairRound: currentRound,
-              parentRevision: active.revision,
-              untrustedSeedCandidate: active.candidate
-            }
-          };
-          const nextRun = await createApprovedRevision({
-            store: this.store,
-            state: current,
-            run: repairRun,
-            sourceBytes: Buffer.from(repairSource, "utf8"),
-            sourcePath: active.canonicalTaskPath,
-            expectedSourceHash: provisional.manifest.sourceHash,
-            approval,
-            providerRuntimeConfig: this.providerRuntimeConfig,
-            fail: (code, message): never => {
-              throw new Error(`${code}:${message}`);
-            }
-          });
-          return {
-            nextState: {
-              ...current,
-              runs: { ...current.runs, [run.jobId]: nextRun }
-            },
-            response: { phase: "PREPARING" as const, revision: nextRun.revision }
-          };
-        }
-      );
-      return mutation.response;
+    const attempt = run.workerAttempts.at(-1);
+    if (
+      attempt === undefined ||
+      attempt.status !== "COMPLETED" ||
+      attempt.piSessionId === undefined ||
+      attempt.sessionArtifact === undefined
+    ) {
+      throw new Error("REPAIR_PI_SESSION_MISSING");
     }
-
-    const sourceArtifact = await this.store.writeArtifact(
-      `runs/${jobId}/revision-${String(run.revision + 1)}/repair-drafts/${provisional.manifest.sourceHash}.md`,
-      Buffer.from(repairSource, "utf8")
-    );
-    const projectRelativePath = relative(state.canonicalProjectRoot, run.canonicalTaskPath)
-      .split(sep)
-      .join("/");
-    await this.pause(
-      run,
-      currentRound,
-      assessed.noProgressCount,
-      "REPAIR_USER_APPROVAL_REQUIRED",
+    const prompt = renderRepairFeedback(tasks);
+    const mutation = await this.mutations.mutate(
       {
-        repairDraft: {
-          sourceArtifact,
-          sourceHash: provisional.manifest.sourceHash,
-          suggestedTasksPath: projectRelativePath,
-          appendText,
-          addedTaskLines: assessed.repairTasks,
-          reasons: derived.reasons,
-          approval: {
-            kind: derived.kind,
-            parentRevision: derived.parentRevision,
-            authorizedCriterionIds: derived.authorizedCriterionIds
-          }
+        requestId: `repair:${run.jobId}:a${attempt.attemptId}:g${String(attempt.generation)}:continue:${run.candidate.sha256}`,
+        payload: {
+          kind: "continue-in-scope-repair",
+          round: currentRound,
+          noProgressCount: assessed.noProgressCount
         },
-        repairRound: currentRound,
-        parentRevision: run.revision,
-        untrustedSeedCandidate: run.candidate
+        expectedJobId: run.jobId,
+        expectedFence: run.fence,
+        expectedGeneration: attempt.generation,
+        expectedAttemptId: attempt.attemptId,
+        expectedPhases: ["FIXING"]
+      },
+      (current) => {
+        const active = current.runs[run.jobId];
+        if (active === undefined || active.phase !== "FIXING") {
+          throw new Error("REPAIR_RUN_CHANGED");
+        }
+        const activeAttempt = active.workerAttempts.at(-1);
+        const currentWorkspace = active.gitWorkspace?.current;
+        if (
+          activeAttempt === undefined ||
+          activeAttempt.attemptId !== attempt.attemptId ||
+          activeAttempt.generation !== attempt.generation ||
+          activeAttempt.piSessionId === undefined ||
+          activeAttempt.piSessionId !== attempt.piSessionId ||
+          activeAttempt.sessionArtifact === undefined ||
+          currentWorkspace?.resultSnapshot === undefined ||
+          active.gitWorkspace === undefined
+        ) {
+          throw new Error("REPAIR_CONTEXT_CHANGED");
+        }
+        const expectedPiSessionId = activeAttempt.piSessionId;
+        const sessionArtifact = activeAttempt.sessionArtifact;
+        const workspaceSeedSnapshot = currentWorkspace.resultSnapshot;
+        const updatedAt = new Date().toISOString();
+        const nextRun: RunRecord = {
+          ...active,
+          phase: "PREPARING",
+          noProgressCount: assessed.noProgressCount,
+          candidate: undefined,
+          pendingAction: undefined,
+          hostTurn: undefined,
+          review: undefined,
+          leaderDecision: undefined,
+          publish: undefined,
+          pause: undefined,
+          lastError: undefined,
+          recovery: {
+            repairRound: currentRound,
+            repairContinuation: {
+              kind: "PI_SESSION_REPAIR",
+              jobId: active.jobId,
+              sourceAttemptId: activeAttempt.attemptId,
+              sourceGeneration: activeAttempt.generation,
+              expectedPiSessionId,
+              sessionArtifact,
+              providerRuntimeConfigHash: activeAttempt.providerRuntimeConfigHash,
+              taskSourceHash: active.taskSource.sha256.replace(/^sha256:/u, ""),
+              taskManifestHash: active.taskManifest.sha256.replace(/^sha256:/u, ""),
+              prompt,
+              workspaceSeedSnapshot
+            }
+          },
+          gitWorkspace: {
+            ...active.gitWorkspace,
+            current: {
+              indexPath: currentWorkspace.indexPath,
+              workspacePath: currentWorkspace.workspacePath,
+              inputSnapshot: workspaceSeedSnapshot
+            }
+          },
+          updatedAt
+        };
+        return {
+          nextState: {
+            ...current,
+            runs: { ...current.runs, [run.jobId]: nextRun }
+          },
+          response: {
+            phase: "PREPARING" as const,
+            prompt,
+            resumeSession: {
+              sourceAttemptId: activeAttempt.attemptId,
+              expectedPiSessionId,
+              sessionArtifact
+            }
+          }
+        };
       }
     );
-    return { phase: "PAUSED", code: "REPAIR_USER_APPROVAL_REQUIRED" };
+    return mutation.response;
   }
 
   private async pause(
@@ -292,11 +330,10 @@ export class RepairCoordinator {
     const attempt = run.workerAttempts.at(-1);
     await this.mutations.mutate(
       {
-        requestId: `repair:${run.jobId}:r${String(run.revision)}:pause:${code}:${String(noProgressCount)}`,
+        requestId: `repair:${run.jobId}:a${attempt?.attemptId ?? "none"}:pause:${code}:${String(noProgressCount)}`,
         payload: { round, noProgressCount, code, details },
         expectedJobId: run.jobId,
         expectedFence: run.fence,
-        expectedRevision: run.revision,
         ...(attempt === undefined
           ? {}
           : { expectedGeneration: attempt.generation }),
@@ -319,7 +356,7 @@ export class RepairCoordinator {
                 pause: {
                   code,
                   resumeActions: code === "REPAIR_USER_APPROVAL_REQUIRED"
-                    ? ["inspect_repair_diff", "approve_new_manifest_revision", "cancel"]
+                    ? ["inspect_repair_diff", "cancel"]
                     : ["inspect_no_progress", "cancel"]
                 },
                 recovery: { ...active.recovery, repairRound: round, ...details },

@@ -35,12 +35,10 @@ import {
 } from "@smartflow/state-store";
 import {
   compileTaskManifest,
-  sha256Bytes,
-  taskManifestSchema
+  sha256Bytes
 } from "@smartflow/task-manifest";
 import { cleanupGitRunTemporaryState } from "@smartflow/workspace";
 
-import { createApprovedRevision } from "./approved-revision.js";
 import { observeApprovedSource } from "./approved-source.js";
 import { type IpcRequest, type IpcRequestHandler } from "./local-ipc-server.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
@@ -55,8 +53,8 @@ export interface ProjectPipelineContext {
   store: StateStore;
   projectId: string;
   jobId: string;
+  scheduledStateVersion: number;
   expectedFence: number;
-  expectedRevision: number;
   expectedGeneration?: number;
   expectedAttemptId?: string;
 }
@@ -173,12 +171,35 @@ function currentAttempt(run: RunRecord | undefined): RunRecord["workerAttempts"]
   return run?.workerAttempts.at(-1);
 }
 
+function publicAttempt(run: RunRecord): RunSummary["activeAttempt"] {
+  const attempt = currentAttempt(run);
+  if (attempt === undefined) return undefined;
+  return {
+    attemptId: attempt.attemptId,
+    generation: attempt.generation,
+    providerRuntimeConfigHash: attempt.providerRuntimeConfigHash,
+    status: attempt.status,
+    ...(attempt.piSessionId === undefined ? {} : { piSessionId: attempt.piSessionId }),
+    ...(attempt.containmentId === undefined ? {} : { containmentId: attempt.containmentId }),
+    ...(attempt.processIdentity === undefined
+      ? {}
+      : { processIdentity: attempt.processIdentity }),
+    ...(attempt.terminalReason === undefined
+      ? {}
+      : { terminalReason: attempt.terminalReason }),
+    startedAt: attempt.startedAt,
+    ...(attempt.endedAt === undefined ? {} : { endedAt: attempt.endedAt })
+  };
+}
+
 function artifactList(run: RunRecord): ArtifactRef[] {
   return [...new Map(
-    runArtifactInventory(run).bindings.map((binding) => [
-      `${binding.ref.relativePath}:${binding.ref.sha256}:${String(binding.ref.size)}`,
-      binding.ref
-    ])
+    runArtifactInventory(run).bindings
+      .filter((binding) => binding.semantic !== "PI_SESSION")
+      .map((binding) => [
+        `${binding.ref.relativePath}:${binding.ref.sha256}:${String(binding.ref.size)}`,
+        binding.ref
+      ])
   ).values()];
 }
 
@@ -257,7 +278,7 @@ function closedResumeRoute(
         ? { phase: "CANCELING", schedule: "cancel" }
         : undefined;
     case "retry_provider_probe":
-      return code === "PROVIDER_UNAVAILABLE"
+      return new Set(["PROVIDER_UNAVAILABLE", "PROVIDER_RUNTIME_CONFIG_DRIFT"]).has(code ?? "")
         ? { phase: "PREPARING", schedule: "pipeline" }
         : undefined;
     case "retry_git_probe":
@@ -290,7 +311,6 @@ function closedResumeRoute(
         ? { phase: "PREPARING", schedule: "pipeline" }
         : { phase: "PREPARING", schedule: "pipeline" };
     case "retry":
-    case "approve_new_manifest_revision":
       return undefined;
   }
 }
@@ -300,7 +320,6 @@ function resumeSchedule(
   phase: RunRecord["phase"]
 ): ResumeSchedule {
   switch (action) {
-    case "approve_new_manifest_revision":
     case "retry_provider_probe":
     case "retry_git_probe":
       return "pipeline";
@@ -343,7 +362,6 @@ function publicAction(value: Record<string, unknown> | undefined): HostAction | 
     ? {
         type: value.type,
         actionId: value.actionId,
-        revision: value.revision,
         taskSourceHash: value.taskSourceHash,
         candidateHash: value.candidateHash,
         reviewAttemptId: value.reviewAttemptId,
@@ -443,7 +461,6 @@ export class ProjectRuntime {
           payload: { kind: "runtime-epoch", runtimeEpochId: this.runtimeEpochId, jobId },
           expectedStateVersion: state.stateVersion,
           expectedJobId: run.jobId,
-          expectedRevision: run.revision,
           expectedPhases: [run.phase],
           advanceFence: true
         },
@@ -500,7 +517,6 @@ export class ProjectRuntime {
     const projectId = projectIdForRoot(canonicalRoot);
     const store = this.store(projectId);
     await store.initialize({
-      schemaVersion: 6,
       projectId,
       canonicalProjectRoot: canonicalRoot,
       stateVersion: 0,
@@ -518,7 +534,6 @@ export class ProjectRuntime {
         ? input
         : { ...input, providerRuntimeConfigHash },
       input.expectedStateVersion,
-      undefined,
       async (state, nextStateVersion, fence) => {
         const activeJobId = state.activeRunsByTaskPath[canonicalTasksPath];
         if (activeJobId !== undefined) {
@@ -529,13 +544,11 @@ export class ProjectRuntime {
         const compiled = compileTaskManifest(sourceBytes, {
           projectId,
           jobId,
-          revision: 1,
           canonicalTaskPath: logicalTaskPath,
           providerRuntimeConfig,
           approval: {
             kind: "USER",
             approvedAt: now(),
-            parentRevision: null,
             authorizedCriterionIds: []
           }
         });
@@ -549,11 +562,11 @@ export class ProjectRuntime {
           );
         }
         const taskManifest = await store.writeArtifact(
-          `runs/${jobId}/revision-1/task-manifest.json`,
+          `runs/${jobId}/task-manifest.json`,
           compiled.artifactBytes
         );
         const taskSource = await store.writeArtifact(
-          `runs/${jobId}/revision-1/task-source.md`,
+          `runs/${jobId}/task-source.md`,
           sourceBytes
         );
         if (taskSource.sha256 !== compiled.manifest.taskSourceArtifact.sha256) {
@@ -565,7 +578,6 @@ export class ProjectRuntime {
           canonicalTaskPath: canonicalTasksPath,
           fence,
           phase: "PREPARING",
-          revision: 1,
           taskManifest,
           taskSource,
           approvedTasks: {
@@ -590,7 +602,6 @@ export class ProjectRuntime {
           response: {
             projectId,
             jobId,
-            revision: 1,
             stateVersion: nextStateVersion,
             phase: "PREPARING" as const
           }
@@ -613,15 +624,15 @@ export class ProjectRuntime {
     if (artifactFailure !== undefined) {
       throw new ProjectRuntimeError("ARTIFACT_INTEGRITY_BLOCKED", artifactFailure);
     }
+    const activeAttempt = publicAttempt(run);
     return {
       projectId: state.projectId,
       jobId: run.jobId,
       phase: run.phase,
-      revision: run.revision,
       stateVersion: state.stateVersion,
       ...(run.pause === undefined ? {} : { pause: run.pause }),
       ...(publicAction(run.pendingAction) === undefined ? {} : { pendingAction: publicAction(run.pendingAction) }),
-      ...(currentAttempt(run) === undefined ? {} : { activeAttempt: currentAttempt(run) }),
+      ...(activeAttempt === undefined ? {} : { activeAttempt }),
       ...(run.lastError === undefined ? {} : { lastError: run.lastError })
     };
   }
@@ -642,7 +653,6 @@ export class ProjectRuntime {
       input.requestId,
       mutationPayload,
       input.expectedStateVersion,
-      input.expectedRevision,
       async (state, nextStateVersion) => {
         const run = state.runs[input.jobId];
         if (run === undefined) {
@@ -655,48 +665,6 @@ export class ProjectRuntime {
         if (!run.pause?.resumeActions.includes(input.resumeAction)) {
           throw new ProjectRuntimeError("RESUME_ACTION_NOT_ALLOWED", "Resume action is not available for this pause");
         }
-        const hasRevisionPayload = input.tasksPath !== undefined ||
-          input.approval !== undefined ||
-          input.approvedSourceHash !== undefined;
-        if (hasRevisionPayload && input.resumeAction !== "approve_new_manifest_revision") {
-          throw new ProjectRuntimeError(
-            "RESUME_ACTION_PAYLOAD_MISMATCH",
-            "Revision approval fields require approve_new_manifest_revision"
-          );
-        }
-        let revisionSource: Awaited<ReturnType<typeof readProjectTasksFile>> | undefined;
-        if (input.resumeAction === "approve_new_manifest_revision") {
-          if (input.approval === undefined) {
-            throw new ProjectRuntimeError("REVISION_APPROVAL_INCOMPLETE", "New Revision requires approval");
-          }
-          if (input.approval.kind === "LEADER_REPAIR") {
-            const draft = publicRepairDraft(run);
-            if (
-              draft === undefined ||
-              draft.approval.kind !== "LEADER_REPAIR" ||
-              draft.approval.parentRevision !== input.approval.parentRevision ||
-              canonicalHash(draft.approval.authorizedCriterionIds) !==
-                canonicalHash(input.approval.authorizedCriterionIds)
-            ) {
-              throw new ProjectRuntimeError(
-                "REPAIR_APPROVAL_MISMATCH",
-                "Leader repair approval does not bind the durable internal repair task"
-              );
-            }
-            revisionSource = {
-              canonicalPath: run.canonicalTaskPath,
-              sourceBytes: Buffer.from(await store.readArtifact(draft.sourceArtifact))
-            };
-          } else {
-            if (input.tasksPath === undefined || input.approvedSourceHash === undefined) {
-              throw new ProjectRuntimeError(
-                "REVISION_APPROVAL_INCOMPLETE",
-                "User Revision requires tasksPath, hash, and approval"
-              );
-            }
-            revisionSource = await readProjectTasksFile(state.canonicalProjectRoot, input.tasksPath);
-          }
-        }
         if (input.resumeAction !== "retry_cancel" && input.resumeAction !== "cancel") {
           await this.assertRunArtifacts(store, state, input.jobId);
         }
@@ -708,51 +676,6 @@ export class ProjectRuntime {
               "Approved tasks source has not been restored"
             );
           }
-        }
-        if (input.resumeAction === "approve_new_manifest_revision") {
-          if (revisionSource === undefined || input.approval === undefined) {
-            throw new ProjectRuntimeError(
-              "REVISION_APPROVAL_INCOMPLETE",
-              "New Revision requires source and approval"
-            );
-          }
-          const previous = taskManifestSchema.parse(JSON.parse(
-            new TextDecoder().decode(await store.readArtifact(run.taskManifest))
-          ));
-          const expectedSourceHash = input.approval.kind === "LEADER_REPAIR"
-            ? publicRepairDraft(run)?.sourceHash
-            : input.approvedSourceHash;
-          if (expectedSourceHash === undefined) {
-            throw new ProjectRuntimeError(
-              "REVISION_APPROVAL_INCOMPLETE",
-              "New Revision requires an approved source hash"
-            );
-          }
-          const clean = await createApprovedRevision({
-            store,
-            state,
-            run,
-            sourceBytes: revisionSource.sourceBytes,
-            sourcePath: revisionSource.canonicalPath,
-            expectedSourceHash,
-            approval: input.approval,
-            providerRuntimeConfig: this.resolveProviderRuntimeConfig(
-              previous.providerRuntimeConfigHash
-            ),
-            fail: (code, message): never => {
-              throw new ProjectRuntimeError(code, message);
-            }
-          });
-          return {
-            nextState: { ...state, runs: { ...state.runs, [run.jobId]: clean } },
-            response: {
-              projectId: state.projectId,
-              jobId: run.jobId,
-              revision: clean.revision,
-              stateVersion: nextStateVersion,
-              phase: clean.phase
-            }
-          };
         }
         if (input.resumeAction === "resume_review_decision") {
           if (
@@ -775,7 +698,6 @@ export class ProjectRuntime {
             response: {
               projectId: state.projectId,
               jobId: run.jobId,
-              revision: run.revision,
               stateVersion: nextStateVersion,
               phase: finalized.response.phase
             }
@@ -813,7 +735,6 @@ export class ProjectRuntime {
               ...resumedRecovery,
               manualPublishConfirmation: {
                 status: "REQUESTED",
-                revision: run.revision,
                 pauseCode: manualSourcePauseCode,
                 requestId: input.requestId,
                 requestedAt: now()
@@ -860,7 +781,6 @@ export class ProjectRuntime {
           response: {
             projectId: state.projectId,
             jobId: run.jobId,
-            revision: run.revision,
             stateVersion: nextStateVersion,
             phase
           }
@@ -881,7 +801,11 @@ export class ProjectRuntime {
 
   private async cancel(input: CancelInput): Promise<unknown> {
     const store = this.store(input.projectId);
-    const mutation = await this.mutate(store, input.requestId, input, input.expectedStateVersion, input.expectedRevision,
+    const mutation = await this.mutate(
+      store,
+      input.requestId,
+      input,
+      input.expectedStateVersion,
       (state, nextStateVersion) => {
         const run = state.runs[input.jobId];
         if (run === undefined) throw new ProjectRuntimeError("RUN_NOT_FOUND", input.jobId);
@@ -899,7 +823,6 @@ export class ProjectRuntime {
           response: {
             projectId: state.projectId,
             jobId: run.jobId,
-            revision: run.revision,
             stateVersion: nextStateVersion,
             phase: "CANCELING" as const
           }
@@ -1021,8 +944,8 @@ export class ProjectRuntime {
       store,
       projectId,
       jobId,
+      scheduledStateVersion: state.stateVersion,
       expectedFence: run.fence,
-      expectedRevision: run.revision,
       ...(attempt === undefined ? {} : {
         expectedGeneration: attempt.generation,
         expectedAttemptId: attempt.attemptId
@@ -1085,7 +1008,6 @@ export class ProjectRuntime {
     if (
       run === undefined ||
       run.fence !== context.expectedFence ||
-      run.revision !== context.expectedRevision ||
       (context.expectedGeneration !== undefined &&
         attempt?.generation !== context.expectedGeneration) ||
       (context.expectedAttemptId !== undefined &&
@@ -1109,11 +1031,16 @@ export class ProjectRuntime {
       phase: "PAUSED" | null;
     }>(
       {
-        requestId: `runtime-failure:${run.jobId}:r${String(run.revision)}:${stage}:${canonicalHash(message)}`,
+        requestId: `runtime-failure:${run.jobId}:${stage}:${canonicalHash({
+          message,
+          scheduledStateVersion: context.scheduledStateVersion,
+          fence: context.expectedFence,
+          generation: context.expectedGeneration ?? null,
+          attemptId: context.expectedAttemptId ?? null
+        })}`,
         payload: { stage, message },
         expectedJobId: run.jobId,
         expectedFence: context.expectedFence,
-        expectedRevision: run.revision,
         ...(context.expectedGeneration === undefined
           ? {}
           : { expectedGeneration: context.expectedGeneration }),
@@ -1161,7 +1088,6 @@ export class ProjectRuntime {
     requestId: string,
     payload: unknown,
     expectedStateVersion: number | undefined,
-    expectedRevision: number | undefined,
     build: (
       state: ProjectState,
       nextStateVersion: number,
@@ -1177,7 +1103,6 @@ export class ProjectRuntime {
         requestId,
         payload,
         ...(expectedStateVersion === undefined ? {} : { expectedStateVersion }),
-        ...(expectedRevision === undefined ? {} : { expectedRevision }),
         ...(jobId === undefined ? {} : { expectedJobId: jobId })
       },
       async (state, context) => build(state, context.nextStateVersion, context.fence)

@@ -4,7 +4,6 @@ import type { HostAction } from "@smartflow/protocol";
 
 export function createReviewHostAction(
   context: {
-    revision: number;
     taskSourceHash: string;
     candidateHash: string;
     changedPaths: string[];
@@ -14,7 +13,6 @@ export function createReviewHostAction(
   expiresAt: string
 ): HostAction {
   if (
-    context.revision < 1 ||
     !/^[a-f0-9]{64}$/u.test(context.taskSourceHash) ||
     !/^[a-f0-9]{64}$/u.test(context.candidateHash) ||
     Date.parse(expiresAt) <= Date.now() ||
@@ -26,7 +24,6 @@ export function createReviewHostAction(
   return {
     type: "REVIEW",
     actionId: `review-action-${randomUUID()}`,
-    revision: context.revision,
     taskSourceHash: context.taskSourceHash,
     candidateHash: context.candidateHash,
     reviewAttemptId: `review-attempt-${randomUUID()}`,

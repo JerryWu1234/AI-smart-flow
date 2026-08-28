@@ -25,7 +25,6 @@ export interface DoctorCapability {
 }
 
 export interface DoctorReport {
-  schemaVersion: 1;
   status: CapabilityStatus;
   ready: boolean;
   config: SmartFlowConfig | null;
@@ -113,7 +112,7 @@ function defaultProbes(
         const result = await new PiProvider({
           runtimeConfig: workerConfiguration.runtimeConfig,
           environment: {
-            SMARTFLOW_PI_API_KEY: workerConfiguration.credential
+            API_KEY: workerConfiguration.credential
           }
         }).probe();
         return {
@@ -203,7 +202,6 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
   const blocking = capabilities.some((capability) => capability.status === "blocking-unavailable");
   const optional = capabilities.some((capability) => capability.status === "optional-unavailable");
   return {
-    schemaVersion: 1,
     status: blocking ? "blocking-unavailable" : optional ? "optional-unavailable" : "ready",
     ready: !blocking,
     config,

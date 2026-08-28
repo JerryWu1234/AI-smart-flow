@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 
 import {
+  artifactRefSchema,
+  artifactRefsEqual,
   durableLeaderDecisionSchema,
   durableReviewDecisionSchema,
   publishResultSchema,
@@ -39,7 +41,6 @@ const terminalPhases = new Set<RunPhase>(["COMPLETED", "CANCELED", "FAILED"]);
 export type RecoveryAction =
   | "NONE"
   | "REBUILD_WORKSPACE"
-  | "RESUME_WORKER"
   | "START_NEW_WORKER_ATTEMPT"
   | "PREPARE_REPAIR"
   | "RUN_REVIEW"
@@ -55,7 +56,7 @@ export interface PublishRecoveryObservation {
 }
 
 export interface RecoveryRuntime {
-  inspectWorker(attempt: WorkerAttempt | undefined): Promise<"RESUMABLE" | "STOPPED" | "UNKNOWN">;
+  inspectWorker(attempt: WorkerAttempt | undefined): Promise<"STOPPED" | "UNKNOWN">;
   reconcilePublish(operationId: string, operationsHash: string): Promise<PublishRecoveryObservation>;
   continueCancellation(jobId: string): Promise<"CANCELED" | "BLOCKED">;
 }
@@ -71,7 +72,6 @@ export interface RecoveryResult {
 
 export interface WorkerRecoveryEpoch {
   fence: number;
-  revision: number;
   sourceGeneration: number;
   sourceAttemptId: string | null;
   resetGeneration: number;
@@ -149,6 +149,19 @@ function containsInternalPath(bytes: Uint8Array, paths: readonly string[]): bool
   return paths.some((path) => path.length > 1 && text.includes(path));
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function runRelativePath(jobId: string, value: string): boolean {
+  const segments = value.split("/");
+  return value.startsWith(`runs/${jobId}/`) &&
+    !value.includes("\\") &&
+    segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
+
 export async function verifyRunArtifacts(
   store: StateStore,
   run: RunRecord
@@ -163,6 +176,7 @@ export async function verifyRunArtifacts(
       bytesByName.set(binding.name, bytes);
       if (
         binding.semantic !== "TASK_SOURCE" &&
+        binding.semantic !== "PI_SESSION" &&
         containsInternalPath(bytes, [state.canonicalProjectRoot, store.dataDirectory])
       ) return `ARTIFACT_INTERNAL_PATH_DISCLOSURE:${binding.name}`;
     } catch {
@@ -176,65 +190,153 @@ export async function verifyRunArtifacts(
     if (manifestBytes === undefined || taskSourceBytes === undefined) {
       return "ARTIFACT_REF_MISSING:taskManifest";
     }
+    if (
+      run.taskManifest.relativePath !== `runs/${run.jobId}/task-manifest.json` ||
+      run.taskSource.relativePath !== `runs/${run.jobId}/task-source.md`
+    ) return "ARTIFACT_SEMANTIC_MISMATCH:taskPaths";
     const manifest = taskManifestSchema.parse(json(manifestBytes));
     if (
+      manifest.projectId !== state.projectId ||
       manifest.jobId !== run.jobId ||
-      manifest.revision !== run.revision ||
       canonicalHash(manifest.taskSourceArtifact) !== canonicalHash(run.taskSource) ||
       manifest.sourceHash !== digest(run.taskSource.sha256)
     ) return "ARTIFACT_SEMANTIC_MISMATCH:taskManifest";
 
-    const baselineBytes = bytesByName.get("baseline");
     let baselineSnapshot: GitWorkspaceSnapshot | undefined;
-    if (baselineBytes !== undefined) {
-      baselineSnapshot = json(baselineBytes) as GitWorkspaceSnapshot;
-      if (!verifyGitWorkspaceSnapshot(baselineSnapshot)) {
-        return "ARTIFACT_SEMANTIC_MISMATCH:baseline";
+    let inputSnapshot: GitWorkspaceSnapshot | undefined;
+    let resultSnapshot: GitWorkspaceSnapshot | undefined;
+    if (run.gitWorkspace !== undefined) {
+      const baselineBytes = bytesByName.get("baseline");
+      const runBaselineBytes = bytesByName.get("gitWorkspace.runBaselineSnapshot");
+      const inputBytes = bytesByName.get("gitWorkspace.current.inputSnapshot");
+      if (
+        run.baseline === undefined ||
+        baselineBytes === undefined ||
+        runBaselineBytes === undefined ||
+        inputBytes === undefined ||
+        !artifactRefsEqual(run.baseline, run.gitWorkspace.runBaselineSnapshot) ||
+        !runRelativePath(run.jobId, run.gitWorkspace.objectDirectory) ||
+        !runRelativePath(run.jobId, run.gitWorkspace.current.indexPath) ||
+        !runRelativePath(run.jobId, run.gitWorkspace.current.workspacePath)
+      ) return "ARTIFACT_SEMANTIC_MISMATCH:gitWorkspace";
+      baselineSnapshot = json(runBaselineBytes) as GitWorkspaceSnapshot;
+      const baselineAlias = json(baselineBytes) as GitWorkspaceSnapshot;
+      inputSnapshot = json(inputBytes) as GitWorkspaceSnapshot;
+      if (
+        !verifyGitWorkspaceSnapshot(baselineSnapshot) ||
+        baselineSnapshot.snapshotKind !== "RUN_BASELINE" ||
+        !verifyGitWorkspaceSnapshot(baselineAlias) ||
+        baselineAlias.snapshotHash !== baselineSnapshot.snapshotHash ||
+        !verifyGitWorkspaceSnapshot(inputSnapshot) ||
+        inputSnapshot.repositoryId !== run.gitWorkspace.repositoryId ||
+        inputSnapshot.repositoryId !== baselineSnapshot.repositoryId ||
+        inputSnapshot.includedPathPolicyHash !== run.gitWorkspace.inclusionPolicyHash ||
+        inputSnapshot.includedPathPolicyHash !== baselineSnapshot.includedPathPolicyHash
+      ) return "ARTIFACT_SEMANTIC_MISMATCH:gitWorkspaceSnapshots";
+      const resultBytes = bytesByName.get("gitWorkspace.current.resultSnapshot");
+      if (resultBytes !== undefined) {
+        resultSnapshot = json(resultBytes) as GitWorkspaceSnapshot;
+        if (
+          !verifyGitWorkspaceSnapshot(resultSnapshot) ||
+          resultSnapshot.snapshotKind !== "RUN_RESULT" ||
+          resultSnapshot.repositoryId !== baselineSnapshot.repositoryId ||
+          resultSnapshot.includedPathPolicyHash !== baselineSnapshot.includedPathPolicyHash
+        ) return "ARTIFACT_SEMANTIC_MISMATCH:gitWorkspace.current.resultSnapshot";
       }
+    } else if (run.baseline !== undefined) {
+      return "ARTIFACT_SEMANTIC_MISMATCH:gitWorkspace";
+    }
+
+    let previousGeneration = -1;
+    for (const [index, attempt] of run.workerAttempts.entries()) {
+      if (
+        attempt.generation !== previousGeneration + 1 ||
+        attempt.providerRuntimeConfigHash !== manifest.providerRuntimeConfigHash
+      ) return "ARTIFACT_SEMANTIC_MISMATCH:workerAttempt";
+      previousGeneration = attempt.generation;
+      const sessionBytes = bytesByName.get(`workerAttempts[${String(index)}].sessionArtifact`);
+      if (attempt.status === "COMPLETED" && sessionBytes === undefined) {
+        return "ARTIFACT_SEMANTIC_MISMATCH:workerSession";
+      }
+      if (sessionBytes === undefined) continue;
+      const bundle = record(json(sessionBytes));
+      if (
+        bundle === undefined ||
+        bundle.jobId !== run.jobId ||
+        bundle.attemptId !== attempt.attemptId ||
+        bundle.generation !== attempt.generation ||
+        bundle.piSessionId !== attempt.piSessionId ||
+        bundle.providerRuntimeConfigHash !== attempt.providerRuntimeConfigHash ||
+        bundle.terminalStatus !== "COMPLETED" ||
+        bundle.containmentId !== attempt.containmentId ||
+        typeof bundle.sessionFileRelativePath !== "string" ||
+        typeof bundle.sessionJsonlBase64 !== "string"
+      ) return "ARTIFACT_SEMANTIC_MISMATCH:workerSession";
+    }
+
+    const continuation = record(run.recovery?.repairContinuation);
+    if (continuation !== undefined) {
+      const seedRef = artifactRefSchema.safeParse(continuation.workspaceSeedSnapshot);
+      const sessionRef = artifactRefSchema.safeParse(continuation.sessionArtifact);
+      const sourceAttempt = run.workerAttempts.find(
+        (attempt) => attempt.attemptId === continuation.sourceAttemptId
+      );
+      const repairSeedBytes = bytesByName.get(
+        "recovery.repairContinuation.workspaceSeedSnapshot"
+      );
+      if (
+        run.gitWorkspace === undefined ||
+        inputSnapshot === undefined ||
+        run.gitWorkspace.current.resultSnapshot !== undefined ||
+        !seedRef.success ||
+        !sessionRef.success ||
+        repairSeedBytes === undefined ||
+        !artifactRefsEqual(seedRef.data, run.gitWorkspace.current.inputSnapshot) ||
+        continuation.kind !== "PI_SESSION_REPAIR" ||
+        continuation.jobId !== run.jobId ||
+        continuation.taskSourceHash !== digest(run.taskSource.sha256) ||
+        continuation.taskManifestHash !== digest(run.taskManifest.sha256) ||
+        sourceAttempt === undefined ||
+        sourceAttempt.status !== "COMPLETED" ||
+        sourceAttempt.generation !== continuation.sourceGeneration ||
+        sourceAttempt.piSessionId !== continuation.expectedPiSessionId ||
+        sourceAttempt.providerRuntimeConfigHash !== continuation.providerRuntimeConfigHash ||
+        sourceAttempt.sessionArtifact === undefined ||
+        !artifactRefsEqual(sourceAttempt.sessionArtifact, sessionRef.data) ||
+        run.recovery?.repairRound === undefined
+      ) return "ARTIFACT_SEMANTIC_MISMATCH:repairContinuation";
+      const repairSeed = json(repairSeedBytes) as GitWorkspaceSnapshot;
+      if (
+        !verifyGitWorkspaceSnapshot(repairSeed) ||
+        repairSeed.snapshotKind !== "RUN_RESULT" ||
+        repairSeed.snapshotHash !== inputSnapshot.snapshotHash ||
+        repairSeed.repositoryId !== run.gitWorkspace.repositoryId ||
+        repairSeed.includedPathPolicyHash !== run.gitWorkspace.inclusionPolicyHash
+      ) return "ARTIFACT_SEMANTIC_MISMATCH:repairContinuation.workspaceSeedSnapshot";
+    } else if (run.recovery?.repairContinuation !== undefined) {
+      return "ARTIFACT_SEMANTIC_MISMATCH:repairContinuation";
     }
 
     const candidateBytes = bytesByName.get("candidate");
     let candidate: Candidate | undefined;
-    let resultSnapshot: GitWorkspaceSnapshot | undefined;
     if (candidateBytes !== undefined) {
       candidate = json(candidateBytes) as Candidate;
-      if (!verifyCandidate(candidate)) return "ARTIFACT_SEMANTIC_MISMATCH:candidate";
-      if (run.gitWorkspace === undefined) {
-        if (
-          candidate.schemaVersion === 2 ||
-          candidate.schemaVersion === 3 ||
-          baselineSnapshot === undefined ||
-          candidate.baselineHash !== baselineSnapshot.snapshotHash
-        ) return "ARTIFACT_SEMANTIC_MISMATCH:candidateSnapshots";
-      } else {
-        const revisionWorkspace = run.gitWorkspace.revisions[String(run.revision)];
-        const runBaselineBytes = bytesByName.get("gitWorkspace.runBaselineSnapshot");
-        const inputBytes = bytesByName.get(
-          `gitWorkspace.revisions.${String(run.revision)}.inputSnapshot`
-        );
-        const resultBytes = bytesByName.get(
-          `gitWorkspace.revisions.${String(run.revision)}.resultSnapshot`
-        );
-        if (
-          revisionWorkspace === undefined ||
-          baselineSnapshot === undefined ||
-          runBaselineBytes === undefined ||
-          inputBytes === undefined ||
-          resultBytes === undefined
-        ) return "ARTIFACT_SEMANTIC_MISMATCH:candidateSnapshots";
-        const runBaseline = json(runBaselineBytes) as GitWorkspaceSnapshot;
-        const revisionInput = json(inputBytes) as GitWorkspaceSnapshot;
-        resultSnapshot = json(resultBytes) as GitWorkspaceSnapshot;
-        if (
-          baselineSnapshot.snapshotHash !== runBaseline.snapshotHash ||
-          !verifyCandidateSnapshotBindings({
-            candidate,
-            runBaseline,
-            revisionInput,
-            revisionResult: resultSnapshot
-          })
-        ) return "ARTIFACT_SEMANTIC_MISMATCH:candidateSnapshots";
-      }
+      if (
+        run.gitWorkspace === undefined ||
+        run.candidate === undefined ||
+        baselineSnapshot === undefined ||
+        resultSnapshot === undefined ||
+        run.gitWorkspace.current.candidate === undefined ||
+        !artifactRefsEqual(run.candidate, run.gitWorkspace.current.candidate) ||
+        !verifyCandidate(candidate) ||
+        !verifyCandidateSnapshotBindings({
+          candidate,
+          runBaseline: baselineSnapshot,
+          runResult: resultSnapshot
+        })
+      ) return "ARTIFACT_SEMANTIC_MISMATCH:candidateSnapshots";
+    } else if (run.gitWorkspace?.current.candidate !== undefined) {
+      return "ARTIFACT_SEMANTIC_MISMATCH:candidate";
     }
 
     const reviewBytes = bytesByName.get("review");
@@ -245,15 +347,15 @@ export async function verifyRunArtifacts(
       reviewHash = review.reviewHash;
       reviewAllowsAccept = review.gate.allowedLeaderDecisions.includes("accept");
       const matchingAttempt = [...run.workerAttempts].reverse().find(
-        (attempt) => attempt.revision === run.revision && attempt.piSessionId === review.piSessionId
+        (attempt) => attempt.status === "COMPLETED" && attempt.piSessionId === review.piSessionId
       );
       const matchingHistory = [...(run.reviewHistory ?? [])].reverse().find(
         (entry) => entry.reviewAttemptId === review.reviewAttemptId
       );
       if (
         !semanticHashMatches(review, "reviewHash") ||
-        review.revision !== run.revision ||
         candidate === undefined ||
+        review.taskSourceHash !== manifest.sourceHash ||
         review.candidateHash !== getCandidateHash(candidate) ||
         matchingHistory === undefined ||
         matchingHistory.taskSourceHash !== review.taskSourceHash ||
@@ -271,7 +373,6 @@ export async function verifyRunArtifacts(
       leaderAccepted = decision.decision === "accept";
       if (
         !semanticHashMatches(decision, "decisionHash") ||
-        decision.revision !== run.revision ||
         decision.reviewHash !== reviewHash
       ) return "ARTIFACT_SEMANTIC_MISMATCH:leaderDecision";
     }
@@ -280,22 +381,17 @@ export async function verifyRunArtifacts(
       if (!leaderAccepted) return "ARTIFACT_SEMANTIC_MISMATCH:leaderDecision";
     }
 
-    const publishNeedsReconciliation = run.publish?.status === "PREPARED" ||
-      run.publish?.status === "SUBMITTED" ||
-      run.pause?.code === "PUBLISH_RECOVERY_BLOCKED";
-    if (run.publish !== undefined && !publishNeedsReconciliation) {
+    if (run.publish !== undefined) {
       if (candidate === undefined || resultSnapshot === undefined || reviewHash === undefined) {
         return "ARTIFACT_SEMANTIC_MISMATCH:publish";
       }
       const operations = gitPublishOperations(candidate, resultSnapshot);
       const expectedOperationsHash = operationsHash(operations);
       if (
-        run.publish.revision !== run.revision ||
         run.publish.operationsHash !== expectedOperationsHash ||
         run.publish.operationId !== stableOperationId({
           projectId: state.projectId,
           jobId: run.jobId,
-          revision: run.revision,
           candidateHash: getCandidateHash(candidate),
           reviewHash,
           operationsHash: expectedOperationsHash
@@ -370,12 +466,10 @@ export class RecoveryManager {
     if (observed === "UNKNOWN") {
       return this.pause(state, run, "PAUSED_PROCESS_RECONCILIATION:WORKER_OUTCOME_UNKNOWN");
     }
-    if (observed === "RESUMABLE") return this.result(state, run, "RESUME_WORKER");
 
     const sourceGeneration = attempt?.generation ?? -1;
     const recoveryEpoch: WorkerRecoveryEpoch = {
       fence: run.fence,
-      revision: run.revision,
       sourceGeneration,
       sourceAttemptId: attempt?.attemptId ?? null,
       resetGeneration: sourceGeneration + 1,
@@ -402,8 +496,8 @@ export class RecoveryManager {
         workspace: undefined,
         pause: undefined,
         recovery: {
+          ...current.recovery,
           phase: "RUNNING",
-          revision: current.revision,
           action: "START_NEW_WORKER_ATTEMPT",
           workerEpoch: recoveryEpoch
         }
@@ -513,13 +607,12 @@ export class RecoveryManager {
     const attempt = currentAttempt(run);
     return (await this.mutations.mutate(
       {
-        requestId: `recovery:${run.jobId}:r${String(run.revision)}:s${String(capturedState.stateVersion)}:${transition}`,
+        requestId: `recovery:${run.jobId}:s${String(capturedState.stateVersion)}:${transition}`,
         payload,
         replayPolicy: "CURRENT_EPOCH",
         expectedStateVersion: capturedState.stateVersion,
         expectedJobId: run.jobId,
         expectedFence: run.fence,
-        expectedRevision: run.revision,
         ...(attempt === undefined ? {} : {
           expectedGeneration: attempt.generation,
           expectedAttemptId: attempt.attemptId

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, lstat, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
@@ -26,32 +26,29 @@ import {
   initializeGitObjectStore,
   materializeGitSnapshot,
   probeGitRepository,
-  type Candidate,
+  verifyGitWorkspaceSnapshot,
   type GitWorkspaceSnapshot
 } from "@smartflow/workspace";
 
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
+import {
+  clearRepairContinuation,
+  resolveRepairContinuation
+} from "./repair-continuation.js";
 
 export interface WorkerRunRequest {
   jobId: string;
-  revision: number;
   prompt: string;
   providerRuntimeConfigHash: string;
   attemptDeadlineMs: number;
-}
-
-export interface WorkerRunnerHooks {
-  beforeCandidateArtifact?(input: {
-    jobId: string;
-    revision: number;
-    attemptId: string;
-    generation: number;
-    candidate: Candidate;
-  }): void | Promise<void>;
+  resumeSession?: {
+    sourceAttemptId?: string;
+    expectedPiSessionId: string;
+    sessionArtifact: NonNullable<RunRecord["workerAttempts"][number]["sessionArtifact"]>;
+  };
 }
 
 export interface WorkerRunnerOptions {
-  hooks?: WorkerRunnerHooks;
   logger?: Pick<StructuredLogger, "log">;
 }
 
@@ -74,6 +71,99 @@ function isInside(root: string, target: string): boolean {
 
 function currentAttempt(run: RunRecord | undefined): RunRecord["workerAttempts"][number] | undefined {
   return run?.workerAttempts.at(-1);
+}
+
+type SessionArtifactRef = NonNullable<RunRecord["workerAttempts"][number]["sessionArtifact"]>;
+
+interface PiSessionBundle {
+  jobId: string;
+  attemptId: string;
+  generation: number;
+  piSessionId: string;
+  providerRuntimeConfigHash: string;
+  terminalStatus: "COMPLETED";
+  sessionFileRelativePath: string;
+  sessionJsonlBase64: string;
+  containmentId?: string;
+  createdAt: string;
+}
+
+interface LoadedResumeSession {
+  expectedPiSessionId: string;
+  sessionFileRelativePath: string;
+  sessionBytes: Buffer;
+}
+
+function artifactRefsEqual(left: SessionArtifactRef, right: SessionArtifactRef): boolean {
+  return left.relativePath === right.relativePath &&
+    left.sha256 === right.sha256 &&
+    left.size === right.size;
+}
+
+function sessionRelativePath(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || isAbsolute(value) || value.includes("\\")) {
+    throw new Error("PI_SESSION_ARTIFACT_PATH_INVALID");
+  }
+  const segments = value.split("/");
+  if (
+    segments.length < 2 ||
+    segments[0] !== "sessions" ||
+    segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")
+  ) {
+    throw new Error("PI_SESSION_ARTIFACT_PATH_INVALID");
+  }
+  return value;
+}
+
+function parseSessionBundle(bytes: Uint8Array): PiSessionBundle {
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new Error("PI_SESSION_ARTIFACT_INVALID");
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("PI_SESSION_ARTIFACT_INVALID");
+  }
+  const bundle = value as Record<string, unknown>;
+  const stringFields = [
+    "jobId",
+    "attemptId",
+    "piSessionId",
+    "providerRuntimeConfigHash",
+    "sessionJsonlBase64",
+    "createdAt"
+  ];
+  if (
+    bundle.terminalStatus !== "COMPLETED" ||
+    !Number.isInteger(bundle.generation) ||
+    !stringFields.every((field) => {
+      const entry = bundle[field];
+      return typeof entry === "string" && entry.length > 0;
+    }) ||
+    (bundle.containmentId !== undefined && typeof bundle.containmentId !== "string")
+  ) {
+    throw new Error("PI_SESSION_ARTIFACT_INVALID");
+  }
+  const sessionJsonlBase64 = bundle.sessionJsonlBase64 as string;
+  const decoded = Buffer.from(sessionJsonlBase64, "base64");
+  if (decoded.toString("base64") !== sessionJsonlBase64) {
+    throw new Error("PI_SESSION_ARTIFACT_BASE64_INVALID");
+  }
+  return {
+    jobId: bundle.jobId as string,
+    attemptId: bundle.attemptId as string,
+    generation: bundle.generation as number,
+    piSessionId: bundle.piSessionId as string,
+    providerRuntimeConfigHash: bundle.providerRuntimeConfigHash as string,
+    terminalStatus: "COMPLETED",
+    sessionFileRelativePath: sessionRelativePath(bundle.sessionFileRelativePath),
+    sessionJsonlBase64,
+    ...(bundle.containmentId === undefined
+      ? {}
+      : { containmentId: bundle.containmentId }),
+    createdAt: bundle.createdAt as string
+  };
 }
 
 function replaceAttempt(
@@ -116,7 +206,6 @@ function requiredCapabilities(probe: Extract<ProviderProbeResult, { available: t
 class WorkspacePreparationPaused extends Error {}
 
 export class WorkerRunner {
-  private readonly hooks: WorkerRunnerHooks;
   private readonly logger: Pick<StructuredLogger, "log"> | undefined;
   private readonly mutations: ProjectMutationExecutor;
 
@@ -125,9 +214,55 @@ export class WorkerRunner {
     private readonly provider: WorkerProvider,
     options: WorkerRunnerOptions = {}
   ) {
-    this.hooks = options.hooks ?? {};
     this.logger = options.logger;
     this.mutations = new ProjectMutationExecutor(store);
+  }
+
+  private async loadResumeSession(
+    run: RunRecord,
+    request: WorkerRunRequest
+  ): Promise<LoadedResumeSession | undefined> {
+    const requested = request.resumeSession;
+    if (requested === undefined) return undefined;
+    const attempt = requested.sourceAttemptId === undefined
+      ? currentAttempt(run)
+      : run.workerAttempts.find((candidate) => candidate.attemptId === requested.sourceAttemptId);
+    if (
+      attempt === undefined ||
+      attempt.status !== "COMPLETED" ||
+      attempt.piSessionId !== requested.expectedPiSessionId ||
+      attempt.providerRuntimeConfigHash !== request.providerRuntimeConfigHash ||
+      attempt.sessionArtifact === undefined ||
+      !artifactRefsEqual(attempt.sessionArtifact, requested.sessionArtifact)
+    ) {
+      throw new Error("PI_SESSION_RESUME_CONTEXT_INVALID");
+    }
+    const bundle = parseSessionBundle(await this.store.readArtifact(requested.sessionArtifact));
+    if (
+      bundle.jobId !== request.jobId ||
+      bundle.attemptId !== attempt.attemptId ||
+      bundle.generation !== attempt.generation ||
+      bundle.piSessionId !== requested.expectedPiSessionId ||
+      bundle.providerRuntimeConfigHash !== request.providerRuntimeConfigHash
+    ) {
+      throw new Error("PI_SESSION_ARTIFACT_BINDING_INVALID");
+    }
+    return {
+      expectedPiSessionId: requested.expectedPiSessionId,
+      sessionFileRelativePath: bundle.sessionFileRelativePath,
+      sessionBytes: Buffer.from(bundle.sessionJsonlBase64, "base64")
+    };
+  }
+
+  private async restoreResumeSession(
+    runtimeRoot: string,
+    session: LoadedResumeSession
+  ): Promise<string> {
+    const sessionFile = resolve(runtimeRoot, ...session.sessionFileRelativePath.split("/"));
+    if (!isInside(runtimeRoot, sessionFile)) throw new Error("PI_SESSION_RESTORE_PATH_INVALID");
+    await mkdir(dirname(sessionFile), { recursive: true, mode: 0o700 });
+    await writeFile(sessionFile, session.sessionBytes, { mode: 0o600 });
+    return sessionFile;
   }
 
   public async run(request: WorkerRunRequest): Promise<void> {
@@ -140,9 +275,27 @@ export class WorkerRunner {
       initialRun === undefined ||
       initial.activeRunsByTaskPath[initialRun.canonicalTaskPath] !== request.jobId
     ) throw new Error(`Run is not active: ${request.jobId}`);
-    if (initialRun.revision !== request.revision || initialRun.phase !== "PREPARING") {
-      throw new Error("Worker run must start from its current PREPARING Revision");
+    if (initialRun.phase !== "PREPARING") {
+      throw new Error("Worker run must start from PREPARING");
     }
+    const repairContinuation = resolveRepairContinuation(initialRun);
+    const requestedResumeSession = request.resumeSession;
+    if (
+      repairContinuation !== undefined &&
+      (
+        requestedResumeSession === undefined ||
+        request.prompt !== repairContinuation.prompt ||
+        requestedResumeSession.sourceAttemptId !== repairContinuation.sourceAttemptId ||
+        requestedResumeSession.expectedPiSessionId !== repairContinuation.expectedPiSessionId ||
+        !artifactRefsEqual(
+          requestedResumeSession.sessionArtifact,
+          repairContinuation.sessionArtifact
+        )
+      )
+    ) {
+      throw new Error("REPAIR_CONTINUATION_REQUEST_MISMATCH");
+    }
+    const resumeSession = await this.loadResumeSession(initialRun, request);
     const probe = await this.provider.probe();
     if (!probe.available || !requiredCapabilities(probe)) {
       await this.pause(
@@ -160,7 +313,7 @@ export class WorkerRunner {
         initialRun.fence,
         initial.stateVersion,
         "PROVIDER_RUNTIME_CONFIG_DRIFT",
-        ["approve_new_manifest_revision", "cancel"]
+        ["retry_provider_probe", "cancel"]
       );
       return;
     }
@@ -172,7 +325,7 @@ export class WorkerRunner {
       if (error instanceof WorkspacePreparationPaused) return;
       if (error instanceof StateStoreError) {
         if (
-          new Set(["STATE_VERSION_MISMATCH", "STALE_FENCE", "REVISION_MISMATCH", "STATE_INVALID"])
+          new Set(["STATE_VERSION_MISMATCH", "STALE_FENCE", "STATE_INVALID"])
             .has(error.code)
         ) {
           return;
@@ -186,36 +339,43 @@ export class WorkerRunner {
       this.store.dataDirectory,
       "runs",
       request.jobId,
-      `revision-${String(request.revision)}`,
       "pi-containments.json"
     );
     await this.beginAttempt(request, attemptId, generation, prepared.run.fence);
     const runtimeRoot = resolve(prepared.workspaceRoot, ".smartflow-runtime");
-    const providerInput: WorkerStartInput = {
-      attemptId,
-      jobId: request.jobId,
-      revision: request.revision,
-      generation,
-      workspaceDir: prepared.workspaceRoot,
-      prompt: request.prompt,
-      providerRuntimeConfigHash: request.providerRuntimeConfigHash,
-      deadlineAt: new Date(Date.now() + request.attemptDeadlineMs).toISOString(),
-      containment: {
-        registryPath,
-        homeDirectory: resolve(runtimeRoot, "home"),
-        tempDirectory: resolve(runtimeRoot, "tmp"),
-        runtimeReadPaths: [],
-        deniedReadPaths: await this.protectedReadPaths(
-          initial,
-          request.jobId,
-          request.revision,
-          prepared.workspaceRoot
-        )
-      }
-    };
-
     let terminal: WorkerEvent | undefined;
     try {
+      const restoredSessionFile = resumeSession === undefined
+        ? undefined
+        : await this.restoreResumeSession(runtimeRoot, resumeSession);
+      const providerInput: WorkerStartInput = {
+        attemptId,
+        jobId: request.jobId,
+        generation,
+        workspaceDir: prepared.workspaceRoot,
+        prompt: request.prompt,
+        providerRuntimeConfigHash: request.providerRuntimeConfigHash,
+        deadlineAt: new Date(Date.now() + request.attemptDeadlineMs).toISOString(),
+        ...(restoredSessionFile === undefined || resumeSession === undefined
+          ? {}
+          : {
+              resumeSession: {
+                expectedPiSessionId: resumeSession.expectedPiSessionId,
+                sessionFile: restoredSessionFile
+              }
+            }),
+        containment: {
+          registryPath,
+          homeDirectory: resolve(runtimeRoot, "home"),
+          tempDirectory: resolve(runtimeRoot, "tmp"),
+          runtimeReadPaths: [],
+          deniedReadPaths: await this.protectedReadPaths(
+            initial,
+            request.jobId,
+            prepared.workspaceRoot
+          )
+        }
+      };
       for await (const event of this.provider.start(providerInput)) {
         if (terminal !== undefined) continue;
         const accepted = await this.persistEvent(
@@ -251,7 +411,16 @@ export class WorkerRunner {
       }
     }
 
-    await this.persistSessionArtifact(request, attemptId, generation, prepared.run.fence);
+    if (terminal.type === "COMPLETED") {
+      await this.persistCompletedSessionArtifact(
+        request,
+        attemptId,
+        generation,
+        prepared.run.fence,
+        terminal,
+        runtimeRoot
+      );
+    }
     const reconciled = await this.reconcileContainment(
       request,
       attemptId,
@@ -283,32 +452,60 @@ export class WorkerRunner {
     workspaceRoot: string;
     run: RunRecord;
   }> {
-    const revisionKey = String(request.revision);
-    const existingRevision = run.gitWorkspace?.revisions[revisionKey];
+    const repairWorkspaceSeed = resolveRepairContinuation(run)?.workspaceSeedSnapshot;
+    const runRoot = resolve(this.store.dataDirectory, "runs", request.jobId);
+    const workspaceRoot = resolve(runRoot, "workspace");
+    const workspaceRelativePath = portableRelative(this.store.dataDirectory, workspaceRoot);
+    const indexPath = resolve(runRoot, "current.index");
+    const indexRelativePath = portableRelative(this.store.dataDirectory, indexPath);
+    const existingCurrent = run.gitWorkspace?.current;
+
     if (
       run.baseline !== undefined &&
       run.gitWorkspace !== undefined &&
       run.workspace !== undefined &&
-      existingRevision !== undefined &&
-      existingRevision.resultSnapshot === undefined &&
-      existingRevision.workspacePath === run.workspace.relativePath
+      existingCurrent !== undefined &&
+      existingCurrent.resultSnapshot === undefined &&
+      existingCurrent.workspacePath === workspaceRelativePath &&
+      existingCurrent.indexPath === indexRelativePath &&
+      run.workspace.relativePath === workspaceRelativePath
     ) {
-      const workspaceRoot = resolve(this.store.dataDirectory, run.workspace.relativePath);
-      if (!isInside(this.store.dataDirectory, workspaceRoot)) throw new Error("PI_WORKSPACE_PATH_INVALID");
-      await rm(resolve(workspaceRoot, ".smartflow-runtime"), { recursive: true, force: true });
+      if (!isInside(runRoot, workspaceRoot)) throw new Error("PI_WORKSPACE_PATH_INVALID");
       const [baseline, inputSnapshot] = await Promise.all([
-        this.readSnapshot(run.baseline),
-        this.readSnapshot(existingRevision.inputSnapshot)
+        this.readSnapshot(run.gitWorkspace.runBaselineSnapshot),
+        this.readSnapshot(existingCurrent.inputSnapshot)
       ]);
-      await this.syncCanonicalTask(initial.canonicalProjectRoot, run, workspaceRoot);
+      if (
+        !verifyGitWorkspaceSnapshot(baseline) ||
+        baseline.snapshotKind !== "RUN_BASELINE" ||
+        !verifyGitWorkspaceSnapshot(inputSnapshot) ||
+        inputSnapshot.repositoryId !== baseline.repositoryId ||
+        inputSnapshot.includedPathPolicyHash !== baseline.includedPathPolicyHash ||
+        (repairWorkspaceSeed !== undefined &&
+          (!artifactRefsEqual(existingCurrent.inputSnapshot, repairWorkspaceSeed) ||
+            inputSnapshot.snapshotKind !== "RUN_RESULT"))
+      ) {
+        throw new Error("GIT_WORKSPACE_SEED_INVALID");
+      }
+      const runGitDirectory = dirname(resolve(
+        this.store.dataDirectory,
+        run.gitWorkspace.objectDirectory
+      ));
+      await rm(workspaceRoot, { recursive: true, force: true });
+      await materializeGitSnapshot({
+        snapshot: inputSnapshot,
+        runGitDirectory,
+        dataDirectory: runRoot,
+        destination: workspaceRoot
+      });
+      await this.syncCanonicalTask(run, workspaceRoot);
       const result = await this.mutations.mutate(
         {
-          requestId: `worker-workspace-reuse:${request.jobId}:r${revisionKey}:s${String(initial.stateVersion)}`,
-          payload: { workspace: run.workspace.relativePath, revision: request.revision },
+          requestId: `worker-workspace-reuse:${request.jobId}:s${String(initial.stateVersion)}`,
+          payload: { workspace: workspaceRelativePath },
           expectedStateVersion: initial.stateVersion,
           expectedJobId: request.jobId,
           expectedFence: run.fence,
-          expectedRevision: request.revision,
           expectedPhases: ["PREPARING"]
         },
         (state) => ({
@@ -326,28 +523,24 @@ export class WorkerRunner {
       return {
         baseline,
         inputSnapshot,
-        runGitDirectory: dirname(resolve(this.store.dataDirectory, run.gitWorkspace.objectDirectory)),
+        runGitDirectory,
         workspaceRoot,
         run: preparedRun
       };
     }
 
-    const revisionRoot = resolve(
-      this.store.dataDirectory,
-      "runs",
-      request.jobId,
-      `revision-${revisionKey}`
-    );
-    await mkdir(revisionRoot, { recursive: true, mode: 0o700 });
-    const runRoot = resolve(this.store.dataDirectory, "runs", request.jobId);
+    await mkdir(runRoot, { recursive: true, mode: 0o700 });
     let baseline: GitWorkspaceSnapshot;
     let inputSnapshot: GitWorkspaceSnapshot;
-    let baselineRef: RunRecord["baseline"];
+    let baselineRef: NonNullable<RunRecord["baseline"]>;
+    let inputSnapshotRef: NonNullable<RunRecord["baseline"]>;
     let runGitDirectory: string;
     let objectDirectory: string;
-    let inputSnapshotRef: NonNullable<RunRecord["baseline"]>;
 
     if (run.gitWorkspace === undefined) {
+      if (repairWorkspaceSeed !== undefined) {
+        throw new Error("GIT_REPAIR_WORKSPACE_CONTEXT_MISSING");
+      }
       const capability = await probeGitRepository(initial.canonicalProjectRoot);
       if (capability.status !== "READY" || capability.repositoryId === undefined) {
         const code = capability.pause?.code ?? "GIT_REPOSITORY_REQUIRED";
@@ -364,7 +557,6 @@ export class WorkerRunner {
             expectedStateVersion: initial.stateVersion,
             expectedJobId: request.jobId,
             expectedFence: run.fence,
-            expectedRevision: request.revision,
             expectedPhases: ["PREPARING"]
           },
           (state) => ({
@@ -388,7 +580,7 @@ export class WorkerRunner {
           level: "warn",
           event: "worker.git_capability_paused",
           stage: "git-capability",
-          correlation: { jobId: request.jobId, revision: request.revision },
+          correlation: { jobId: request.jobId },
           data: {
             code,
             ...(capability.repositoryId === undefined
@@ -406,7 +598,7 @@ export class WorkerRunner {
         level: "info",
         event: "worker.git_capability_ready",
         stage: "git-capability",
-        correlation: { jobId: request.jobId, revision: request.revision },
+        correlation: { jobId: request.jobId },
         data: {
           repositoryId: capability.repositoryId,
           inclusionPolicyHash: capability.inclusionPolicyHash,
@@ -418,52 +610,97 @@ export class WorkerRunner {
       const objectStore = await initializeGitObjectStore(runRoot);
       runGitDirectory = objectStore.gitDirectory;
       objectDirectory = portableRelative(this.store.dataDirectory, objectStore.objectDirectory);
-      baseline = await captureGitSnapshot({
-        projectRoot: initial.canonicalProjectRoot,
-        dataDirectory: runRoot,
-        runGitDirectory,
-        indexPath: resolve(revisionRoot, "baseline.index"),
-        repositoryId: capability.repositoryId,
-        snapshotKind: "RUN_BASELINE",
-        revision: 1,
-        includedPathPolicyHash: capability.inclusionPolicyHash
-      });
-      const baselineBytes = Buffer.from(JSON.stringify(baseline), "utf8");
-      baselineRef = await this.store.writeArtifact(
-        `runs/${request.jobId}/revision-1/snapshots/run-baseline-${createHash("sha256").update(baselineBytes).digest("hex")}.json`,
-        baselineBytes
-      );
+      const baselineRelativePath = `runs/${request.jobId}/snapshots/run-baseline.json`;
+      const durableBaseline = await this.store.readArtifactAt(baselineRelativePath);
+      if (durableBaseline === undefined) {
+        baseline = await captureGitSnapshot({
+          projectRoot: initial.canonicalProjectRoot,
+          dataDirectory: runRoot,
+          runGitDirectory,
+          indexPath,
+          repositoryId: capability.repositoryId,
+          snapshotKind: "RUN_BASELINE",
+          includedPathPolicyHash: capability.inclusionPolicyHash
+        });
+        const baselineBytes = Buffer.from(JSON.stringify(baseline), "utf8");
+        try {
+          baselineRef = await this.store.writeArtifact(baselineRelativePath, baselineBytes);
+        } catch (error) {
+          if (!(error instanceof StateStoreError) || error.code !== "ARTIFACT_IMMUTABLE") {
+            throw error;
+          }
+          const concurrentBaseline = await this.store.readArtifactAt(baselineRelativePath);
+          if (concurrentBaseline === undefined) throw error;
+          baseline = JSON.parse(
+            new TextDecoder().decode(concurrentBaseline.bytes)
+          ) as GitWorkspaceSnapshot;
+          baselineRef = concurrentBaseline.ref;
+        }
+      } else {
+        baseline = JSON.parse(
+          new TextDecoder().decode(durableBaseline.bytes)
+        ) as GitWorkspaceSnapshot;
+        baselineRef = durableBaseline.ref;
+      }
+      if (
+        !verifyGitWorkspaceSnapshot(baseline) ||
+        baseline.snapshotKind !== "RUN_BASELINE" ||
+        baseline.repositoryId !== capability.repositoryId ||
+        baseline.includedPathPolicyHash !== capability.inclusionPolicyHash
+      ) {
+        throw new Error("GIT_RUN_BASELINE_INVALID");
+      }
       inputSnapshot = baseline;
       inputSnapshotRef = baselineRef;
     } else {
+      if (
+        run.gitWorkspace.current.workspacePath !== workspaceRelativePath ||
+        run.gitWorkspace.current.indexPath !== indexRelativePath
+      ) {
+        throw new Error("GIT_WORKSPACE_PATH_INVALID");
+      }
       baselineRef = run.gitWorkspace.runBaselineSnapshot;
-      baseline = await this.readSnapshot(baselineRef);
-      const previous = run.gitWorkspace.revisions[String(request.revision - 1)];
-      if (previous?.resultSnapshot === undefined) throw new Error("GIT_REVISION_INPUT_MISSING");
-      inputSnapshotRef = previous.resultSnapshot;
-      inputSnapshot = await this.readSnapshot(inputSnapshotRef);
+      inputSnapshotRef = run.gitWorkspace.current.inputSnapshot;
+      [baseline, inputSnapshot] = await Promise.all([
+        this.readSnapshot(baselineRef),
+        this.readSnapshot(inputSnapshotRef)
+      ]);
       runGitDirectory = dirname(resolve(this.store.dataDirectory, run.gitWorkspace.objectDirectory));
       objectDirectory = run.gitWorkspace.objectDirectory;
+      if (
+        repairWorkspaceSeed !== undefined &&
+        !artifactRefsEqual(inputSnapshotRef, repairWorkspaceSeed)
+      ) {
+        throw new Error("GIT_REPAIR_SEED_BINDING_INVALID");
+      }
+    }
+    if (
+      !verifyGitWorkspaceSnapshot(baseline) ||
+      baseline.snapshotKind !== "RUN_BASELINE" ||
+      !verifyGitWorkspaceSnapshot(inputSnapshot) ||
+      inputSnapshot.repositoryId !== baseline.repositoryId ||
+      inputSnapshot.includedPathPolicyHash !== baseline.includedPathPolicyHash ||
+      (repairWorkspaceSeed !== undefined && inputSnapshot.snapshotKind !== "RUN_RESULT")
+    ) {
+      throw new Error("GIT_WORKSPACE_SEED_INVALID");
     }
 
-    const workspaceRoot = resolve(revisionRoot, `workspace-${randomUUID()}`);
+    await rm(workspaceRoot, { recursive: true, force: true });
     await materializeGitSnapshot({
       snapshot: inputSnapshot,
       runGitDirectory,
       dataDirectory: runRoot,
       destination: workspaceRoot
     });
-    await this.syncCanonicalTask(initial.canonicalProjectRoot, run, workspaceRoot);
-    const workspaceRelativePath = portableRelative(this.store.dataDirectory, workspaceRoot);
-    const sandboxId = `workspace-${randomUUID()}`;
+    await this.syncCanonicalTask(run, workspaceRoot);
+    const workspaceMutationId = randomUUID();
     const result = await this.mutations.mutate(
       {
-        requestId: `worker-workspace:${request.jobId}:r${revisionKey}:${sandboxId}`,
-        payload: { baselineHash: baseline.snapshotHash, workspaceRelativePath, sandboxId },
+        requestId: `worker-workspace:${request.jobId}:${workspaceMutationId}`,
+        payload: { workspaceRelativePath },
         expectedStateVersion: initial.stateVersion,
         expectedJobId: request.jobId,
         expectedFence: run.fence,
-        expectedRevision: request.revision,
         expectedPhases: ["PREPARING"]
       },
       (state) => ({
@@ -478,22 +715,14 @@ export class WorkerRunner {
             inclusionPolicyHash: baseline.includedPathPolicyHash,
             objectDirectory,
             runBaselineSnapshot: baselineRef,
-            revisions: {
-              ...(active.gitWorkspace?.revisions ?? {}),
-              [revisionKey]: {
-                revision: request.revision,
-                indexPath: portableRelative(this.store.dataDirectory, resolve(revisionRoot, "result.index")),
-                workspacePath: workspaceRelativePath,
-                inputSnapshot: inputSnapshotRef
-              }
+            current: {
+              indexPath: indexRelativePath,
+              workspacePath: workspaceRelativePath,
+              inputSnapshot: inputSnapshotRef
             }
           },
           workspace: {
-            relativePath: workspaceRelativePath,
-            baselineHash: baseline.snapshotHash,
-            generation: 0,
-            sandboxId,
-            mutable: true
+            relativePath: workspaceRelativePath
           }
         })),
         response: { phase: "RUNNING", workspaceRelativePath }
@@ -505,20 +734,16 @@ export class WorkerRunner {
   }
 
   private async syncCanonicalTask(
-    projectRoot: string,
     run: RunRecord,
     workspaceRoot: string
   ): Promise<void> {
     const manifest = taskManifestSchema.parse(JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(run.taskManifest))
     ));
-    const sourcePath = isAbsolute(run.canonicalTaskPath)
-      ? run.canonicalTaskPath
-      : resolve(projectRoot, run.canonicalTaskPath);
     const targetPath = resolve(workspaceRoot, manifest.canonicalTaskPath);
     if (!isInside(workspaceRoot, targetPath)) throw new Error("TASK_WORKTREE_PATH_INVALID");
     await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
-    await writeFile(targetPath, await readFile(sourcePath));
+    await writeFile(targetPath, await this.store.readArtifact(run.taskSource));
   }
 
   private async beginAttempt(
@@ -534,12 +759,10 @@ export class WorkerRunner {
         payload: {
           attemptId,
           generation,
-          revision: request.revision,
           providerRuntimeConfigHash: request.providerRuntimeConfigHash
         },
         expectedJobId: request.jobId,
         expectedFence,
-        expectedRevision: request.revision,
         expectedPhases: ["RUNNING"]
       },
       (state) => ({
@@ -549,16 +772,12 @@ export class WorkerRunner {
             ...run.workerAttempts,
             {
               attemptId,
-              revision: request.revision,
               generation,
               providerRuntimeConfigHash: request.providerRuntimeConfigHash,
               status: "PREPARING",
               startedAt
             }
-          ],
-          workspace: run.workspace === undefined
-            ? undefined
-            : { ...run.workspace, generation }
+          ]
         })),
         response: { attemptId, generation, status: "PREPARING" }
       })
@@ -573,16 +792,22 @@ export class WorkerRunner {
     event: WorkerEvent
   ): Promise<boolean> {
     if (event.attemptId !== attemptId) return false;
-    const durableEvent: WorkerEvent = event.type === "FAILED" || event.type === "BLOCKED"
+    const durableEvent: WorkerEvent = event.type === "COMPLETED"
       ? {
-          ...event,
-          message: redactPiValue(event.message, [
-            (await this.store.readState()).canonicalProjectRoot,
-            this.store.dataDirectory,
-            homedir()
-          ]) as string
+          type: "COMPLETED",
+          attemptId: event.attemptId,
+          piSessionId: event.piSessionId
         }
-      : event;
+      : event.type === "FAILED" || event.type === "BLOCKED"
+        ? {
+            ...event,
+            message: redactPiValue(event.message, [
+              (await this.store.readState()).canonicalProjectRoot,
+              this.store.dataDirectory,
+              homedir()
+            ]) as string
+          }
+        : event;
     if (
       event.type === "TEXT_DELTA" ||
       event.type === "TOOL_STARTED" ||
@@ -596,7 +821,6 @@ export class WorkerRunner {
             payload: durableEvent,
             expectedJobId: request.jobId,
             expectedFence,
-            expectedRevision: request.revision,
             expectedGeneration: generation,
             expectedAttemptId: attemptId,
             expectedPhases: ["RUNNING"]
@@ -625,6 +849,7 @@ export class WorkerRunner {
     const terminalEvent = durableEvent as Extract<WorkerEvent, {
       type: "COMPLETED" | "BLOCKED" | "FAILED" | "TIMED_OUT" | "CANCELED";
     }>;
+    const completedEvent = event.type === "COMPLETED" ? event : undefined;
     const endedAt = new Date().toISOString();
     const status = terminalEvent.type;
     const terminalReason = terminalEvent.type === "COMPLETED"
@@ -639,10 +864,10 @@ export class WorkerRunner {
       : terminalEvent.type === "TIMED_OUT"
         ? {
             code: terminalEvent.code,
-            resumeActions: ["retry_provider", "approve_new_manifest_revision", "cancel"]
+            resumeActions: ["retry_provider", "cancel"]
           }
         : terminalEvent.type === "BLOCKED"
-          ? { code: terminalEvent.code, resumeActions: ["approve_new_manifest_revision", "cancel"] }
+          ? { code: terminalEvent.code, resumeActions: ["cancel"] }
           : terminalEvent.type === "FAILED"
             ? { code: terminalEvent.code, resumeActions: ["retry_provider", "cancel"] }
             : { code: "ATTEMPT_CANCELED", resumeActions: ["retry_provider", "cancel"] };
@@ -653,40 +878,61 @@ export class WorkerRunner {
           payload: terminalEvent,
           expectedJobId: request.jobId,
           expectedFence,
-          expectedRevision: request.revision,
           expectedGeneration: generation,
           expectedAttemptId: attemptId,
           expectedPhases: ["RUNNING"]
         },
-        (state) => ({
-          nextState: nextStateWithRun(state, request.jobId, (run) => ({
-            ...run,
-            phase: pause === undefined ? run.phase : "PAUSED",
-            pause,
-            workerAttempts: replaceAttempt(run, attemptId, (attempt) => ({
-              ...attempt,
-              status,
-              ...(terminalEvent.type === "COMPLETED"
-                ? { piSessionId: terminalEvent.piSessionId }
-                : {}),
-              ...(terminalReason === undefined ? {} : { terminalReason }),
-              endedAt
-            })),
-            ...(terminalEvent.type === "FAILED"
-              ? {
-                  lastError: {
-                    code: terminalEvent.code,
-                    stage: "pi-provider",
-                    message: terminalEvent.message,
-                    retryable: true,
-                    nextActions: ["retry_provider", "cancel"],
-                    artifacts: []
+        async (state) => {
+          let sessionArtifact: RunRecord["workerAttempts"][number]["sessionArtifact"];
+          if (completedEvent !== undefined) {
+            const workspace = state.runs[request.jobId]?.workspace;
+            if (workspace === undefined) throw new Error("PI_WORKSPACE_MISSING");
+            sessionArtifact = await this.persistCompletedSessionArtifact(
+              request,
+              attemptId,
+              generation,
+              expectedFence,
+              completedEvent,
+              resolve(
+                this.store.dataDirectory,
+                workspace.relativePath,
+                ".smartflow-runtime"
+              )
+            );
+          }
+          return {
+            nextState: nextStateWithRun(state, request.jobId, (run) => ({
+              ...run,
+              phase: pause === undefined ? run.phase : "PAUSED",
+              pause,
+              workerAttempts: replaceAttempt(run, attemptId, (attempt) => ({
+                ...attempt,
+                status,
+                ...(terminalEvent.type === "COMPLETED"
+                  ? {
+                      piSessionId: terminalEvent.piSessionId,
+                      sessionArtifact
+                    }
+                  : {}),
+                ...(terminalReason === undefined ? {} : { terminalReason }),
+                endedAt
+              })),
+              ...(terminalEvent.type === "FAILED"
+                ? {
+                    lastError: {
+                      code: terminalEvent.code,
+                      stage: "pi-provider",
+                      message: terminalEvent.message,
+                      retryable: true,
+                      nextActions: ["retry_provider", "cancel"],
+                      artifacts: []
+                    }
                   }
-                }
-              : {})
-          })),
-          response: { attemptId, status }
-        })
+                : {})
+            })),
+            response: { attemptId, status }
+          };
+        }
       );
       return true;
     } catch (error) {
@@ -695,52 +941,70 @@ export class WorkerRunner {
     }
   }
 
-  private async persistSessionArtifact(
+  private async persistCompletedSessionArtifact(
     request: WorkerRunRequest,
     attemptId: string,
     generation: number,
-    expectedFence: number
-  ): Promise<void> {
+    expectedFence: number,
+    terminal: Extract<WorkerEvent, { type: "COMPLETED" }>,
+    runtimeRoot: string
+  ): Promise<NonNullable<RunRecord["workerAttempts"][number]["sessionArtifact"]>> {
     const state = await this.store.readState();
-    const attempt = currentAttempt(state.runs[request.jobId]);
-    if (attempt?.attemptId !== attemptId || attempt.piSessionId === undefined) return;
+    const run = state.runs[request.jobId];
+    const attempt = currentAttempt(run);
+    if (
+      run?.fence !== expectedFence ||
+      attempt?.attemptId !== attemptId ||
+      attempt.generation !== generation ||
+      terminal.sessionFile === undefined
+    ) {
+      throw new Error("PI_SESSION_FILE_MISSING");
+    }
+    if (attempt.sessionArtifact !== undefined) {
+      if (
+        attempt.status !== "COMPLETED" ||
+        attempt.piSessionId !== terminal.piSessionId
+      ) {
+        throw new Error("PI_SESSION_ARTIFACT_STATE_INVALID");
+      }
+      return attempt.sessionArtifact;
+    }
+    if (
+      !new Set(["PREPARING", "RUNNING"]).has(attempt.status) ||
+      (attempt.piSessionId !== undefined && attempt.piSessionId !== terminal.piSessionId)
+    ) {
+      throw new Error("PI_SESSION_ARTIFACT_STATE_INVALID");
+    }
+    const fileInfo = await lstat(terminal.sessionFile);
+    if (!fileInfo.isFile() || fileInfo.isSymbolicLink()) {
+      throw new Error("PI_SESSION_FILE_INVALID");
+    }
+    const [runtimeRealPath, sessionRealPath] = await Promise.all([
+      realpath(runtimeRoot),
+      realpath(terminal.sessionFile)
+    ]);
+    if (!isInside(runtimeRealPath, sessionRealPath)) {
+      throw new Error("PI_SESSION_FILE_OUTSIDE_RUNTIME");
+    }
+    const sessionFileRelativePath = sessionRelativePath(
+      portableRelative(runtimeRealPath, sessionRealPath)
+    );
+    const sessionBytes = await readFile(sessionRealPath);
     const body = {
-      schemaVersion: 1,
       jobId: request.jobId,
-      revision: request.revision,
       attemptId,
       generation,
-      piSessionId: attempt.piSessionId,
+      piSessionId: terminal.piSessionId,
       providerRuntimeConfigHash: attempt.providerRuntimeConfigHash,
-      terminalStatus: attempt.status,
+      terminalStatus: "COMPLETED",
+      sessionFileRelativePath,
+      sessionJsonlBase64: sessionBytes.toString("base64"),
       ...(attempt.containmentId === undefined ? {} : { containmentId: attempt.containmentId }),
       createdAt: new Date().toISOString()
     };
-    const artifact = await this.store.writeArtifact(
+    return this.store.writeArtifact(
       `runs/${request.jobId}/attempts/${attemptId}/session-artifact.json`,
       Buffer.from(JSON.stringify(body), "utf8")
-    );
-    await this.mutations.mutate(
-      {
-        requestId: `pi-attempt:${attemptId}:session-artifact`,
-        payload: { attemptId, artifact },
-        expectedJobId: request.jobId,
-        expectedFence,
-        expectedRevision: request.revision,
-        expectedGeneration: generation,
-        expectedAttemptId: attemptId,
-        expectedPhases: ["RUNNING", "PAUSED"]
-      },
-      (current) => ({
-        nextState: nextStateWithRun(current, request.jobId, (run) => ({
-          ...run,
-          workerAttempts: replaceAttempt(run, attemptId, (value) => ({
-            ...value,
-            sessionArtifact: artifact
-          }))
-        })),
-        response: { attemptId, artifact }
-      })
     );
   }
 
@@ -779,7 +1043,6 @@ export class WorkerRunner {
         payload: { attemptId, observed },
         expectedJobId: request.jobId,
         expectedFence,
-        expectedRevision: request.revision,
         expectedGeneration: generation,
         expectedAttemptId: attemptId,
         expectedPhases: ["RUNNING", "PAUSED"]
@@ -821,60 +1084,48 @@ export class WorkerRunner {
     generation: number,
     expectedFence: number
   ): Promise<void> {
-    const revisionRoot = resolve(
-      this.store.dataDirectory,
-      "runs",
-      request.jobId,
-      `revision-${String(request.revision)}`
-    );
+    const runRoot = resolve(this.store.dataDirectory, "runs", request.jobId);
+    const currentWorkspace = prepared.run.gitWorkspace?.current;
+    if (currentWorkspace === undefined) throw new Error("GIT_CURRENT_WORKSPACE_MISSING");
+    const indexPath = resolve(this.store.dataDirectory, currentWorkspace.indexPath);
+    if (!isInside(runRoot, indexPath)) throw new Error("GIT_CURRENT_INDEX_PATH_INVALID");
+    await this.syncCanonicalTask(prepared.run, prepared.workspaceRoot);
     const resultSnapshot = await captureGitSnapshot({
       projectRoot: prepared.workspaceRoot,
-      dataDirectory: resolve(this.store.dataDirectory, "runs", request.jobId),
+      dataDirectory: runRoot,
       activeWorktreeRoot: initial.canonicalProjectRoot,
       includeAllFiles: true,
       runGitDirectory: prepared.runGitDirectory,
-      indexPath: resolve(revisionRoot, "result.index"),
+      indexPath,
       repositoryId: prepared.baseline.repositoryId,
-      snapshotKind: "REVISION_RESULT",
-      revision: request.revision,
+      snapshotKind: "RUN_RESULT",
       includedPathPolicyHash: prepared.baseline.includedPathPolicyHash
     });
     const resultSnapshotBytes = Buffer.from(JSON.stringify(resultSnapshot), "utf8");
+    const resultSnapshotHash = createHash("sha256").update(resultSnapshotBytes).digest("hex");
     const resultSnapshotRef = await this.store.writeArtifact(
-      `runs/${request.jobId}/revision-${String(request.revision)}/snapshots/result-${createHash("sha256").update(resultSnapshotBytes).digest("hex")}.json`,
+      `runs/${request.jobId}/snapshots/run-result-${resultSnapshotHash}.json`,
       resultSnapshotBytes
     );
     const built = await buildGitCandidate({
       runBaseline: prepared.baseline,
-      revisionInput: prepared.inputSnapshot,
-      revisionResult: resultSnapshot
+      runResult: resultSnapshot
     });
     const candidate = built.candidate;
-    await this.hooks.beforeCandidateArtifact?.({
-      jobId: request.jobId,
-      revision: request.revision,
-      attemptId,
-      generation,
-      candidate
-    });
     const beforeArtifacts = await this.store.readState();
     if (!this.matchesAttempt(beforeArtifacts, request, attemptId, generation, expectedFence)) {
       return;
     }
     const candidateRef = await this.store.writeArtifact(
-      `runs/${request.jobId}/revision-${String(request.revision)}/candidates/${attemptId}-${candidate.candidateHash}.json`,
+      `runs/${request.jobId}/candidates/candidate-${candidate.candidateHash}.json`,
       Buffer.from(JSON.stringify(candidate), "utf8")
     );
 
     const manifest = taskManifestSchema.parse(JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(prepared.run.taskManifest))
     ));
-    const reviewTaskPath = resolve(prepared.workspaceRoot, manifest.canonicalTaskPath);
-    if (!isInside(prepared.workspaceRoot, reviewTaskPath)) {
-      throw new Error("TASK_WORKTREE_PATH_INVALID");
-    }
     const reviewTaskSourceHash = createHash("sha256")
-      .update(await readFile(reviewTaskPath))
+      .update(await this.store.readArtifact(prepared.run.taskSource))
       .digest("hex");
     const candidateIncomplete = candidate.operations.length === 0 && !manifest.allowNoChange;
 
@@ -884,7 +1135,6 @@ export class WorkerRunner {
         payload: { attemptId, generation, candidateHash: candidate.candidateHash },
         expectedJobId: request.jobId,
         expectedFence,
-        expectedRevision: request.revision,
         expectedGeneration: generation,
         expectedAttemptId: attemptId,
         expectedPhases: ["RUNNING"]
@@ -896,8 +1146,8 @@ export class WorkerRunner {
         if (attempt?.attemptId !== attemptId || attempt.status !== "COMPLETED") {
           throw new Error("PI_ATTEMPT_NOT_COMPLETED");
         }
-        const revisionWorkspace = run.gitWorkspace?.revisions[String(request.revision)];
-        if (revisionWorkspace === undefined) throw new Error("GIT_REVISION_WORKSPACE_MISSING");
+        const activeWorkspace = run.gitWorkspace?.current;
+        if (activeWorkspace === undefined) throw new Error("GIT_CURRENT_WORKSPACE_MISSING");
         let pendingAction: RunRecord["pendingAction"];
         if (!candidateIncomplete) {
           if (attempt.piSessionId === undefined) throw new Error("PI_SESSION_MISSING");
@@ -909,7 +1159,6 @@ export class WorkerRunner {
           pendingAction = {
             ...createReviewHostAction(
               {
-                revision: run.revision,
                 taskSourceHash: reviewTaskSourceHash,
                 candidateHash: candidate.candidateHash,
                 changedPaths: candidate.operations.map((operation) => operation.path),
@@ -927,20 +1176,15 @@ export class WorkerRunner {
             ...active,
             phase: candidateIncomplete ? "FIXING" : "REVIEW_PENDING",
             candidate: candidateRef,
+            recovery: clearRepairContinuation(active.recovery),
             gitWorkspace: active.gitWorkspace === undefined
               ? undefined
               : {
                   ...active.gitWorkspace,
-                  revisions: {
-                    ...active.gitWorkspace.revisions,
-                    [String(request.revision)]: {
-                      revision: revisionWorkspace.revision,
-                      indexPath: revisionWorkspace.indexPath,
-                      workspacePath: revisionWorkspace.workspacePath,
-                      inputSnapshot: revisionWorkspace.inputSnapshot,
-                      resultSnapshot: resultSnapshotRef,
-                      candidate: candidateRef
-                    }
+                  current: {
+                    ...activeWorkspace,
+                    resultSnapshot: resultSnapshotRef,
+                    candidate: candidateRef
                   }
                 },
             ...(pendingAction === undefined ? {} : { pendingAction }),
@@ -967,7 +1211,6 @@ export class WorkerRunner {
   private async protectedReadPaths(
     state: ProjectState,
     jobId: string,
-    revision: number,
     workspaceRoot: string
   ): Promise<string[]> {
     const protectedPaths = new Set<string>([
@@ -979,15 +1222,11 @@ export class WorkerRunner {
       if (entry.name !== jobId) protectedPaths.add(resolve(runsRoot, entry.name));
     }
     const runRoot = resolve(runsRoot, jobId);
-    const revisionName = `revision-${String(revision)}`;
     for (const entry of await readdir(runRoot, { withFileTypes: true }).catch(() => [])) {
       const path = resolve(runRoot, entry.name);
-      if (entry.name !== revisionName) protectedPaths.add(path);
-    }
-    const revisionRoot = resolve(runRoot, revisionName);
-    for (const entry of await readdir(revisionRoot, { withFileTypes: true }).catch(() => [])) {
-      const path = resolve(revisionRoot, entry.name);
-      if (!isInside(path, workspaceRoot) && !isInside(workspaceRoot, path)) protectedPaths.add(path);
+      if (!isInside(path, workspaceRoot) && !isInside(workspaceRoot, path)) {
+        protectedPaths.add(path);
+      }
     }
     return [...protectedPaths];
   }
@@ -1004,7 +1243,6 @@ export class WorkerRunner {
     return run !== undefined &&
       state.activeRunsByTaskPath[run.canonicalTaskPath] === request.jobId &&
       run.fence === expectedFence &&
-      run.revision === request.revision &&
       attempt?.attemptId === attemptId &&
       attempt.generation === generation;
   }
@@ -1019,12 +1257,11 @@ export class WorkerRunner {
     try {
       await this.mutations.mutate(
         {
-          requestId: `pi-pause:${request.jobId}:r${String(request.revision)}:s${String(expectedStateVersion)}:${code}`,
+          requestId: `pi-pause:${request.jobId}:s${String(expectedStateVersion)}:${code}`,
           payload: { code, resumeActions },
           expectedStateVersion,
           expectedJobId: request.jobId,
           expectedFence,
-          expectedRevision: request.revision,
           expectedPhases: ["PREPARING"]
         },
         (state) => ({
@@ -1039,7 +1276,7 @@ export class WorkerRunner {
     } catch (error) {
       if (
         error instanceof StateStoreError &&
-        new Set(["STATE_VERSION_MISMATCH", "STALE_FENCE", "REVISION_MISMATCH", "STATE_INVALID"])
+        new Set(["STATE_VERSION_MISMATCH", "STALE_FENCE", "STATE_INVALID"])
           .has(error.code)
       ) return;
       throw error;

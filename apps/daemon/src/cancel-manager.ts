@@ -9,8 +9,6 @@ import { cleanupGitRunTemporaryState } from "@smartflow/workspace";
 
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
 
-const terminalPhases = new Set<RunPhase>(["COMPLETED", "CANCELED", "FAILED"]);
-
 export interface CancellationRuntime {
   stopWorker(attempt: WorkerAttempt | undefined): Promise<boolean>;
   revokeAction(actionId: string): Promise<boolean>;
@@ -74,47 +72,6 @@ export class CancelManager {
     this.mutations = new ProjectMutationExecutor(store);
   }
 
-  public async request(jobId: string, reason: string): Promise<CancellationResult> {
-    const normalizedReason = reason.trim();
-    if (normalizedReason.length === 0) throw new Error("Cancellation reason is required");
-    const state = await this.store.readState();
-    const run = state.runs[jobId];
-    if (run === undefined) throw new Error(`Unknown cancellation run: ${jobId}`);
-    if (run.phase === "CANCELING" || terminalPhases.has(run.phase)) {
-      return this.result(state, run, run.phase === "CANCELED", []);
-    }
-    const attempt = currentAttempt(run);
-    const requestedAt = new Date().toISOString();
-    const committed = (await this.mutations.mutate(
-      {
-        requestId: `cancel:${jobId}:r${String(run.revision)}:requested`,
-        payload: { reason: normalizedReason },
-        expectedJobId: jobId,
-        expectedFence: run.fence,
-        expectedRevision: run.revision,
-        ...(attempt === undefined ? {} : {
-          expectedGeneration: attempt.generation,
-          expectedAttemptId: attempt.attemptId
-        }),
-        expectedPhases: [run.phase]
-      },
-      (currentState) => ({
-        nextState: nextStateWithRun(currentState, jobId, (current) => ({
-          ...current,
-          phase: "CANCELING",
-          pause: undefined,
-          cancellation: {
-            reason: normalizedReason,
-            requestedAt,
-            status: "REQUESTED"
-          }
-        })),
-        response: { phase: "CANCELING" }
-      })
-    )).state;
-    return this.result(committed, committed.runs[jobId] ?? run, false, []);
-  }
-
   public async reconcile(jobId: string): Promise<CancellationResult> {
     const state = await this.store.readState();
     const run = state.runs[jobId];
@@ -143,11 +100,10 @@ export class CancelManager {
     if (blockedReasons.length > 0) {
       const committed = (await this.mutations.mutate(
         {
-          requestId: `cancel:${jobId}:r${String(run.revision)}:blocked:${blockedReasons.join("+")}`,
+          requestId: `cancel:${jobId}:blocked:${blockedReasons.join("+")}`,
           payload: { blockedReasons },
           expectedJobId: jobId,
           expectedFence: run.fence,
-          expectedRevision: run.revision,
           ...(attempt === undefined ? {} : {
             expectedGeneration: attempt.generation,
             expectedAttemptId: attempt.attemptId
@@ -185,11 +141,10 @@ export class CancelManager {
     const endedAt = new Date().toISOString();
     const committed = (await this.mutations.mutate(
       {
-        requestId: `cancel:${jobId}:r${String(run.revision)}:completed`,
+        requestId: `cancel:${jobId}:completed`,
         payload: { status: "COMPLETED" },
         expectedJobId: jobId,
         expectedFence: run.fence,
-        expectedRevision: run.revision,
         ...(attempt === undefined ? {} : {
           expectedGeneration: attempt.generation,
           expectedAttemptId: attempt.attemptId

@@ -8,8 +8,7 @@ describe("Pi JSONL RPC client", () => {
   it("correlates commands and streams SDK events", async () => {
     const stdin = new PassThrough();
     const stdout = new PassThrough();
-    const stderr = new PassThrough();
-    const client = new PiRpcClient({ stdin, stdout, stderr });
+    const client = new PiRpcClient({ stdin, stdout });
     const written: string[] = [];
     stdin.setEncoding("utf8");
     stdin.on("data", (chunk: string) => written.push(chunk));
@@ -34,7 +33,7 @@ describe("Pi JSONL RPC client", () => {
     const stdout = new PassThrough();
     let heartbeatCount = 0;
     const client = new PiRpcClient(
-      { stdin, stdout, stderr: new PassThrough() },
+      { stdin, stdout },
       (event) => {
         if (event.type !== "extension_ui_request" || event.statusKey !== "smartflow-heartbeat") {
           return false;
@@ -62,7 +61,7 @@ describe("Pi JSONL RPC client", () => {
   it("fails closed on malformed JSONL", async () => {
     const stdin = new PassThrough();
     const stdout = new PassThrough();
-    const client = new PiRpcClient({ stdin, stdout, stderr: new PassThrough() });
+    const client = new PiRpcClient({ stdin, stdout });
     const next = client.events()[Symbol.asyncIterator]().next();
     stdout.write("not-json\n");
     await expect(next).rejects.toThrow(/PI_RPC_MALFORMED_JSONL/u);

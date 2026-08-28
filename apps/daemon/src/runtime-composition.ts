@@ -6,7 +6,7 @@ import { StructuredLogger } from "@smartflow/observability";
 import type { PublishServiceResult, WorkspaceApplyAdapter } from "@smartflow/publish";
 import type { WorkerProvider } from "@smartflow/provider-core";
 import { PI_MINIMUM_ATTEMPT_DEADLINE_MS } from "@smartflow/provider-pi";
-import type { AgentAdapter, AgentRunOutcome } from "@smartflow/review";
+import type { AgentAdapter } from "@smartflow/review";
 import type { ProjectState, RunRecord, WorkerAttempt } from "@smartflow/state-store";
 import { taskManifestSchema } from "@smartflow/task-manifest";
 import { ExecutionSandboxAdapter } from "@smartflow/workspace";
@@ -20,6 +20,7 @@ import type {
 import type { ProjectPipelineContext } from "./project-runtime.js";
 import { PublishCoordinator } from "./publish-coordinator.js";
 import { RepairCoordinator } from "./repair-coordinator.js";
+import { resolveRepairContinuation } from "./repair-continuation.js";
 import {
   RecoveryManager,
   verifyRunArtifacts,
@@ -30,7 +31,7 @@ import {
   ReviewRunner,
   type ReviewRunnerOptions
 } from "./review-runner.js";
-import { WorkerRunner } from "./worker-runner.js";
+import { WorkerRunner, type WorkerRunRequest } from "./worker-runner.js";
 
 function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
   const value = record?.[key];
@@ -58,24 +59,6 @@ function attemptDeadlineMs(config: Readonly<Record<string, unknown>>): number {
     : 300_000;
 }
 
-const unavailableReviewOutcome: AgentRunOutcome = {
-  kind: "FAILED",
-  code: "REVIEW_ADAPTER_UNAVAILABLE",
-  message: "No daemon Review Adapter is configured"
-};
-
-const unavailableReviewAdapter: AgentAdapter = {
-  id: "unavailable",
-  probe: () => Promise.resolve({
-    available: false,
-    agentId: "unavailable",
-    reason: "No daemon Review Adapter is configured"
-  }),
-  createSession: () => Promise.resolve(unavailableReviewOutcome),
-  resume: () => Promise.resolve(unavailableReviewOutcome),
-  cancel: () => Promise.resolve(false)
-};
-
 const defaultReviewOptions: Omit<ReviewRunnerOptions, "logger"> = {
   deadlineMs: 45 * 60_000,
   maxAttempts: 3
@@ -83,45 +66,41 @@ const defaultReviewOptions: Omit<ReviewRunnerOptions, "logger"> = {
 
 const DEFAULT_NO_PROGRESS_THRESHOLD = 15;
 
+type WorkerContinuation = Pick<WorkerRunRequest, "prompt" | "resumeSession">;
+
 export class ProductionRuntimeComposition {
   public constructor(
+    private readonly reviewAdapter: AgentAdapter,
     private readonly logger = new StructuredLogger("smartflow-runtime"),
     private readonly workspaceApplyAdapter?: WorkspaceApplyAdapter,
     private readonly provider?: WorkerProvider,
     private readonly providerRuntimeConfig: Readonly<Record<string, unknown>> = Object.freeze({}),
     private readonly providerRuntimeResolver?: ProviderRuntimeResolver,
-    private readonly reviewAdapter: AgentAdapter = unavailableReviewAdapter,
     private readonly reviewOptions: Omit<ReviewRunnerOptions, "logger"> = defaultReviewOptions,
     private readonly noProgressThreshold = DEFAULT_NO_PROGRESS_THRESHOLD
   ) {}
 
   private repairCoordinator(
-    store: ProjectPipelineContext["store"],
-    providerRuntimeConfig: Readonly<Record<string, unknown>>
+    store: ProjectPipelineContext["store"]
   ): RepairCoordinator {
-    return new RepairCoordinator(
-      store,
-      providerRuntimeConfig,
-      this.noProgressThreshold
-    );
+    return new RepairCoordinator(store, this.noProgressThreshold);
   }
 
   private async prepareRepairAndContinue(
-    context: ProjectPipelineContext,
-    providerRuntimeConfig: Readonly<Record<string, unknown>>
+    context: ProjectPipelineContext
   ): Promise<void> {
-    const outcome = await this.repairCoordinator(
-      context.store,
-      providerRuntimeConfig
-    ).prepare(context.jobId);
+    const outcome = await this.repairCoordinator(context.store).prepare(context.jobId);
     if (outcome.phase !== "PREPARING") return;
     const state = await context.store.readState();
     const run = state.runs[context.jobId];
-    if (run?.phase !== "PREPARING" || run.revision !== outcome.revision) return;
+    if (run?.phase !== "PREPARING") return;
     await this.runPipeline(this.contextForRun(context, run));
   }
 
-  public runPipeline = async (context: ProjectPipelineContext): Promise<void> => {
+  public runPipeline = async (
+    context: ProjectPipelineContext,
+    continuation?: WorkerContinuation
+  ): Promise<void> => {
     if (!(await this.contextCurrent(context))) return;
     if (!(await this.approvedSourceCurrent(context))) return;
     const state = await context.store.readState();
@@ -132,14 +111,22 @@ export class ProductionRuntimeComposition {
     ));
     const providerRuntime = this.resolveProviderRuntime(manifest.providerRuntimeConfigHash);
     if (run.phase === "FIXING") {
-      await this.prepareRepairAndContinue(
-        context,
-        providerRuntime.providerRuntimeConfig
-      );
+      await this.prepareRepairAndContinue(context);
       return;
     }
     if (run.phase !== "PREPARING") return;
-    const prompt = [
+    const repairContinuation = resolveRepairContinuation(run);
+    const workerContinuation: WorkerContinuation | undefined = repairContinuation === undefined
+      ? continuation
+      : {
+          prompt: repairContinuation.prompt,
+          resumeSession: {
+            sourceAttemptId: repairContinuation.sourceAttemptId,
+            expectedPiSessionId: repairContinuation.expectedPiSessionId,
+            sessionArtifact: repairContinuation.sessionArtifact
+          }
+        };
+    const prompt = workerContinuation?.prompt ?? [
       "Implement the approved SmartFlow tasks in the current isolated workspace.",
       "You may modify any file inside this workspace and may use Pi's official coding and shell tools directly.",
       ...manifest.tasks.flatMap((task) => [
@@ -152,18 +139,17 @@ export class ProductionRuntimeComposition {
       logger: this.logger
     }).run({
       jobId: context.jobId,
-      revision: manifest.revision,
       prompt,
       providerRuntimeConfigHash: manifest.providerRuntimeConfigHash,
-      attemptDeadlineMs: attemptDeadlineMs(providerRuntime.providerRuntimeConfig)
+      attemptDeadlineMs: attemptDeadlineMs(providerRuntime.providerRuntimeConfig),
+      ...(workerContinuation?.resumeSession === undefined
+        ? {}
+        : { resumeSession: workerContinuation.resumeSession })
     });
     const postWorkerState = await context.store.readState();
     const postWorkerRun = postWorkerState.runs[context.jobId];
     if (postWorkerRun?.phase === "FIXING") {
-      await this.prepareRepairAndContinue(
-        context,
-        providerRuntime.providerRuntimeConfig
-      );
+      await this.prepareRepairAndContinue(context);
       return;
     }
     if (postWorkerRun?.phase === "REVIEW_PENDING") {
@@ -245,11 +231,7 @@ export class ProductionRuntimeComposition {
       return;
     }
     if (result.action === "PREPARE_REPAIR") {
-      const providerRuntime = await this.providerRuntimeForRun(context);
-      await this.repairCoordinator(
-        context.store,
-        providerRuntime.providerRuntimeConfig
-      ).prepare(context.jobId);
+      await this.prepareRepairAndContinue(context);
       return;
     }
     if (result.action === "RUN_REVIEW") {
@@ -288,7 +270,7 @@ export class ProductionRuntimeComposition {
   private async inspectWorker(
     context: ProjectPipelineContext,
     attempt: WorkerAttempt | undefined
-  ): Promise<"RESUMABLE" | "STOPPED" | "UNKNOWN"> {
+  ): Promise<"STOPPED" | "UNKNOWN"> {
     if (attempt === undefined || !new Set(["PREPARING", "RUNNING"]).has(attempt.status)) {
       return "STOPPED";
     }
@@ -303,7 +285,6 @@ export class ProductionRuntimeComposition {
       context.store.dataDirectory,
       "runs",
       context.jobId,
-      `revision-${String(attempt.revision)}`,
       "pi-containments.json"
     );
     const adapter = new ExecutionSandboxAdapter(registryPath);
@@ -331,8 +312,8 @@ export class ProductionRuntimeComposition {
       store: context.store,
       projectId: context.projectId,
       jobId: context.jobId,
+      scheduledStateVersion: context.scheduledStateVersion,
       expectedFence: run.fence,
-      expectedRevision: run.revision,
       ...(attempt === undefined ? {} : {
         expectedGeneration: attempt.generation,
         expectedAttemptId: attempt.attemptId
@@ -385,11 +366,10 @@ export class ProductionRuntimeComposition {
     const attempt = currentAttempt(run);
     await new ProjectMutationExecutor(context.store).mutate(
       {
-        requestId: `approved-source-drift:${run.jobId}:r${String(run.revision)}:${observed}`,
+        requestId: `approved-source-drift:${run.jobId}:${observed}`,
         payload: { approvedHash, observed },
         expectedJobId: run.jobId,
         expectedFence: context.expectedFence,
-        expectedRevision: run.revision,
         ...(attempt === undefined ? {} : {
           expectedGeneration: attempt.generation,
           expectedAttemptId: attempt.attemptId
@@ -424,7 +404,7 @@ export class ProductionRuntimeComposition {
                 phase: "PAUSED",
                 pause: {
                   code: "APPROVED_SOURCE_DRIFT",
-                  resumeActions: ["approve_new_manifest_revision", "restore_approved_tasks", "cancel"]
+                  resumeActions: ["restore_approved_tasks", "cancel"]
                 },
                 updatedAt
               }
@@ -437,7 +417,7 @@ export class ProductionRuntimeComposition {
     this.logger.log({
       level: "warn",
       event: "runtime.approved_source_drift",
-      data: { projectId: context.projectId, jobId: context.jobId, revision: run.revision }
+      data: { projectId: context.projectId, jobId: context.jobId }
     });
     return false;
   }
@@ -456,7 +436,6 @@ export class ProductionRuntimeComposition {
     const attempt = currentAttempt(run);
     return state.activeRunsByTaskPath[run.canonicalTaskPath] === context.jobId &&
       run.fence === context.expectedFence &&
-      run.revision === context.expectedRevision &&
       (context.expectedGeneration === undefined || attempt?.generation === context.expectedGeneration) &&
       (context.expectedAttemptId === undefined || attempt?.attemptId === context.expectedAttemptId);
   }

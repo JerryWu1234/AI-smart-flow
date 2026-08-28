@@ -46,7 +46,6 @@ describe("publish path and Git safety", () => {
       {
         projectId: "project-1",
         jobId: "job-1",
-        revision: 1,
         candidateHash: "a".repeat(64),
         reviewHash: "b".repeat(64)
       },
@@ -123,7 +122,6 @@ describe("publish path and Git safety", () => {
       {
         projectId: "project-1",
         jobId: "job-1",
-        revision: 1,
         candidateHash: "a".repeat(64),
         reviewHash: "b".repeat(64)
       },
@@ -171,7 +169,6 @@ describe("publish path and Git safety", () => {
       {
         projectId: "project-1",
         jobId: "job-1",
-        revision: 1,
         candidateHash: "a".repeat(64),
         reviewHash: "b".repeat(64)
       },

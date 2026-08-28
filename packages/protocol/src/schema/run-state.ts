@@ -49,39 +49,67 @@ export const piWorkerAttemptStatusSchema = z.enum([
   "CANCELED"
 ]);
 
-export const piWorkerAttemptSchema = z
+const publicPiWorkerAttemptSchemaBase = z
   .object({
     attemptId: identifierSchema,
-    revision: positiveIntegerSchema,
     generation: nonNegativeIntegerSchema,
     providerRuntimeConfigHash: bareSha256Schema,
     status: piWorkerAttemptStatusSchema,
     piSessionId: identifierSchema.optional(),
     containmentId: identifierSchema.optional(),
     processIdentity: processIdentitySchema.optional(),
-    sessionArtifact: artifactRefSchema.optional(),
     terminalReason: nonEmptyStringSchema.optional(),
     startedAt: isoDateTimeSchema,
     endedAt: isoDateTimeSchema.optional()
   })
+  .strict();
+
+type PublicPiWorkerAttemptShape = z.infer<typeof publicPiWorkerAttemptSchemaBase>;
+
+function refinePiWorkerAttempt(
+  attempt: PublicPiWorkerAttemptShape,
+  context: z.RefinementCtx
+): void {
+  const active = attempt.status === "RUNNING";
+  if (active && (attempt.containmentId === undefined || attempt.processIdentity === undefined)) {
+    context.addIssue({
+      code: "custom",
+      path: ["containmentId"],
+      message: "RUNNING Pi Attempt requires containment and process identity"
+    });
+  }
+  const terminal = !new Set(["PREPARING", "RUNNING"]).has(attempt.status);
+  if (terminal !== (attempt.endedAt !== undefined)) {
+    context.addIssue({
+      code: "custom",
+      path: ["endedAt"],
+      message: terminal
+        ? "terminal Pi Attempt requires endedAt"
+        : "active Pi Attempt cannot contain endedAt"
+    });
+  }
+  if (attempt.status === "COMPLETED" && attempt.piSessionId === undefined) {
+    context.addIssue({
+      code: "custom",
+      path: ["piSessionId"],
+      message: "COMPLETED Pi Attempt requires piSessionId"
+    });
+  }
+}
+
+export const publicPiWorkerAttemptSchema = publicPiWorkerAttemptSchemaBase
+  .superRefine(refinePiWorkerAttempt);
+
+export const piWorkerAttemptSchema = publicPiWorkerAttemptSchemaBase
+  .extend({ sessionArtifact: artifactRefSchema.optional() })
   .strict()
   .superRefine((attempt, context) => {
-    const active = attempt.status === "RUNNING";
-    if (active && (attempt.containmentId === undefined || attempt.processIdentity === undefined)) {
+    refinePiWorkerAttempt(attempt, context);
+    if (attempt.status === "COMPLETED" && attempt.sessionArtifact === undefined) {
       context.addIssue({
         code: "custom",
-        path: ["containmentId"],
-        message: "RUNNING Pi Attempt requires containment and process identity"
-      });
-    }
-    const terminal = !new Set(["PREPARING", "RUNNING"]).has(attempt.status);
-    if (terminal !== (attempt.endedAt !== undefined)) {
-      context.addIssue({
-        code: "custom",
-        path: ["endedAt"],
-        message: terminal
-          ? "terminal Pi Attempt requires endedAt"
-          : "active Pi Attempt cannot contain endedAt"
+        path: ["sessionArtifact"],
+        message: "COMPLETED Pi Attempt requires sessionArtifact"
       });
     }
   });
@@ -169,8 +197,6 @@ export const durableReviewGateSchema = z
 
 export const durableReviewDecisionSchema = z
   .object({
-    schemaVersion: z.literal(2),
-    revision: positiveIntegerSchema,
     claimId: identifierSchema,
     reviewAttemptId: identifierSchema,
     taskSourceHash: bareSha256Schema,
@@ -184,8 +210,6 @@ export const durableReviewDecisionSchema = z
 
 export const durableLeaderDecisionSchema = z
   .object({
-    schemaVersion: z.literal(2),
-    revision: positiveIntegerSchema,
     reviewHash: bareSha256Schema,
     decision: z.enum(["accept", "repair", "pause"]),
     reason: z.string().trim().min(1),
@@ -239,7 +263,6 @@ export const hostActionSchema = z
     .object({
       type: z.literal("REVIEW"),
       actionId: identifierSchema,
-      revision: positiveIntegerSchema,
       taskSourceHash: bareSha256Schema,
       candidateHash: bareSha256Schema,
       reviewAttemptId: identifierSchema,
@@ -261,14 +284,13 @@ export const runSummarySchema = z
     projectId: identifierSchema,
     jobId: identifierSchema,
     phase: runPhaseSchema,
-    revision: positiveIntegerSchema,
     stateVersion: nonNegativeIntegerSchema,
     pause: z
       .object({ code: z.string().min(1), resumeActions: z.array(z.string().min(1)) })
       .strict()
       .optional(),
     pendingAction: hostActionSchema.optional(),
-    activeAttempt: piWorkerAttemptSchema.optional(),
+    activeAttempt: publicPiWorkerAttemptSchema.optional(),
     lastError: structuredErrorSchema.optional()
   })
   .strict()
@@ -288,6 +310,7 @@ export const runSummarySchema = z
 export type RunPhase = z.infer<typeof runPhaseSchema>;
 export type ProcessIdentity = z.infer<typeof processIdentitySchema>;
 export type PiWorkerAttemptStatus = z.infer<typeof piWorkerAttemptStatusSchema>;
+export type PublicPiWorkerAttempt = z.infer<typeof publicPiWorkerAttemptSchema>;
 export type PiWorkerAttempt = z.infer<typeof piWorkerAttemptSchema>;
 export type ReviewIssue = z.infer<typeof reviewIssueSchema>;
 export type TaskReview = z.infer<typeof taskReviewSchema>;

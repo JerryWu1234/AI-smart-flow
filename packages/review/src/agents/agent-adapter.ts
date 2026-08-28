@@ -1,10 +1,3 @@
-export interface AgentProbe {
-  available: boolean;
-  agentId: string;
-  version?: string;
-  reason?: string;
-}
-
 export interface AgentRunRequest {
   readonly runId: string;
   readonly cwd: string;
@@ -13,6 +6,11 @@ export interface AgentRunRequest {
   readonly outputPath: string;
   readonly deadlineMs: number;
   readonly model?: string;
+  /**
+   * Reasoning depth, passed through verbatim. Each Agent decides how to express
+   * it, and each Agent owns which values it accepts.
+   */
+  readonly effort?: string;
 }
 
 export type AgentRunOutcome =
@@ -22,8 +20,6 @@ export type AgentRunOutcome =
   | { kind: "CANCELED"; sessionId?: string };
 
 export interface AgentAdapter {
-  readonly id: string;
-  probe(): Promise<AgentProbe>;
   createSession(request: AgentRunRequest): Promise<AgentRunOutcome>;
   resume(sessionId: string, request: AgentRunRequest): Promise<AgentRunOutcome>;
   cancel(runId: string): Promise<boolean>;

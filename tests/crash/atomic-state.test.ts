@@ -27,14 +27,12 @@ const database = new DatabaseSync(databasePath);
 database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA wal_autocheckpoint = 0; BEGIN IMMEDIATE");
 database.prepare(\`
   UPDATE project_state
-  SET document_schema_version = ?,
-      state_version = ?,
+  SET state_version = ?,
       project_fence = ?,
       state_json = ?,
       updated_at = ?
   WHERE singleton = 1
 \`).run(
-  state.schemaVersion,
   state.stateVersion,
   state.projectFence,
   JSON.stringify(state),
@@ -133,14 +131,12 @@ process.stdin.once("data", () => {
   };
   database.prepare(\`
     UPDATE project_state
-    SET document_schema_version = ?,
-        state_version = ?,
+    SET state_version = ?,
         project_fence = ?,
         state_json = ?,
         updated_at = ?
     WHERE singleton = 1
   \`).run(
-    state.schemaVersion,
     state.stateVersion,
     state.projectFence,
     JSON.stringify(state),

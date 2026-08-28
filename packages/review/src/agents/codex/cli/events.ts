@@ -123,9 +123,3 @@ export function reduceCodexEventLine(
       return state;
   }
 }
-
-export function parseCodexJsonl(jsonl: string): CodexEventState {
-  return jsonl
-    .split(/\r?\n/u)
-    .reduce<CodexEventState>(reduceCodexEventLine, createCodexEventState());
-}

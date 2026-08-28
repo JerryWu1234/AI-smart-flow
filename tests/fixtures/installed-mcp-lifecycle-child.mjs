@@ -74,7 +74,6 @@ async function executeAndCancelSecondary(client, primaryScope) {
     try {
       secondCancel = await callMcp(client, "smartflow_cancel", {
         ...secondScope,
-        expectedRevision: Number(secondStatus.revision),
         expectedStateVersion: Number(secondStatus.stateVersion),
         requestId: `cancel-secondary-${randomUUID()}`,
         reason: "installed multi-run isolation check complete"
@@ -131,8 +130,18 @@ try {
     projectId: asString(execute.projectId, "smartflow_execute projectId"),
     jobId: asString(execute.jobId, "smartflow_execute jobId")
   };
-  if (typeof execute.revision !== "number" || !Number.isInteger(execute.revision)) {
-    throw new Error("smartflow_execute omitted its revision");
+  if (
+    typeof execute.stateVersion !== "number" ||
+    !Number.isInteger(execute.stateVersion) ||
+    execute.stateVersion < 0
+  ) {
+    throw new Error("smartflow_execute omitted its stateVersion");
+  }
+  if (execute.phase !== "PREPARING") {
+    throw new Error(`smartflow_execute returned unexpected phase ${String(execute.phase)}`);
+  }
+  if (Object.hasOwn(execute, "revision")) {
+    throw new Error("smartflow_execute leaked removed revision state");
   }
 
   stage = "secondary-run";

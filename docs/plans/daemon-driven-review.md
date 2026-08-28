@@ -33,6 +33,18 @@ host → daemon   review_turn() → NOT_READY(30s) → … → DONE（result.rev
 Host 协议不再包含 Reviewer session、worktree 或 review submission。Review 从此和 worker
 （`RUNNING`）、publish（`READY_TO_PUBLISH`）一样，是 Daemon 自己调度和恢复的阶段。
 
+### 自动返修的当前约束
+
+Review 返回 `REQUEST_CHANGES` 后，Daemon 沿用上述阶段和调度顺序。授权范围内的自动返修保持
+同一个 immutable Job、task manifest、task source、Provider config 与 workspace，为每轮创建新的
+Worker attempt/generation，并从上一轮 `sessionArtifact` 恢复原始 PI session JSONL，因此所有返修轮
+继续使用同一个 `piSessionId`。Reviewer session 的 `CREATE → RESUME` 行为以及 Review gate、Publish
+逻辑保持不变。
+
+当前 Job 不提供新 Revision 审批或任务定义替换入口。若 Review 要求超出原 TaskManifest 授权范围，
+Daemon 只保存绑定当前 task source/manifest hash 的 repair draft；用户取消当前 Job、更新 task source，
+再调用 `smartflow_execute` 创建新 Job。
+
 ---
 
 ## Step 0 — 前置确认（已完成）
@@ -154,13 +166,6 @@ packages/review/src/
 ### 契约
 
 ```ts
-export interface AgentProbe {
-  available: boolean;
-  agentId: string;               // "codex"
-  version?: string;              // "codex-cli 0.146.0"
-  reason?: string;               // 不可用原因
-}
-
 export interface AgentRunRequest {
   readonly runId: string;              // 日志/取消用，取 reviewAttemptId
   readonly cwd: string;                // worktree 绝对路径
@@ -169,6 +174,7 @@ export interface AgentRunRequest {
   readonly outputPath: string;         // 最终消息写到哪
   readonly deadlineMs: number;
   readonly model?: string;
+  readonly effort?: string;
 }
 
 export type AgentRunOutcome =
@@ -178,8 +184,6 @@ export type AgentRunOutcome =
   | { kind: "CANCELED"; sessionId?: string };
 
 export interface AgentAdapter {
-  readonly id: string;
-  probe(): Promise<AgentProbe>;
   createSession(request: AgentRunRequest): Promise<AgentRunOutcome>;
   resume(sessionId: string, request: AgentRunRequest): Promise<AgentRunOutcome>;
   cancel(runId: string): Promise<boolean>;
@@ -254,7 +258,7 @@ adapter 不认识 review 的语义）。schema 被拒时**不会**产生输出�
 测试放 `tests/unit/packages/review/`（`packages/review/package.json` 的 test 脚本已经指向那里）。
 
 - `codex-events.test.ts` —— JSONL 解析，固定 fixture，不起进程
-- `codex-adapter.test.ts` —— `probe()` 在本机返回 `available: true` + 版本号
+- `codex-adapter.test.ts` —— 真实 `createSession` 的启动失败、JSONL 输出、超时与取消
 - 手动冒烟（不进 CI）：临时 git repo + 简单 schema 跑一次真实 `createSession`，
   断言拿到 `sessionId` 和合规 JSON，再 `resume` 一次
 
@@ -347,8 +351,8 @@ export class ReviewRunner {
    `verifyRunArtifacts` + `observeApprovedSource` 漂移检查 + `ReviewCoordinator.beginReview`。
    `hostTurnId` 用 `DAEMON_REVIEWER_HOST_TURN_ID`，`turnToken` 沿用确定性派生，
    `deadlineAt = now + deadlineMs`
-3. 把 JSON Schema 写到 `runs/<job>/revision-N/reviews/<attemptId>.schema.json`，
-   最终消息输出到 `.../<attemptId>.output.json`
+3. 把 JSON Schema 写到 `runs/{jobId}/reviews/{attemptId}.schema.json`，
+   最终消息输出到 `runs/{jobId}/reviews/{attemptId}.output.json`
 4. `action.reviewerSession.mode === "CREATE" ? adapter.createSession(...) : adapter.resume(id, ...)`
 5. `reviewResultSchema.parse(outcome.finalResponse)`
    - 解析失败 → `attempt += 1`，用同一个 `sessionId` resume，prompt 带 `correction`
@@ -376,7 +380,7 @@ export class ReviewRunner {
 `apps/daemon/src/runtime-composition.ts` | 新增 `review = async (context) => {...}` 方法（与 `runPipeline` / `publish` 并列），构造 `ReviewRunner` 并按返回的 schedule 接着跑；`runPipeline` 末尾 worker 返回 `REVIEW_PENDING` 时接着跑 review（与 `FIXING → prepareRepairAndContinue` 对称） |
 `apps/daemon/src/recovery-manager.ts` | `REVIEW_PENDING`（:349）从 `WAIT_FOR_HOST` 改新增的 `RUN_REVIEW`；`REVIEWING` + `AWAITING_REVIEW`（:351-353）也改 `RUN_REVIEW`（重跑即可，`REVIEW_ATTEMPT_REUSED` 会挡重复记账） |
 `apps/daemon/src/main.ts` / 组装处 | 注册 Codex adapter，把 `review` callback 接进 `ProjectRuntimeOptions` |
-`apps/daemon/src/config.ts` | `review.strategy` 固定为 `"daemon-codex"`；reviewer 的 model / deadlineMs / maxAttempts 放这里 |
+`apps/daemon/src/config.ts` | `review.strategy` 默认 `"codex"`，可显式选择 `"codex-desktop"`；reviewer 的 model / effort / deadlineMs / maxAttempts 放这里 |
 
 ### 阻塞项：Step 5 里那两个分支必须和 Step 4 同批做
 
@@ -483,7 +487,7 @@ daemon 自己跑的 review 本来就没有 host 拥有这个回合，不该留�
 | 文件 | 改动 |
 |---|---|
 新增 `tests/unit/packages/review/codex-events.test.ts` | JSONL 事件解析 fixture（纯函数，不起进程）|
-新增 `tests/unit/packages/review/codex-adapter.test.ts` | `probe()`；超时 kill |
+新增 `tests/unit/packages/review/codex-adapter.test.ts` | 真实 Review 调用的启动失败；超时 kill |
 新增 `tests/unit/packages/review/review-prompt.test.ts` | prompt + JSON Schema 快照 |
 新增 `tests/integration/daemon-review.test.ts` | fake adapter 驱动：接受 / 返修 / 不合规重试 / 重试用尽 |
 `tests/helpers/host-workflow/workflow.ts` | 删 `REVIEW_REQUIRED` 分支和 `callbacks.review`；`Pick<ReviewTurnInput, ... "review" ...>`（:69）编译会报错 |
@@ -508,24 +512,25 @@ daemon 自己跑的 review 本来就没有 host 拥有这个回合，不该留�
 - **不新建包** —— adapter 和 prompt 都进 `packages/review`。等真有第三个以上 agent、
   或者别的包也要用 adapter 时再拆
 - **`listSessions()`** —— 接口不放，等有消费者再加
-- **`providerRuntimeConfigHash` 不动** —— reviewer 的 model / deadline 只进 `config.ts`，
-  不进那个 hash。一旦进了会牵动 manifest 编译、approved revision、
-  `PROVIDER_RUNTIME_CONFIG_DRIFT` 一整套
+- **`providerRuntimeConfigHash` 不动** —— reviewer 的 model / effort / deadline 只进 `config.ts`，
+  不进入 Worker Provider config hash。已经绑定到 immutable Job 的 Provider config 不可原地替换；
+  如需有意更换，用户必须取消当前 Job，再用新配置调用 `smartflow_execute` 创建新 Job
 - **不复用 worker 的环境变量通道** —— `worker-config.ts:46` 的 `isWorkerConfigurationKey`
   会把未知的 `SMARTFLOW_*` key 判成 `WORKER_CONFIGURATION_INVALID`。reviewer 配置走
   `SMARTFLOW_CONFIG` 那个 YAML，不走 worker 握手
 - **长轮询不做** —— 只把 `retryAfterMs` 调到 30 秒
-- **第二个 agent 不做** —— 只预留 `agents/codex/desktop`、`agents/claude/code-cli`、
-  `agents/claude/desktop`；有真实实现时再接 registry、配置、probe 与测试
+- **不共享 app-server、不控制 Desktop GUI** —— `codex-desktop` 每次 create/resume 只启动一个私有
+  `codex app-server --listen stdio://`；不连接、启动或聚焦 GUI，不增加 socket、连接池或审批 UI
+- **其他 agent 不做** —— Claude Code CLI / Desktop 仍只保留目录占位，有真实实现时再接配置和测试
 
 ## 新增文件总览
 
 ```
 packages/review/src/agents/agent-adapter.ts          统一契约与规范化结果
 packages/review/src/agents/index.ts                  已实现 Agent 的内部 barrel
-packages/review/src/agents/codex/cli/adapter.ts      Codex CLI 实现（唯一 spawn 的地方）
+packages/review/src/agents/codex/cli/adapter.ts      Codex CLI 实现
 packages/review/src/agents/codex/cli/events.ts       Codex CLI JSONL 解析（纯函数）
-packages/review/src/agents/codex/desktop/.gitkeep    Codex Desktop 预留位
+packages/review/src/agents/codex/desktop/adapter.ts  Codex app-server stdio 实现
 packages/review/src/agents/claude/code-cli/.gitkeep  Claude Code CLI 预留位
 packages/review/src/agents/claude/desktop/.gitkeep   Claude Desktop 预留位
 packages/review/src/review-prompt.ts                 prompt + JSON Schema 生成
@@ -538,25 +543,30 @@ apps/daemon/src/review-runner.ts                     编排（唯一碰 StateSto
 
 ## 破坏性改变
 
-**没有状态迁移。** `hostTurn`、`HostAction`、durable review artifact、`processedRequests`
-键派生全不变，`schemaVersion: 6` 不动。
+**本步骤本身没有状态迁移。** `hostTurn`、`HostAction`、durable review artifact、`processedRequests`
+键派生均未因 daemon-owned Review 改变。后续 latest-only 格式断代已删除 ProjectState 的应用层
+`schemaVersion`，但不改变这里描述的 Review 协议边界。
 
 **协议 breaking。** `reviewTurnInputSchema` / `reviewTurnOutputSchema` 都是 `.strict()`：
 删掉 `review` 后仍然传的调用方会被直接拒，`REVIEW_REQUIRED` 也已从 output union 删除。
 本地 IPC 只支持当前 Client/Daemon wire shape，不携带协议版本，也不提供旧版协商或 fallback；
-持久状态 `schemaVersion: 6` 独立于本地 IPC，不随 wire shape 改动。
+持久状态同样只支持当前无版本 shape。SQLite 物理 schema 为 5，旧 Data Directory 不迁移，升级前需清理本地数据。
 
 **`HOST_REVIEW_UNAVAILABLE` 语义改变。** 从「host 的 reviewer 不可用」变成
 「daemon 的 reviewer 失败」。pause code 和 `retry_host_review` 这个 resume action
 名字都不再贴切，但**第一版不改名** —— 改名要动 `resumeActionSchema`、
 `closedResumeRoute`、`pauseMessage`、`optionDescription` 和一堆测试。留个 TODO。
 
-**新增外部依赖：`codex` 可执行文件 + 已登录状态。** `probe()` 失败时应该 pause 并给出
-明确的 `REVIEWER_UNAVAILABLE`，不要静默卡住。
+**Review Agent 前置条件。** daemon 不再额外执行 `codex --version`。默认 `codex` strategy 继续使用
+`codex exec`；显式配置 `codex-desktop` 时，每轮启动私有 `codex app-server --listen stdio://`，
+要求本机 Codex 提供当前 app-server 协议并已有可用登录态。它只使用 `readOnly` + `approvalPolicy: never`
+的 thread/turn，不连接、启动或控制 Desktop GUI；任何审批或其他服务端交互请求直接使该 attempt 失败。
+启动失败、登录失效、网络错误和进程异常都由真实 Review 调用返回，统一占用 `maxAttempts` 与同一个
+deadline，耗尽后再 pause。
 
 **可观测性。** `HostTurnCoordinatorDependencies` 里没有 logger，`ReviewRunner` 要自己接
-`StructuredLogger`（`runtime-composition.ts` 已经有一个实例）。至少记：
-probe 结果、每次 attempt 的 sessionId / usage / 失败原因、finalize 的 schedule。
+`StructuredLogger`（`runtime-composition.ts` 已经有一个实例）。至少记录每次 attempt 的
+sessionId / 失败原因，以及 finalize 的 schedule。
 
 ---
 

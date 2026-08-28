@@ -54,15 +54,3 @@ export function resolveProjectDataDirectory(options: ProjectDataDirectoryOptions
   }
   return dataDirectory;
 }
-
-export function resolveRunDataDirectory(projectDataDirectory: string, jobId: string): string {
-  if (!/^job-[A-Za-z0-9-]+$/u.test(jobId)) {
-    throw new Error("jobId is not safe for use as a data-directory component");
-  }
-  const projectDirectory = resolve(projectDataDirectory);
-  const runDirectory = resolve(projectDirectory, "runs", jobId);
-  if (!isContained(projectDirectory, runDirectory) || runDirectory === projectDirectory) {
-    throw new Error("Run Data Dir must be inside the Project Data Dir");
-  }
-  return runDirectory;
-}

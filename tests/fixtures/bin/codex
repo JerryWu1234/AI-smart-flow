@@ -5,27 +5,66 @@ import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const argv = process.argv.slice(2);
-if (argv.length === 1 && argv[0] === "--version") {
-  process.stdout.write("codex-cli smartflow-installed-test\n");
-  process.exit(0);
-}
 if (argv[0] !== "exec") throw new Error(`Unsupported fake Codex argv: ${JSON.stringify(argv)}`);
 
-function option(name) {
-  const index = argv.indexOf(name);
-  const value = index < 0 ? undefined : argv[index + 1];
-  if (value === undefined) throw new Error(`Fake Codex requires ${name}`);
-  return value;
+const resume = argv[1] === "resume";
+
+// Mirror the real CLI's accepted flags so an argv the real `codex` would reject
+// fails here too. `codex exec resume` accepts neither --sandbox nor --cd.
+const VALUED_FLAGS = new Set(["-m", "--model", "-c", "--config", "--output-schema", "--output-last-message", "-o"]);
+const CREATE_ONLY_FLAGS = new Set(["--sandbox", "--cd"]);
+const BOOLEAN_FLAGS = new Set(["--json", "--skip-git-repo-check", "--ignore-user-config"]);
+
+const positional = resume ? argv.slice(3) : argv.slice(1);
+const flagValues = new Map();
+const configOverrides = new Map();
+let prompt;
+
+for (let index = 0; index < positional.length; index += 1) {
+  const token = positional[index];
+  if (!token.startsWith("-")) {
+    prompt = token;
+    continue;
+  }
+  if (BOOLEAN_FLAGS.has(token)) continue;
+  const valued = VALUED_FLAGS.has(token) || CREATE_ONLY_FLAGS.has(token);
+  if (!valued || (resume && CREATE_ONLY_FLAGS.has(token))) {
+    throw new Error(`error: unexpected argument '${token}' found`);
+  }
+  index += 1;
+  const value = positional[index];
+  if (value === undefined) throw new Error(`Fake Codex requires a value for ${token}`);
+  if (token === "-c" || token === "--config") {
+    const separator = value.indexOf("=");
+    if (separator < 0) throw new Error(`Fake Codex requires key=value for ${token}`);
+    configOverrides.set(value.slice(0, separator), value.slice(separator + 1).replace(/^"|"$/gu, ""));
+    continue;
+  }
+  flagValues.set(token, value);
 }
 
-const resume = argv[1] === "resume";
+function option(...names) {
+  for (const name of names) {
+    const value = flagValues.get(name);
+    if (value !== undefined) return value;
+  }
+  throw new Error(`Fake Codex requires one of ${names.join(", ")}`);
+}
+
 const sessionId = resume ? argv[2] : `installed-review-${randomUUID()}`;
 if (sessionId === undefined || sessionId.length === 0) {
   throw new Error("Fake Codex resume requires a session ID");
 }
-const cwd = option("--cd");
-const outputPath = option("--output-last-message");
-const prompt = argv.at(-1);
+// Create names the worktree explicitly; resume relies on the spawned cwd because
+// the real `codex exec resume` rejects --cd.
+const cwd = resume ? process.cwd() : option("--cd");
+const outputPath = option("--output-last-message", "-o");
+const model = flagValues.get("-m") ?? flagValues.get("--model");
+const effort = configOverrides.get("model_reasoning_effort");
+const sandboxMode = configOverrides.get("sandbox_mode") ?? flagValues.get("--sandbox");
+if (sandboxMode !== "read-only") {
+  throw new Error(`Fake Codex expected a read-only sandbox, received ${String(sandboxMode)}`);
+}
 if (prompt === undefined) throw new Error("Fake Codex requires a prompt");
 const marker = process.env.SMARTFLOW_TEST_REPAIR_MARKER;
 if (marker === undefined || marker.length === 0) {
@@ -60,6 +99,8 @@ if (tracePath !== undefined && tracePath.length > 0) {
     sessionId,
     cwd,
     outputPath,
+    model,
+    effort,
     taskIds,
     markerPresent
   })}\n`, "utf8");

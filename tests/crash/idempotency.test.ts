@@ -3,8 +3,8 @@ import { resolve } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { ProjectMutationExecutor } from "@smartflow/daemon";
 import {
-  ProjectMutationSession,
   StateStore,
   type AtomicWriteHooks,
   type ProjectState
@@ -37,7 +37,7 @@ describe("durable idempotency response", () => {
     activeHarnesses.push(harness);
     const store = new FaultingStateStore(resolve(harness.dataDir, "idempotency"));
     await store.initialize(createProjectState());
-    const session = await ProjectMutationSession.open(store, "writer-1");
+    const executor = new ProjectMutationExecutor(store);
     store.nextHooks = {
       checkpoint(checkpoint): void {
         if (checkpoint === "AFTER_RENAME") throw new Error("response lost after durable commit");
@@ -47,7 +47,7 @@ describe("durable idempotency response", () => {
     let firstGeneratedJobId = "";
     const request = { requestId: "request-1", payload: { operation: "create-job" } };
     await expect(
-      session.mutate(request, (state, context) => {
+      executor.mutate(request, (state, context) => {
         mutationRuns += 1;
         firstGeneratedJobId = randomUUID();
         return {
@@ -56,13 +56,12 @@ describe("durable idempotency response", () => {
         };
       })
     ).rejects.toThrow(/response lost/u);
-    const replay = await session.mutate(request, () => {
+    const replay = await executor.mutate(request, () => {
       mutationRuns += 1;
       throw new Error("durable request must not execute twice");
     });
     expect(replay.replayed).toBe(true);
-    expect(replay.response).toEqual({ jobId: firstGeneratedJobId, stateVersion: 2 });
+    expect(replay.response).toEqual({ jobId: firstGeneratedJobId, stateVersion: 1 });
     expect(mutationRuns).toBe(1);
-    await session.close();
   });
 });

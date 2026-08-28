@@ -72,12 +72,18 @@ export function operationsHash(operations: readonly ApplyOperation[]): string {
 export function stableOperationId(bindings: {
   projectId: string;
   jobId: string;
-  revision: number;
   candidateHash: string;
   reviewHash: string;
   operationsHash: string;
 }): string {
-  return `publish-${createHash("sha256").update(canonical(bindings), "utf8").digest("hex")}`;
+  const hashBindings = {
+    projectId: bindings.projectId,
+    jobId: bindings.jobId,
+    candidateHash: bindings.candidateHash,
+    reviewHash: bindings.reviewHash,
+    operationsHash: bindings.operationsHash
+  };
+  return `publish-${createHash("sha256").update(canonical(hashBindings), "utf8").digest("hex")}`;
 }
 
 
@@ -124,7 +130,7 @@ export async function preflightOperations(
   return conflicts;
 }
 
-export interface TargetStateObservation {
+interface TargetStateObservation {
   matches: boolean;
   conflicts: PreflightConflict[];
 }
