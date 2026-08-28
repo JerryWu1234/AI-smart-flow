@@ -30,8 +30,8 @@ import {
 } from "@smartflow/workspace";
 
 import { gitPublishBlobReader, gitPublishOperations } from "./git-publish-source.js";
-import { ProjectMutationExecutor } from "./project-mutation-executor.js";
-import { verifyRunArtifacts } from "./recovery-manager.js";
+import { ProjectMutationExecutor } from "../runtime/project-mutation-executor.js";
+import { verifyRunArtifacts } from "../recovery/recovery-manager.js";
 
 function canonical(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);

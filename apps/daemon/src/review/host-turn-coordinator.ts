@@ -19,12 +19,12 @@ import {
   type RunRecord
 } from "@smartflow/state-store";
 
-import { ProjectMutationExecutor } from "./project-mutation-executor.js";
+import { ProjectMutationExecutor } from "../runtime/project-mutation-executor.js";
 import {
   ReviewCoordinator,
   type FinalizeReviewOutput
 } from "./review-coordinator.js";
-import { verifyRunArtifacts } from "./recovery-manager.js";
+import { verifyRunArtifacts } from "../recovery/recovery-manager.js";
 
 const DEFAULT_RETRY_AFTER_MS = 30_000;
 const TERMINAL_PHASES = new Set(["COMPLETED", "CANCELED", "FAILED"]);

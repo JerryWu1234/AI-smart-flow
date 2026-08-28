@@ -30,11 +30,11 @@ import {
   type GitWorkspaceSnapshot
 } from "@smartflow/workspace";
 
-import { ProjectMutationExecutor } from "./project-mutation-executor.js";
+import { ProjectMutationExecutor } from "../runtime/project-mutation-executor.js";
 import {
   clearRepairContinuation,
   resolveRepairContinuation
-} from "./repair-continuation.js";
+} from "../repair/repair-continuation.js";
 
 export interface WorkerRunRequest {
   jobId: string;

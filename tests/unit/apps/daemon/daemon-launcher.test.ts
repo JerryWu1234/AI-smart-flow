@@ -3,8 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
-import { connectOrLaunchDaemon } from "../../../../apps/daemon/src/daemon-launcher.js";
-import { LocalIpcServer } from "../../../../apps/daemon/src/local-ipc-server.js";
+import { connectOrLaunchDaemon } from "../../../../apps/daemon/src/transport/daemon-launcher.js";
+import { LocalIpcServer } from "../../../../apps/daemon/src/transport/local-ipc-server.js";
 
 const spawn = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({ spawn }));

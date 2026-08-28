@@ -11,27 +11,27 @@ import type { ProjectState, RunRecord, WorkerAttempt } from "@smartflow/state-st
 import { taskManifestSchema } from "@smartflow/task-manifest";
 import { ExecutionSandboxAdapter } from "@smartflow/workspace";
 
-import { CancelManager, type CancellationRuntime } from "./cancel-manager.js";
+import { CancelManager, type CancellationRuntime } from "../cancel/cancel-manager.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
 import type {
   ProviderRuntimeResolver,
   RegisteredProviderRuntime
 } from "./provider-registry.js";
 import type { ProjectPipelineContext } from "./project-runtime.js";
-import { PublishCoordinator } from "./publish-coordinator.js";
-import { RepairCoordinator } from "./repair-coordinator.js";
-import { resolveRepairContinuation } from "./repair-continuation.js";
+import { PublishCoordinator } from "../publish/publish-coordinator.js";
+import { RepairCoordinator } from "../repair/repair-coordinator.js";
+import { resolveRepairContinuation } from "../repair/repair-continuation.js";
 import {
   RecoveryManager,
   verifyRunArtifacts,
   type RecoveryRuntime
-} from "./recovery-manager.js";
-import { ReviewCoordinator } from "./review-coordinator.js";
+} from "../recovery/recovery-manager.js";
+import { ReviewCoordinator } from "../review/review-coordinator.js";
 import {
   ReviewRunner,
   type ReviewRunnerOptions
-} from "./review-runner.js";
-import { WorkerRunner, type WorkerRunRequest } from "./worker-runner.js";
+} from "../review/review-runner.js";
+import { WorkerRunner, type WorkerRunRequest } from "../worker/worker-runner.js";
 
 function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
   const value = record?.[key];

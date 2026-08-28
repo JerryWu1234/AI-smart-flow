@@ -17,15 +17,15 @@ import {
   createRunRecord
 } from "../../../fixtures/state-store/test-fixture.js";
 
-vi.mock("../../../../apps/daemon/src/recovery-manager.js", () => ({
+vi.mock("../../../../apps/daemon/src/recovery/recovery-manager.js", () => ({
   verifyRunArtifacts: vi.fn(() => Promise.resolve(undefined))
 }));
 
 import {
   HostTurnCoordinator,
   type HostTurnCoordinatorDependencies
-} from "../../../../apps/daemon/src/host-turn-coordinator.js";
-import { DAEMON_REVIEWER_HOST_TURN_ID } from "../../../../apps/daemon/src/review-coordinator.js";
+} from "../../../../apps/daemon/src/review/host-turn-coordinator.js";
+import { DAEMON_REVIEWER_HOST_TURN_ID } from "../../../../apps/daemon/src/review/review-coordinator.js";
 
 const digestA = "a".repeat(64);
 const digestB = "b".repeat(64);

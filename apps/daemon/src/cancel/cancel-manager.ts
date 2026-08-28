@@ -7,7 +7,7 @@ import {
 } from "@smartflow/state-store";
 import { cleanupGitRunTemporaryState } from "@smartflow/workspace";
 
-import { ProjectMutationExecutor } from "./project-mutation-executor.js";
+import { ProjectMutationExecutor } from "../runtime/project-mutation-executor.js";
 
 export interface CancellationRuntime {
   stopWorker(attempt: WorkerAttempt | undefined): Promise<boolean>;

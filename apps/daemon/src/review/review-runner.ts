@@ -22,9 +22,9 @@ import {
 } from "@smartflow/state-store";
 import { taskManifestSchema, type TaskManifest } from "@smartflow/task-manifest";
 
-import { observeApprovedSource } from "./approved-source.js";
-import { ProjectMutationExecutor } from "./project-mutation-executor.js";
-import { verifyRunArtifacts } from "./recovery-manager.js";
+import { observeApprovedSource } from "../worker/approved-source.js";
+import { ProjectMutationExecutor } from "../runtime/project-mutation-executor.js";
+import { verifyRunArtifacts } from "../recovery/recovery-manager.js";
 import {
   ReviewCoordinator,
   DAEMON_REVIEWER_HOST_TURN_ID,

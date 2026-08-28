@@ -39,15 +39,15 @@ import {
 } from "@smartflow/task-manifest";
 import { cleanupGitRunTemporaryState } from "@smartflow/workspace";
 
-import { observeApprovedSource } from "./approved-source.js";
-import { type IpcRequest, type IpcRequestHandler } from "./local-ipc-server.js";
+import { observeApprovedSource } from "../worker/approved-source.js";
+import { type IpcRequest, type IpcRequestHandler } from "../transport/local-ipc-server.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
-import { HostTurnCoordinator } from "./host-turn-coordinator.js";
-import { verifyRunArtifacts } from "./recovery-manager.js";
+import { HostTurnCoordinator } from "../review/host-turn-coordinator.js";
+import { verifyRunArtifacts } from "../recovery/recovery-manager.js";
 import {
   ReviewCoordinator,
   isDaemonReviewerHostTurn
-} from "./review-coordinator.js";
+} from "../review/review-coordinator.js";
 
 export interface ProjectPipelineContext {
   store: StateStore;

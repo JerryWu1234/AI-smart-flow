@@ -20,7 +20,7 @@ import {
 } from "@smartflow/task-manifest";
 import { getCandidateHash, type Candidate } from "@smartflow/workspace";
 
-import { ProjectMutationExecutor } from "./project-mutation-executor.js";
+import { ProjectMutationExecutor } from "../runtime/project-mutation-executor.js";
 
 export type RepairPreparationResult =
   | {

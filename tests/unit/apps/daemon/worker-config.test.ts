@@ -7,7 +7,7 @@ import {
   resolveWorkerLaunchConfiguration,
   resolveWorkerRegistration,
   workerLaunchEnvironment
-} from "../../../../apps/daemon/src/worker-config.js";
+} from "../../../../apps/daemon/src/config/worker-config.js";
 
 const environment = {
   API: "openai-responses",

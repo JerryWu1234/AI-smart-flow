@@ -19,7 +19,7 @@ import {
   type WorkspaceApplyAdapter
 } from "@smartflow/publish";
 import type { Candidate, GitWorkspaceSnapshot } from "@smartflow/workspace";
-import { gitPublishOperations } from "../../apps/daemon/src/git-publish-source.js";
+import { gitPublishOperations } from "../../apps/daemon/src/publish/git-publish-source.js";
 import { createTasksSource } from "../fixtures/task-manifest/test-fixture.js";
 import { createLifecycleStore } from "../crash/recovery-test-fixture.js";
 import { createRuntimeHarness } from "../helpers/runtime-harness.js";

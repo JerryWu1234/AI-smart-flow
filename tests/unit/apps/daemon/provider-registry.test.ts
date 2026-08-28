@@ -6,11 +6,11 @@ import {
   type PiRuntimeConfiguration
 } from "@smartflow/provider-pi";
 
-import { ProviderRegistry } from "../../../../apps/daemon/src/provider-registry.js";
+import { ProviderRegistry } from "../../../../apps/daemon/src/runtime/provider-registry.js";
 import {
   daemonConfigFingerprint,
   type ResolvedWorkerLaunchConfiguration
-} from "../../../../apps/daemon/src/worker-config.js";
+} from "../../../../apps/daemon/src/config/worker-config.js";
 
 function configuration(modelId: string, deadline = 60_000): ResolvedWorkerLaunchConfiguration {
   const runtimeConfig: PiRuntimeConfiguration = {

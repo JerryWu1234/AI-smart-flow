@@ -16,7 +16,7 @@ import type { PublishServiceResult } from "@smartflow/publish";
 import type { RunPhase } from "@smartflow/protocol";
 import { canonicalHash } from "@smartflow/state-store";
 import type { Candidate, GitWorkspaceSnapshot } from "@smartflow/workspace";
-import { gitPublishOperations } from "../../apps/daemon/src/git-publish-source.js";
+import { gitPublishOperations } from "../../apps/daemon/src/publish/git-publish-source.js";
 import { createRuntimeHarness, type RuntimeHarness } from "../helpers/runtime-harness.js";
 import { createLifecycleStore } from "./recovery-test-fixture.js";
 

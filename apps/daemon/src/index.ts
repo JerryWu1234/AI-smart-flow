@@ -1,33 +1,33 @@
 export {
   resolveInstallationDataDirectory,
   resolveProjectDataDirectory
-} from "./data-dir.js";
-export { CancelManager } from "./cancel-manager.js";
-export type { CancellationRuntime } from "./cancel-manager.js";
-export { loadSmartFlowConfig } from "./config.js";
-export type { SmartFlowConfig } from "./config.js";
-export { connectOrLaunchDaemon } from "./daemon-launcher.js";
-export { LocalIpcClient } from "./local-ipc-client.js";
-export { daemonEndpoint, LocalIpcServer } from "./local-ipc-server.js";
+} from "./config/data-dir.js";
+export { CancelManager } from "./cancel/cancel-manager.js";
+export type { CancellationRuntime } from "./cancel/cancel-manager.js";
+export { loadSmartFlowConfig } from "./config/config.js";
+export type { SmartFlowConfig } from "./config/config.js";
+export { connectOrLaunchDaemon } from "./transport/daemon-launcher.js";
+export { LocalIpcClient } from "./transport/local-ipc-client.js";
+export { daemonEndpoint, LocalIpcServer } from "./transport/local-ipc-server.js";
 export { serveSmartFlowDaemon, startSmartFlowDaemon } from "./main.js";
-export { PublishCoordinator } from "./publish-coordinator.js";
-export { ProjectRuntime } from "./project-runtime.js";
-export { ProjectMutationExecutor } from "./project-mutation-executor.js";
-export { ProductionRuntimeComposition } from "./runtime-composition.js";
-export { RecoveryManager } from "./recovery-manager.js";
+export { PublishCoordinator } from "./publish/publish-coordinator.js";
+export { ProjectRuntime } from "./runtime/project-runtime.js";
+export { ProjectMutationExecutor } from "./runtime/project-mutation-executor.js";
+export { ProductionRuntimeComposition } from "./runtime/runtime-composition.js";
+export { RecoveryManager } from "./recovery/recovery-manager.js";
 export type {
   PublishRecoveryObservation,
   RecoveryAction,
   RecoveryRuntime
-} from "./recovery-manager.js";
+} from "./recovery/recovery-manager.js";
 export {
   DAEMON_REVIEWER_HOST_TURN_ID,
   pendingReviewAction
-} from "./review-coordinator.js";
-export { ReviewRunner } from "./review-runner.js";
-export { WorkerRunner } from "./worker-runner.js";
+} from "./review/review-coordinator.js";
+export { ReviewRunner } from "./review/review-runner.js";
+export { WorkerRunner } from "./worker/worker-runner.js";
 export {
   resolveWorkerLaunchConfiguration,
   workerLaunchEnvironment
-} from "./worker-config.js";
-export type { ResolvedWorkerLaunchConfiguration } from "./worker-config.js";
+} from "./config/worker-config.js";
+export type { ResolvedWorkerLaunchConfiguration } from "./config/worker-config.js";

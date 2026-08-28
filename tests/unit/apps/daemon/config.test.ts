@@ -6,7 +6,7 @@ import {
   defaultSmartFlowConfig,
   loadSmartFlowConfig,
   parseSmartFlowConfig
-} from "../../../../apps/daemon/src/config.js";
+} from "../../../../apps/daemon/src/config/config.js";
 
 describe("SmartFlow daemon configuration", () => {
   it("uses codex as the default review strategy without a config version", async () => {

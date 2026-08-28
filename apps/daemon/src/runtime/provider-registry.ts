@@ -8,7 +8,7 @@ import {
 import {
   resolveWorkerRegistration,
   type ResolvedWorkerLaunchConfiguration
-} from "./worker-config.js";
+} from "../config/worker-config.js";
 
 export interface RegisteredProviderRuntime {
   daemonConfigFingerprint: string;

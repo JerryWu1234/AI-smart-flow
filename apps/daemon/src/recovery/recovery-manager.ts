@@ -33,8 +33,8 @@ import {
   type GitWorkspaceSnapshot
 } from "@smartflow/workspace";
 
-import { gitPublishOperations } from "./git-publish-source.js";
-import { ProjectMutationExecutor } from "./project-mutation-executor.js";
+import { gitPublishOperations } from "../publish/git-publish-source.js";
+import { ProjectMutationExecutor } from "../runtime/project-mutation-executor.js";
 
 const terminalPhases = new Set<RunPhase>(["COMPLETED", "CANCELED", "FAILED"]);
 

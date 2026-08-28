@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { resolveProjectDataDirectory } from "../../../../apps/daemon/src/data-dir.js";
+import { resolveProjectDataDirectory } from "../../../../apps/daemon/src/config/data-dir.js";
 
 describe("SmartFlow data directory", () => {
   it("places project state outside the active project", () => {

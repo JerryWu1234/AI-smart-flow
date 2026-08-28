@@ -13,17 +13,17 @@ import {
   loadSmartFlowConfig,
   type ReviewStrategy,
   type SmartFlowConfig
-} from "./config.js";
-import { resolveInstallationDataDirectory } from "./data-dir.js";
-import { LocalIpcServer, type IpcRequestHandler } from "./local-ipc-server.js";
-import { ProviderRegistry } from "./provider-registry.js";
-import { ProjectRuntime } from "./project-runtime.js";
-import { ProductionRuntimeComposition } from "./runtime-composition.js";
+} from "./config/config.js";
+import { resolveInstallationDataDirectory } from "./config/data-dir.js";
+import { LocalIpcServer, type IpcRequestHandler } from "./transport/local-ipc-server.js";
+import { ProviderRegistry } from "./runtime/provider-registry.js";
+import { ProjectRuntime } from "./runtime/project-runtime.js";
+import { ProductionRuntimeComposition } from "./runtime/runtime-composition.js";
 import {
   resolveWorkerLaunchConfiguration,
   WORKER_CONFIGURATION_ENVIRONMENT_KEYS,
   type ResolvedWorkerLaunchConfiguration
-} from "./worker-config.js";
+} from "./config/worker-config.js";
 
 const REVIEW_ADAPTER_FACTORIES = {
   codex: (): AgentAdapter => new CodexAdapter(),

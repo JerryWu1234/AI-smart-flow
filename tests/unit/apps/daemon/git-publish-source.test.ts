@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { gitPublishOperations } from "../../../../apps/daemon/src/git-publish-source.js";
+import { gitPublishOperations } from "../../../../apps/daemon/src/publish/git-publish-source.js";
 import type { Candidate, GitWorkspaceSnapshot } from "@smartflow/workspace";
 
 const digest = "a".repeat(64);
