@@ -134,11 +134,17 @@ export class LocalIpcClient {
     return new LocalIpcClient(socket, ready.instanceId, ready.providerRuntimeConfigHash);
   }
 
-  public call(method: string, payload: unknown): Promise<unknown> {
+  public call(method: string, payload: unknown, clientName?: string): Promise<unknown> {
     const id = randomUUID();
     return new Promise<unknown>((settle, reject) => {
       this.pending.set(id, { settle, reject });
-      this.socket.write(`${JSON.stringify({ type: "request", id, method, payload })}\n`);
+      this.socket.write(`${JSON.stringify({
+        type: "request",
+        id,
+        method,
+        payload,
+        ...(clientName === undefined ? {} : { clientName })
+      })}\n`);
     });
   }
 

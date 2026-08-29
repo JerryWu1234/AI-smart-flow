@@ -39,7 +39,16 @@ export function createSmartFlowMcpServer(gateway: DaemonGateway): McpServer {
     { name: "smartflow", version: "0.1.0" },
     { instructions: SMARTFLOW_MCP_INSTRUCTIONS }
   );
-  const handlers = createToolHandlers(gateway);
+  const handlers = createToolHandlers({
+    call: (toolName, input) => {
+      const clientName = server.server.getClientVersion()?.name;
+      return gateway.call(
+        toolName,
+        input,
+        clientName === undefined ? undefined : { clientName }
+      );
+    }
+  });
 
   server.registerTool(
     "smartflow_execute",

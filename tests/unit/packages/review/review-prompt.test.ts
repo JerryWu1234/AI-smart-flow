@@ -76,6 +76,7 @@ function manifest(): TaskManifest {
 describe("review prompt", () => {
   it("keeps every object schema closed with required covering all properties", () => {
     const schema = reviewOutputJsonSchema();
+    expect(record(schema).$schema).toBe("http://json-schema.org/draft-07/schema#");
     const objects = objectSchemas(schema);
 
     expect(objects).toHaveLength(3);
@@ -100,7 +101,7 @@ describe("review prompt", () => {
     ]);
     expect(issue.required).toContain("suggestedFix");
     expect(withoutRequired(schema)).toEqual(
-      withoutRequired(reviewResultSchema.toJSONSchema())
+      withoutRequired(reviewResultSchema.toJSONSchema({ target: "draft-7" }))
     );
     expect(record(rootProperties.tasks).minItems).toBe(1);
     expect(record(taskProperties.id).pattern).toBe("^T\\d{3,}$");
@@ -168,7 +169,7 @@ describe("review prompt", () => {
 
       ## Output
 
-      Return only the final JSON object accepted by the supplied --output-schema. The root object is { tasks: [...] }; do not add reviewerSessionId, result, Markdown fences, commentary, or any other wrapper.
+      Return only the final JSON object accepted by the supplied JSON Schema. The root object is { tasks: [...] }; do not add reviewerSessionId, result, Markdown fences, commentary, or any other wrapper.
 
       ## Correction required for this round
 

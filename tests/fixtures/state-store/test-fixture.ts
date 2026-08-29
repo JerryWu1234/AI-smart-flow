@@ -20,6 +20,7 @@ export function createRunRecord(overrides: Partial<RunRecord> = {}): RunRecord {
       sha256: "b".repeat(64),
       size: 64
     },
+    reviewAdapterId: "codex",
     noProgressCount: 0,
     autoRepairRounds: 0,
     workerAttempts: [],

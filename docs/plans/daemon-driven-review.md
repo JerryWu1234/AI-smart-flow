@@ -380,7 +380,7 @@ export class ReviewRunner {
 `apps/daemon/src/runtime-composition.ts` | 新增 `review = async (context) => {...}` 方法（与 `runPipeline` / `publish` 并列），构造 `ReviewRunner` 并按返回的 schedule 接着跑；`runPipeline` 末尾 worker 返回 `REVIEW_PENDING` 时接着跑 review（与 `FIXING → prepareRepairAndContinue` 对称） |
 `apps/daemon/src/recovery-manager.ts` | `REVIEW_PENDING`（:349）从 `WAIT_FOR_HOST` 改新增的 `RUN_REVIEW`；`REVIEWING` + `AWAITING_REVIEW`（:351-353）也改 `RUN_REVIEW`（重跑即可，`REVIEW_ATTEMPT_REUSED` 会挡重复记账） |
 `apps/daemon/src/main.ts` / 组装处 | 注册 Codex adapter，把 `review` callback 接进 `ProjectRuntimeOptions` |
-`apps/daemon/src/config.ts` | `review.strategy` 默认 `"codex"`，可显式选择 `"codex-desktop"`；reviewer 的 model / effort / deadlineMs / maxAttempts 放这里 |
+`apps/daemon/src/config.ts` | 未配置 `review.strategy` 时按 MCP Host 名称匹配 `codex` / `codex-desktop`，无匹配则使用 `codex`；显式 strategy 始终优先；reviewer 的 model / effort / deadlineMs / maxAttempts 放这里 |
 
 ### 阻塞项：Step 5 里那两个分支必须和 Step 4 同批做
 
@@ -521,23 +521,22 @@ daemon 自己跑的 review 本来就没有 host 拥有这个回合，不该留�
 - **长轮询不做** —— 只把 `retryAfterMs` 调到 30 秒
 - **不共享 app-server、不控制 Desktop GUI** —— `codex-desktop` 每次 create/resume 只启动一个私有
   `codex app-server --listen stdio://`；不连接、启动或聚焦 GUI，不增加 socket、连接池或审批 UI
-- **其他 agent 不做** —— Claude Code CLI / Desktop 仍只保留目录占位，有真实实现时再接配置和测试
+- **其他 agent 不做** —— 本批只增加 Claude Code CLI；Claude Desktop 仍不接配置或实现
 
 ## 新增文件总览
 
 ```
-packages/review/src/agents/agent-adapter.ts          统一契约与规范化结果
-packages/review/src/agents/index.ts                  已实现 Agent 的内部 barrel
-packages/review/src/agents/codex/cli/adapter.ts      Codex CLI 实现
-packages/review/src/agents/codex/cli/events.ts       Codex CLI JSONL 解析（纯函数）
-packages/review/src/agents/codex/desktop/adapter.ts  Codex app-server stdio 实现
-packages/review/src/agents/claude/code-cli/.gitkeep  Claude Code CLI 预留位
-packages/review/src/agents/claude/desktop/.gitkeep   Claude Desktop 预留位
-packages/review/src/review-prompt.ts                 prompt + JSON Schema 生成
-apps/daemon/src/review-runner.ts                     编排（唯一碰 StateStore 的新文件）
+packages/review/src/agents/agent-adapter.ts             统一契约与规范化结果
+packages/review/src/agents/index.ts                     已实现 Agent 的内部 barrel
+packages/review/src/agents/codex/cli/adapter.ts         Codex CLI 实现
+packages/review/src/agents/codex/cli/events.ts          Codex CLI JSONL 解析（纯函数）
+packages/review/src/agents/codex/desktop/adapter.ts     Codex app-server stdio 实现
+packages/review/src/agents/claude/code-cli/adapter.ts   Claude Code CLI 单 JSON result 实现
+packages/review/src/review-prompt.ts                    prompt + JSON Schema 生成
+apps/daemon/src/review/review-runner.ts                 编排（唯一碰 StateStore 的新文件）
 ```
 
-只新增实现所需文件和未导出的目录占位，不新增包或运行时依赖。
+只新增实现所需文件，不新增包或运行时依赖。
 
 ---
 
@@ -557,12 +556,15 @@ apps/daemon/src/review-runner.ts                     编排（唯一碰 StateSto
 名字都不再贴切，但**第一版不改名** —— 改名要动 `resumeActionSchema`、
 `closedResumeRoute`、`pauseMessage`、`optionDescription` 和一堆测试。留个 TODO。
 
-**Review Agent 前置条件。** daemon 不再额外执行 `codex --version`。默认 `codex` strategy 继续使用
-`codex exec`；显式配置 `codex-desktop` 时，每轮启动私有 `codex app-server --listen stdio://`，
-要求本机 Codex 提供当前 app-server 协议并已有可用登录态。它只使用 `readOnly` + `approvalPolicy: never`
-的 thread/turn，不连接、启动或控制 Desktop GUI；任何审批或其他服务端交互请求直接使该 attempt 失败。
-启动失败、登录失效、网络错误和进程异常都由真实 Review 调用返回，统一占用 `maxAttempts` 与同一个
-deadline，耗尽后再 pause。
+**Review Agent 前置条件。** daemon 不为 reviewer 额外执行版本 probe。未显式配置 strategy 时，
+daemon 在创建 Job 时按 MCP Host 名称匹配 `codex` / `codex-desktop` / `claude-code`，无匹配则使用
+`codex`；解析结果持久化到 Job，后续 Review、恢复和取消不再重选。`codex` 使用 `codex exec`；
+`codex-desktop` 每轮启动私有 `codex app-server --listen stdio://`，使用 `readOnly` +
+`approvalPolicy: never`，不连接、启动或控制 Desktop GUI。`claude-code` 使用本机 `claude -p`、
+draft-07 structured output 和可恢复 session，只开放 `Read` / `Glob` / `Grep`，并禁用项目自定义、
+MCP、Chrome、Bash 和写工具。三个 strategy 都要求对应 CLI 已安装并有可用登录态；启动失败、登录
+失效、网络错误和进程异常由真实 Review 调用返回，统一占用 `maxAttempts` 与同一个 deadline，耗尽后再
+pause。
 
 **可观测性。** `HostTurnCoordinatorDependencies` 里没有 logger，`ReviewRunner` 要自己接
 `StructuredLogger`（`runtime-composition.ts` 已经有一个实例）。至少记录每次 attempt 的

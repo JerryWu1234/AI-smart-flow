@@ -1,22 +1,29 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  DEFAULT_REVIEW_STRATEGY,
   REVIEW_STRATEGIES,
   defaultSmartFlowConfig,
   loadSmartFlowConfig,
-  parseSmartFlowConfig
+  parseSmartFlowConfig,
+  resolveReviewStrategy
 } from "../../../../apps/daemon/src/config/config.js";
 
 describe("SmartFlow daemon configuration", () => {
-  it("uses codex as the default review strategy without a config version", async () => {
+  it("uses Host selection when no review strategy is configured", async () => {
     const previousConfigPath = process.env.SMARTFLOW_CONFIG;
     Reflect.deleteProperty(process.env, "SMARTFLOW_CONFIG");
     try {
-      expect(REVIEW_STRATEGIES).toEqual(["codex", "codex-desktop"]);
-      expect(defaultSmartFlowConfig.review.strategy).toBe(DEFAULT_REVIEW_STRATEGY);
+      expect(REVIEW_STRATEGIES).toEqual(["codex", "codex-desktop", "claude-code"]);
+      expect(defaultSmartFlowConfig.review).not.toHaveProperty("strategy");
       const config = await loadSmartFlowConfig();
-      expect(config.review.strategy).toBe("codex");
+      expect(config.review).not.toHaveProperty("strategy");
+      expect(resolveReviewStrategy(config.review.strategy, "codex-desktop"))
+        .toBe("codex-desktop");
+      expect(resolveReviewStrategy(config.review.strategy, "claude-code"))
+        .toBe("claude-code");
+      expect(resolveReviewStrategy(config.review.strategy, "CODEX-DESKTOP")).toBe("codex");
+      expect(resolveReviewStrategy(config.review.strategy, " codex-desktop ")).toBe("codex");
+      expect(resolveReviewStrategy(config.review.strategy, "kiro")).toBe("codex");
       expect(parseSmartFlowConfig({
         review: { strategy: "codex-desktop" }
       }).review.strategy).toBe("codex-desktop");
@@ -36,8 +43,8 @@ describe("SmartFlow daemon configuration", () => {
     }
   });
 
-  it("defaults an omitted review strategy to codex", () => {
-    expect(parseSmartFlowConfig({ review: {} }).review.strategy).toBe("codex");
+  it("leaves an omitted review strategy available for Host selection", () => {
+    expect(parseSmartFlowConfig({ review: {} }).review).not.toHaveProperty("strategy");
   });
 
   it("rejects removed top-level configuration", () => {

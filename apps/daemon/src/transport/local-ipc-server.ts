@@ -12,6 +12,7 @@ export interface IpcRequest {
   method: string;
   payload: unknown;
   providerRuntimeConfigHash?: string;
+  clientName?: string;
 }
 
 export type IpcRequestHandler = (request: IpcRequest) => Promise<unknown>;
@@ -297,7 +298,8 @@ export class LocalIpcServer {
         id: requestId,
         method,
         payload: candidate.payload,
-        ...(providerRuntimeConfigHash === undefined ? {} : { providerRuntimeConfigHash })
+        ...(providerRuntimeConfigHash === undefined ? {} : { providerRuntimeConfigHash }),
+        ...(typeof candidate.clientName === "string" ? { clientName: candidate.clientName } : {})
       })
         .then((result) => send(socket, { type: "response", id: requestId, ok: true, result }))
         .catch((error: unknown) =>

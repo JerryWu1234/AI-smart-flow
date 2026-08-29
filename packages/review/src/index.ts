@@ -19,6 +19,7 @@ export {
   reviewOutputJsonSchema
 } from "./review-prompt.js";
 export {
+  ClaudeCodeAdapter,
   CodexAdapter,
   CodexDesktopAdapter,
   createCodexEventState,

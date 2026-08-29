@@ -34,8 +34,10 @@ describe("short MCP calls and independent daemon jobs", () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const runner = new JobRunner();
+    let observedClientName: string | undefined;
     const server = new LocalIpcServer(resolve(harness.dataDir, "daemon"), (request) => {
       if (request.method !== "smartflow_execute") throw new Error("unexpected method");
+      observedClientName = request.clientName;
       runner.enqueue("job-1", async () => {
         await new Promise<void>((settle) => setTimeout(settle, 100));
         return { candidate: "ready" };
@@ -46,9 +48,14 @@ describe("short MCP calls and independent daemon jobs", () => {
     activeServers.push(server);
     const client = await LocalIpcClient.connect(server.endpoint);
     const startedAt = performance.now();
-    const response = await client.call("smartflow_execute", { requestId: "request-1" });
+    const response = await client.call(
+      "smartflow_execute",
+      { requestId: "request-1" },
+      "codex-desktop"
+    );
     expect(performance.now() - startedAt).toBeLessThan(2_000);
     expect(response).toEqual({ jobId: "job-1", phase: "PREPARING" });
+    expect(observedClientName).toBe("codex-desktop");
     client.close();
     await waitUntilCompleted(runner, "job-1");
   });

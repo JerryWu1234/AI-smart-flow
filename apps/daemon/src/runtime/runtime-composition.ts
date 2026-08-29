@@ -67,10 +67,13 @@ const defaultReviewOptions: Omit<ReviewRunnerOptions, "logger"> = {
 const DEFAULT_NO_PROGRESS_THRESHOLD = 15;
 
 type WorkerContinuation = Pick<WorkerRunRequest, "prompt" | "resumeSession">;
+type ReviewAdapterResolver = (
+  reviewAdapterId: RunRecord["reviewAdapterId"]
+) => AgentAdapter;
 
 export class ProductionRuntimeComposition {
   public constructor(
-    private readonly reviewAdapter: AgentAdapter,
+    private readonly reviewAdapter: AgentAdapter | ReviewAdapterResolver,
     private readonly logger = new StructuredLogger("smartflow-runtime"),
     private readonly workspaceApplyAdapter?: WorkspaceApplyAdapter,
     private readonly provider?: WorkerProvider,
@@ -160,15 +163,18 @@ export class ProductionRuntimeComposition {
   public review = async (context: ProjectPipelineContext): Promise<void> => {
     if (!(await this.contextCurrent(context))) return;
     if (!(await this.approvedSourceCurrent(context))) return;
-    const outcome = await new ReviewRunner(context.store, this.reviewAdapter, {
+    const state = await context.store.readState();
+    const run = state.runs[context.jobId];
+    if (run === undefined) return;
+    const outcome = await new ReviewRunner(context.store, this.reviewAdapterFor(run), {
       ...this.reviewOptions,
       logger: this.logger
     }).run({ projectId: context.projectId, jobId: context.jobId });
     if (outcome.schedule === "none") return;
-    const state = await context.store.readState();
-    const run = state.runs[context.jobId];
-    if (run === undefined) return;
-    const nextContext = this.contextForRun(context, run);
+    const postReviewState = await context.store.readState();
+    const postReviewRun = postReviewState.runs[context.jobId];
+    if (postReviewRun === undefined) return;
+    const nextContext = this.contextForRun(context, postReviewRun);
     if (outcome.schedule === "pipeline") {
       await this.runPipeline(nextContext);
     } else {
@@ -241,6 +247,12 @@ export class ProductionRuntimeComposition {
     if (result.action === "RECHECK_PUBLISH_READINESS") await this.publish(context);
   };
 
+  private reviewAdapterFor(run: RunRecord): AgentAdapter {
+    return typeof this.reviewAdapter === "function"
+      ? this.reviewAdapter(run.reviewAdapterId)
+      : this.reviewAdapter;
+  }
+
   private cancellationRuntime(context: ProjectPipelineContext): CancellationRuntime {
     return {
       stopWorker: async (attempt): Promise<boolean> => {
@@ -255,13 +267,14 @@ export class ProductionRuntimeComposition {
       },
       revokeAction: async (actionId): Promise<boolean> => {
         const state = await context.store.readState();
-        const action = state.runs[context.jobId]?.pendingAction;
-        if (stringField(action, "actionId") !== actionId || action?.type !== "REVIEW") {
+        const run = state.runs[context.jobId];
+        const action = run?.pendingAction;
+        if (run === undefined || stringField(action, "actionId") !== actionId || action?.type !== "REVIEW") {
           return true;
         }
         const reviewAttemptId = stringField(action, "reviewAttemptId");
         if (reviewAttemptId === undefined) return false;
-        await this.reviewAdapter.cancel(reviewAttemptId);
+        await this.reviewAdapterFor(run).cancel(reviewAttemptId);
         return true;
       }
     };
