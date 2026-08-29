@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { MetricsRegistry, StructuredLogger } from "@smartflow/observability";
 import type { WorkspaceApplyAdapter } from "@smartflow/publish";
 import {
+  ClaudeCodeAdapter,
   CodexAdapter,
   CodexDesktopAdapter,
   type AgentAdapter
@@ -11,6 +12,7 @@ import {
 
 import {
   loadSmartFlowConfig,
+  resolveReviewStrategy,
   type ReviewStrategy,
   type SmartFlowConfig
 } from "./config/config.js";
@@ -26,6 +28,7 @@ import {
 } from "./config/worker-config.js";
 
 const REVIEW_ADAPTER_FACTORIES = {
+  "claude-code": (): AgentAdapter => new ClaudeCodeAdapter(),
   codex: (): AgentAdapter => new CodexAdapter(),
   "codex-desktop": (): AgentAdapter => new CodexDesktopAdapter()
 } satisfies Record<ReviewStrategy, () => AgentAdapter>;
@@ -67,10 +70,18 @@ export async function startSmartFlowDaemon(
     options.dataDirectory ?? resolve(resolveInstallationDataDirectory(), "daemon")
   );
   await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
-  const reviewAdapter = options.reviewAdapter ??
-    REVIEW_ADAPTER_FACTORIES[config.review.strategy]();
+  const reviewAdapters = new Map<ReviewStrategy, AgentAdapter>();
+  const injectedReviewAdapter = options.reviewAdapter;
+  const resolveReviewAdapter = (strategy: ReviewStrategy): AgentAdapter => {
+    if (injectedReviewAdapter !== undefined) return injectedReviewAdapter;
+    const existing = reviewAdapters.get(strategy);
+    if (existing !== undefined) return existing;
+    const adapter = REVIEW_ADAPTER_FACTORIES[strategy]();
+    reviewAdapters.set(strategy, adapter);
+    return adapter;
+  };
   const composition = new ProductionRuntimeComposition(
-    reviewAdapter,
+    resolveReviewAdapter,
     logger,
     options.workspaceApplyAdapter,
     initialProviderRuntime.provider,
@@ -95,7 +106,9 @@ export async function startSmartFlowDaemon(
     resolveProviderRuntimeConfig: (
       providerRuntimeConfigHash
     ): Readonly<Record<string, unknown>> | undefined =>
-      providers.resolve(providerRuntimeConfigHash)?.providerRuntimeConfig
+      providers.resolve(providerRuntimeConfigHash)?.providerRuntimeConfig,
+    resolveReviewAdapterId: (clientName): ReviewStrategy =>
+      resolveReviewStrategy(config.review.strategy, clientName)
   });
   const server = new LocalIpcServer(
     dataDirectory,

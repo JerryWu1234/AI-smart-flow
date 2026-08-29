@@ -2,13 +2,12 @@ import { readFile } from "node:fs/promises";
 
 import { parse } from "yaml";
 
-export const REVIEW_STRATEGIES = ["codex", "codex-desktop"] as const;
+export const REVIEW_STRATEGIES = ["codex", "codex-desktop", "claude-code"] as const;
 export type ReviewStrategy = (typeof REVIEW_STRATEGIES)[number];
-export const DEFAULT_REVIEW_STRATEGY: ReviewStrategy = "codex";
 
 export interface SmartFlowConfig {
   review: {
-    strategy: ReviewStrategy;
+    strategy?: ReviewStrategy;
     noProgressThreshold: 15;
     // Optional overrides passed through without a value allow list. The Review
     // Agent owns which values it accepts and supplies its own defaults.
@@ -21,7 +20,6 @@ export interface SmartFlowConfig {
 
 export const defaultSmartFlowConfig: SmartFlowConfig = {
   review: {
-    strategy: DEFAULT_REVIEW_STRATEGY,
     noProgressThreshold: 15,
     deadlineMs: 45 * 60_000,
     maxAttempts: 3
@@ -34,6 +32,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isReviewStrategy(value: unknown): value is ReviewStrategy {
   return REVIEW_STRATEGIES.some((strategy) => strategy === value);
+}
+
+export function resolveReviewStrategy(
+  configuredStrategy: ReviewStrategy | undefined,
+  clientName: string | undefined
+): ReviewStrategy {
+  if (configuredStrategy !== undefined) return configuredStrategy;
+  return isReviewStrategy(clientName) ? clientName : "codex";
 }
 
 function exactKeys(record: Record<string, unknown>, allowed: readonly string[], scope: string): void {
@@ -60,14 +66,14 @@ export function parseSmartFlowConfig(value: unknown): SmartFlowConfig {
     ],
     "review"
   );
-  const reviewStrategy = review.strategy ?? DEFAULT_REVIEW_STRATEGY;
+  const reviewStrategy = review.strategy;
   const noProgressThreshold = review.noProgressThreshold ?? 15;
   const model = review.model;
   const effort = review.effort;
   const deadlineMs = review.deadlineMs ?? 45 * 60_000;
   const maxAttempts = review.maxAttempts ?? 3;
   if (
-    !isReviewStrategy(reviewStrategy) ||
+    (reviewStrategy !== undefined && !isReviewStrategy(reviewStrategy)) ||
     noProgressThreshold !== 15 ||
     (model !== undefined &&
       (typeof model !== "string" || model.trim().length === 0)) ||
@@ -86,7 +92,7 @@ export function parseSmartFlowConfig(value: unknown): SmartFlowConfig {
   }
   return {
     review: {
-      strategy: reviewStrategy,
+      ...(isReviewStrategy(reviewStrategy) ? { strategy: reviewStrategy } : {}),
       noProgressThreshold,
       ...(typeof model === "string" ? { model: model.trim() } : {}),
       ...(typeof effort === "string" ? { effort: effort.trim() } : {}),

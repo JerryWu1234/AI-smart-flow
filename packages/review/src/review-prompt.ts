@@ -2,7 +2,7 @@ import { reviewResultSchema } from "@smartflow/protocol";
 import type { TaskManifest } from "@smartflow/task-manifest";
 
 export function reviewOutputJsonSchema(): unknown {
-  return reviewResultSchema.toJSONSchema();
+  return reviewResultSchema.toJSONSchema({ target: "draft-7" });
 }
 
 export function buildReviewPrompt(input: {
@@ -39,7 +39,7 @@ export function buildReviewPrompt(input: {
     ].join("\n\n"),
     [
       "## Output",
-      "Return only the final JSON object accepted by the supplied --output-schema. The root object is { tasks: [...] }; do not add reviewerSessionId, result, Markdown fences, commentary, or any other wrapper."
+      "Return only the final JSON object accepted by the supplied JSON Schema. The root object is { tasks: [...] }; do not add reviewerSessionId, result, Markdown fences, commentary, or any other wrapper."
     ].join("\n\n")
   ];
 

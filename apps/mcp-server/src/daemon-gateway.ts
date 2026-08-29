@@ -1,7 +1,11 @@
 import type { z } from "zod";
 
+export interface DaemonRequestContext {
+  clientName?: string;
+}
+
 export interface DaemonGateway {
-  call(toolName: string, input: unknown): Promise<unknown>;
+  call(toolName: string, input: unknown, context?: DaemonRequestContext): Promise<unknown>;
 }
 
 export type ValidatedHandler = (input: unknown) => Promise<unknown>;

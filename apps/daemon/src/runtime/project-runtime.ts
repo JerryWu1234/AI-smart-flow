@@ -70,6 +70,9 @@ export interface ProjectRuntimeOptions {
   resolveProviderRuntimeConfig?: (
     providerRuntimeConfigHash: string
   ) => Readonly<Record<string, unknown>> | undefined;
+  resolveReviewAdapterId?: (
+    clientName: string | undefined
+  ) => RunRecord["reviewAdapterId"];
 }
 
 interface MutationResult<T> {
@@ -411,7 +414,11 @@ export class ProjectRuntime {
             }
             throw parsed.error;
           }
-          return this.execute(parsed.data, request.providerRuntimeConfigHash);
+          return this.execute(
+            parsed.data,
+            request.providerRuntimeConfigHash,
+            request.clientName
+          );
         }
       case "smartflow_status":
         return this.status(statusInputSchema.parse(request.payload));
@@ -503,9 +510,11 @@ export class ProjectRuntime {
 
   public async execute(
     input: ExecuteInput,
-    providerRuntimeConfigHash?: string
+    providerRuntimeConfigHash?: string,
+    clientName?: string
   ): Promise<unknown> {
     const providerRuntimeConfig = this.resolveProviderRuntimeConfig(providerRuntimeConfigHash);
+    const reviewAdapterId = this.options.resolveReviewAdapterId?.(clientName) ?? "codex";
     const canonicalRoot = await realpath(input.projectRoot);
     const { canonicalPath: canonicalTasksPath, sourceBytes } = await readProjectTasksFile(
       canonicalRoot,
@@ -530,9 +539,11 @@ export class ProjectRuntime {
     const mutation = await this.mutate(
       store,
       input.requestId,
-      providerRuntimeConfigHash === undefined
-        ? input
-        : { ...input, providerRuntimeConfigHash },
+      {
+        ...input,
+        ...(providerRuntimeConfigHash === undefined ? {} : { providerRuntimeConfigHash }),
+        reviewAdapterId
+      },
       input.expectedStateVersion,
       async (state, nextStateVersion, fence) => {
         const activeJobId = state.activeRunsByTaskPath[canonicalTasksPath];
@@ -580,6 +591,7 @@ export class ProjectRuntime {
           phase: "PREPARING",
           taskManifest,
           taskSource,
+          reviewAdapterId,
           approvedTasks: {
             path: resolve(store.dataDirectory, taskSource.relativePath),
             sourceHash: compiled.manifest.sourceHash

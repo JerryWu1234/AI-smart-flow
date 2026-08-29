@@ -216,6 +216,7 @@ async function initializedStore(harness: RuntimeHarness): Promise<{
         phase: "PREPARING",
         taskManifest,
         taskSource,
+        reviewAdapterId: "codex",
         approvedTasks: {
           path: resolve(store.dataDirectory, taskSource.relativePath),
           sourceHash: compiled.manifest.sourceHash

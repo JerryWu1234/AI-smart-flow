@@ -1,6 +1,6 @@
 import { LocalIpcClient } from "@smartflow/daemon";
 
-import type { DaemonGateway } from "./daemon-gateway.js";
+import type { DaemonGateway, DaemonRequestContext } from "./daemon-gateway.js";
 
 export class LocalDaemonGateway implements DaemonGateway {
   private readonly client: LocalIpcClient;
@@ -9,8 +9,12 @@ export class LocalDaemonGateway implements DaemonGateway {
     this.client = client;
   }
 
-  public call(toolName: string, input: unknown): Promise<unknown> {
-    return this.client.call(toolName, input);
+  public call(
+    toolName: string,
+    input: unknown,
+    context?: DaemonRequestContext
+  ): Promise<unknown> {
+    return this.client.call(toolName, input, context?.clientName);
   }
 
   public close(): void {
