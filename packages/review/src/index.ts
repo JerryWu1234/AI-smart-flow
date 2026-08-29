@@ -21,9 +21,7 @@ export {
 export {
   ClaudeCodeAdapter,
   CodexAdapter,
-  CodexDesktopAdapter,
-  createCodexEventState,
-  reduceCodexEventLine
+  CodexDesktopAdapter
 } from "./agents/index.js";
 export type {
   AgentAdapter,
