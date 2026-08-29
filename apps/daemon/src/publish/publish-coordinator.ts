@@ -219,28 +219,6 @@ class StateStorePublishAttemptStore implements PublishAttemptStore {
     );
   }
 
-  public async markSubmitted(operationId: string): Promise<void> {
-    const state = await this.store.readState();
-    const run = state.runs[this.jobId];
-    if (run === undefined) throw new Error("PUBLISH_RUN_MISSING");
-    await this.mutations.mutate(
-      {
-        requestId: `publish:${operationId}:submitted`,
-        payload: { operationId, status: "SUBMITTED" },
-        expectedJobId: this.jobId,
-        ...identityGuards(this.identity),
-        expectedPhases: ["PUBLISHING"]
-      },
-      (current) => ({
-        nextState: nextState(current, this.jobId, (active) => {
-          if (active.publish?.operationId !== operationId) throw new Error("PUBLISH_OPERATION_STALE");
-          return { ...active, publish: { ...active.publish, status: "SUBMITTED" } };
-        }),
-        response: { operationId, status: "SUBMITTED" }
-      })
-    );
-  }
-
   public async markSubmittedAndApply(
     operationId: string,
     apply: () => Promise<PublishResult>
