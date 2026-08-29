@@ -27,6 +27,7 @@ export {
 export { ReviewRunner } from "./review/review-runner.js";
 export { WorkerRunner } from "./worker/worker-runner.js";
 export {
+  resolveMcpWorkerLaunchConfiguration,
   resolveWorkerLaunchConfiguration,
   workerLaunchEnvironment
 } from "./config/worker-config.js";
