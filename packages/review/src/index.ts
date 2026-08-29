@@ -20,6 +20,7 @@ export {
 } from "./review-prompt.js";
 export {
   ClaudeCodeAdapter,
+  ClaudeCodeDesktopAdapter,
   CodexAdapter,
   CodexDesktopAdapter,
   createCodexEventState,

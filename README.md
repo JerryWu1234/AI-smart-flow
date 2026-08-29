@@ -20,15 +20,16 @@ Run `smartflow doctor --json` to verify Node, Pi, sandbox, model registration, s
 ### Review Agent selection
 
 When `review.strategy` is omitted, the Daemon uses the MCP Host's unauthenticated
-`clientInfo.name` only as a coarse default. Registered strategy names select themselves,
-Claude-family names beginning with `claude-` or `Anthropic` select the canonical
-`claude-code` strategy, and missing or unrecognized names fall back to `codex`. An explicit
-`review.strategy` always wins. Host identity never grants permissions.
+`clientInfo.name` only as a coarse default. An exact registered strategy name selects itself;
+missing or unrecognized names fall back to `codex`. An explicit `review.strategy` always wins.
+Host identity never grants permissions.
 
-Claude Desktop is an MCP Host in this flow, not a Reviewer transport. The `claude-code`
-strategy starts a separate local `claude -p` process, so the Claude Code CLI must be installed
-and authenticated in the Daemon environment. SmartFlow does not attach to, resume, or control
-the Desktop conversation or GUI.
+`claude-code` and `claude-code-desktop` are separate durable strategy identities, but both
+start a standalone local `claude -p` process. The Desktop strategy is a compatibility module
+for Desktop-host configuration; Claude Desktop exposes no headless reviewer transport, so
+SmartFlow does not attach to, resume, or control the Desktop conversation, embedded CLI, or
+GUI. The standalone Claude Code CLI must be installed and authenticated in the Daemon
+environment for either strategy.
 
 ### Host task preparation and approval
 

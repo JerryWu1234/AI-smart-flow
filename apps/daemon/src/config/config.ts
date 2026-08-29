@@ -2,7 +2,12 @@ import { readFile } from "node:fs/promises";
 
 import { parse } from "yaml";
 
-export const REVIEW_STRATEGIES = ["codex", "codex-desktop", "claude-code"] as const;
+export const REVIEW_STRATEGIES = [
+  "codex",
+  "codex-desktop",
+  "claude-code",
+  "claude-code-desktop"
+] as const;
 export type ReviewStrategy = (typeof REVIEW_STRATEGIES)[number];
 
 export interface SmartFlowConfig {
@@ -34,20 +39,12 @@ function isReviewStrategy(value: unknown): value is ReviewStrategy {
   return REVIEW_STRATEGIES.some((strategy) => strategy === value);
 }
 
-// Claude clientInfo names vary by surface and request path. This is only a
-// default adapter hint; the resolved and persisted identity stays canonical.
-function isClaudeHostClientName(value: string | undefined): boolean {
-  if (value === undefined) return false;
-  return value.startsWith("claude-") || value.startsWith("Anthropic");
-}
-
 export function resolveReviewStrategy(
   configuredStrategy: ReviewStrategy | undefined,
   clientName: string | undefined
 ): ReviewStrategy {
   if (configuredStrategy !== undefined) return configuredStrategy;
-  if (isReviewStrategy(clientName)) return clientName;
-  return isClaudeHostClientName(clientName) ? "claude-code" : "codex";
+  return isReviewStrategy(clientName) ? clientName : "codex";
 }
 
 function exactKeys(record: Record<string, unknown>, allowed: readonly string[], scope: string): void {
