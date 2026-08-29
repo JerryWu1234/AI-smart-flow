@@ -37,6 +37,19 @@ describe("SmartFlow daemon configuration", () => {
     }
   });
 
+  it("normalizes Claude Host family names to the claude-code strategy", () => {
+    for (const clientName of [
+      "claude-ai",
+      "claude-code-desktop",
+      "Anthropic",
+      "Anthropic/claude-desktop"
+    ]) {
+      expect(resolveReviewStrategy(undefined, clientName)).toBe("claude-code");
+    }
+    expect(resolveReviewStrategy("codex-desktop", "claude-ai")).toBe("codex-desktop");
+    expect(resolveReviewStrategy(undefined, "CLAUDE-AI")).toBe("codex");
+  });
+
   it("accepts every registered review strategy", () => {
     for (const strategy of REVIEW_STRATEGIES) {
       expect(parseSmartFlowConfig({ review: { strategy } }).review.strategy).toBe(strategy);

@@ -34,12 +34,20 @@ function isReviewStrategy(value: unknown): value is ReviewStrategy {
   return REVIEW_STRATEGIES.some((strategy) => strategy === value);
 }
 
+// Claude clientInfo names vary by surface and request path. This is only a
+// default adapter hint; the resolved and persisted identity stays canonical.
+function isClaudeHostClientName(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  return value.startsWith("claude-") || value.startsWith("Anthropic");
+}
+
 export function resolveReviewStrategy(
   configuredStrategy: ReviewStrategy | undefined,
   clientName: string | undefined
 ): ReviewStrategy {
   if (configuredStrategy !== undefined) return configuredStrategy;
-  return isReviewStrategy(clientName) ? clientName : "codex";
+  if (isReviewStrategy(clientName)) return clientName;
+  return isClaudeHostClientName(clientName) ? "claude-code" : "codex";
 }
 
 function exactKeys(record: Record<string, unknown>, allowed: readonly string[], scope: string): void {
