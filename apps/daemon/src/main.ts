@@ -11,8 +11,8 @@ import {
 } from "@smartflow/review";
 
 import {
-  loadSmartFlowConfig,
   resolveReviewStrategy,
+  resolveSmartFlowConfig,
   type ReviewStrategy,
   type SmartFlowConfig
 } from "./config/config.js";
@@ -21,6 +21,7 @@ import { LocalIpcServer, type IpcRequestHandler } from "./transport/local-ipc-se
 import { ProviderRegistry } from "./runtime/provider-registry.js";
 import { ProjectRuntime } from "./runtime/project-runtime.js";
 import { ProductionRuntimeComposition } from "./runtime/runtime-composition.js";
+import { resolveReviewerExecutable } from "./review/reviewer-executable.js";
 import {
   resolveWorkerLaunchConfiguration,
   WORKER_CONFIGURATION_ENVIRONMENT_KEYS,
@@ -28,14 +29,16 @@ import {
 } from "./config/worker-config.js";
 
 const REVIEW_ADAPTER_FACTORIES = {
-  "claude-code": (): AgentAdapter => new ClaudeCodeAdapter(),
-  codex: (): AgentAdapter => new CodexAdapter(),
-  "codex-desktop": (): AgentAdapter => new CodexDesktopAdapter()
-} satisfies Record<ReviewStrategy, () => AgentAdapter>;
+  "claude-code": (executable: string | undefined): AgentAdapter =>
+    new ClaudeCodeAdapter(executable === undefined ? {} : { executable }),
+  codex: (executable: string | undefined): AgentAdapter =>
+    new CodexAdapter(executable === undefined ? {} : { executable }),
+  "codex-desktop": (executable: string | undefined): AgentAdapter =>
+    new CodexDesktopAdapter(executable === undefined ? {} : { executable })
+} satisfies Record<ReviewStrategy, (executable: string | undefined) => AgentAdapter>;
 
 export interface SmartFlowDaemonOptions {
   dataDirectory?: string;
-  configPath?: string;
   handler?: IpcRequestHandler;
   logger?: StructuredLogger;
   metrics?: MetricsRegistry;
@@ -57,7 +60,12 @@ export async function startSmartFlowDaemon(
   const logger = options.logger ?? new StructuredLogger("smartflow-daemon");
   const metrics = options.metrics ?? new MetricsRegistry();
   const timer = performance.now();
-  const config = await loadSmartFlowConfig(options.configPath);
+  const config = resolveSmartFlowConfig();
+  const injectedReviewAdapter = options.reviewAdapter;
+  const configuredReviewExecutable =
+    injectedReviewAdapter === undefined && config.review.strategy !== undefined
+      ? await resolveReviewerExecutable(config.review.strategy)
+      : undefined;
   const workerLaunchConfiguration = options.workerLaunchConfiguration ??
     resolveWorkerLaunchConfiguration([]);
   for (const key of WORKER_CONFIGURATION_ENVIRONMENT_KEYS) {
@@ -71,12 +79,14 @@ export async function startSmartFlowDaemon(
   );
   await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
   const reviewAdapters = new Map<ReviewStrategy, AgentAdapter>();
-  const injectedReviewAdapter = options.reviewAdapter;
   const resolveReviewAdapter = (strategy: ReviewStrategy): AgentAdapter => {
     if (injectedReviewAdapter !== undefined) return injectedReviewAdapter;
     const existing = reviewAdapters.get(strategy);
     if (existing !== undefined) return existing;
-    const adapter = REVIEW_ADAPTER_FACTORIES[strategy]();
+    const executable = strategy === config.review.strategy
+      ? configuredReviewExecutable
+      : undefined;
+    const adapter = REVIEW_ADAPTER_FACTORIES[strategy](executable);
     reviewAdapters.set(strategy, adapter);
     return adapter;
   };
@@ -89,11 +99,8 @@ export async function startSmartFlowDaemon(
     providers.resolve.bind(providers),
     {
       ...(config.review.model === undefined ? {} : { model: config.review.model }),
-      ...(config.review.effort === undefined ? {} : { effort: config.review.effort }),
-      deadlineMs: config.review.deadlineMs,
-      maxAttempts: config.review.maxAttempts
-    },
-    config.review.noProgressThreshold
+      ...(config.review.effort === undefined ? {} : { effort: config.review.effort })
+    }
   );
   const projectRuntime = new ProjectRuntime({
     dataDirectory,

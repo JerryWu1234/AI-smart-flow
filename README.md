@@ -13,6 +13,8 @@ Each `smartflow_execute` call creates an immutable Job bound to one canonical ta
 
 Each MCP server instance binds one model directly from `API`, `BASE_URL`, `MODEL` and `API_KEY`. Supported APIs are `openai-completions`, `openai-responses`, `anthropic-messages` and `google-generative-ai`. Optional MCP environment variables `SMARTFLOW_PI_CONTEXT_WINDOW`, `SMARTFLOW_PI_MAX_TOKENS`, `EFFORT` and `SMARTFLOW_PI_ATTEMPT_DEADLINE_MS` configure context, output, reasoning effort and the rolling Attempt deadline, defaulting to `1000000`, `384000`, `high` and `300000ms`; `EFFORT` accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`, and deadline overrides must be at least `60000ms`. SmartFlow registers the model in memory through a bundled Pi Extension and does not use `models.json`.
 
+Reviewer configuration uses `REVIEW_ADAPTER`, `REVIEW_MODEL` and `REVIEW_EFFORT` as its only configuration source. `REVIEW_ADAPTER` accepts `codex`, `codex-desktop` or `claude-code`, while model and effort are passed through to the selected Reviewer. SmartFlow checks the explicitly selected local Agent before the MCP server or Daemon becomes ready: both Codex strategies require `codex` on `PATH`, and `claude-code` requires `claude`. Reviewer configuration is read when the Daemon starts, so restart the Daemon after changing any `REVIEW_*` value.
+
 Run `smartflow doctor --json` to verify Node, Pi, sandbox, model registration, signing and publish capabilities.
 
 ## MCP workflow

@@ -149,6 +149,22 @@ describe("Pi Worker launch configuration", () => {
     })).toThrow(/PI_RUNTIME_CONFIG_INVALID/u);
   });
 
+  it("keeps Reviewer settings out of the Worker daemon fingerprint", () => {
+    const first = resolveMcpWorkerLaunchConfiguration(["mcp"], {
+      ...mcpEnvironment,
+      REVIEW_ADAPTER: "codex",
+      REVIEW_MODEL: "gpt-review-a",
+      REVIEW_EFFORT: "low"
+    });
+    const second = resolveMcpWorkerLaunchConfiguration(["mcp"], {
+      ...mcpEnvironment,
+      REVIEW_ADAPTER: "claude-code",
+      REVIEW_MODEL: "claude-review-b",
+      REVIEW_EFFORT: "high"
+    });
+    expect(second.daemonConfigFingerprint).toBe(first.daemonConfigFingerprint);
+  });
+
   it("keeps credentials out of runtime hashes but rotates the daemon fingerprint", () => {
     const first = resolveMcpWorkerLaunchConfiguration(["mcp"], mcpEnvironment);
     const second = resolveMcpWorkerLaunchConfiguration(["mcp"], {

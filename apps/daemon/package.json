@@ -24,14 +24,13 @@
   },
   "dependencies": {
     "@smartflow/observability": "workspace:*",
+    "@smartflow/protocol": "workspace:*",
     "@smartflow/provider-core": "workspace:*",
     "@smartflow/provider-pi": "workspace:*",
-    "@smartflow/protocol": "workspace:*",
     "@smartflow/publish": "workspace:*",
     "@smartflow/review": "workspace:*",
     "@smartflow/state-store": "workspace:*",
     "@smartflow/task-manifest": "workspace:*",
-    "@smartflow/workspace": "workspace:*",
-    "yaml": "2.9.0"
+    "@smartflow/workspace": "workspace:*"
   }
 }

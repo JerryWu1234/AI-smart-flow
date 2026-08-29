@@ -3,10 +3,10 @@ import { access, mkdir, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import {
-  loadSmartFlowConfig,
   resolveMcpWorkerLaunchConfiguration,
   resolveInstallationDataDirectory,
   resolveProjectDataDirectory,
+  resolveSmartFlowConfig,
   type ResolvedWorkerLaunchConfiguration,
   type SmartFlowConfig
 } from "@smartflow/daemon";
@@ -48,7 +48,6 @@ export interface DoctorOptions {
   projectRoot?: string;
   environment?: NodeJS.ProcessEnv;
   probes?: DoctorProbe[];
-  configPath?: string;
 }
 
 function projectIdFor(root: string): string {
@@ -163,7 +162,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
   let probes = options.probes;
   if (probes === undefined) {
     try {
-      config = await loadSmartFlowConfig(options.configPath ?? environment.SMARTFLOW_CONFIG);
+      config = resolveSmartFlowConfig(environment);
       const workerConfiguration = resolveMcpWorkerLaunchConfiguration([], environment);
       probes = defaultProbes(projectRoot, dataDirectory, environment, workerConfiguration);
     } catch (error) {
