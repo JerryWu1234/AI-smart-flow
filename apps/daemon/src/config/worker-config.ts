@@ -85,7 +85,7 @@ export function resolveWorkerLaunchConfiguration(
     value === flag || value.startsWith(`${flag}=`)
   ))) {
     throw new Error(
-      "WORKER_CONFIGURATION_INVALID: Pi model configuration must use API, BASE_URL, MODEL, and API_KEY environment variables"
+      "WORKER_CONFIGURATION_INVALID: Pi model configuration must use BASE_URL, MODEL, and API_KEY environment variables; API is optional"
     );
   }
   const unsupportedKey = Object.keys(environment).find((key) =>
@@ -98,7 +98,7 @@ export function resolveWorkerLaunchConfiguration(
   if (unsupportedKey !== undefined) {
     throw new Error(`WORKER_CONFIGURATION_INVALID: ${unsupportedKey} is unsupported`);
   }
-  const api = required(environment, "API");
+  const api = environment.API?.trim() ?? "openai-responses";
   if (!PI_MODEL_APIS.includes(api as PiModelApi)) {
     throw new Error("WORKER_CONFIGURATION_INVALID: API is unsupported");
   }
