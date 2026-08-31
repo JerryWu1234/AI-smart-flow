@@ -17,7 +17,8 @@ describe("SmartFlow daemon configuration", () => {
         "codex",
         "codex-desktop",
         "claude-code",
-        "claude-code-desktop"
+        "claude-code-desktop",
+        "opencode"
       ]);
       expect(defaultSmartFlowConfig.review).not.toHaveProperty("strategy");
       const config = await loadSmartFlowConfig();
@@ -26,12 +27,22 @@ describe("SmartFlow daemon configuration", () => {
         .toBe("codex-desktop");
       expect(resolveReviewStrategy(config.review.strategy, "claude-code"))
         .toBe("claude-code");
+      expect(resolveReviewStrategy(config.review.strategy, "opencode"))
+        .toBe("opencode");
+      expect(resolveReviewStrategy(config.review.strategy, "OpenCode")).toBe("codex");
+      expect(resolveReviewStrategy(config.review.strategy, " open-code ")).toBe("codex");
       expect(resolveReviewStrategy(config.review.strategy, "CODEX-DESKTOP")).toBe("codex");
       expect(resolveReviewStrategy(config.review.strategy, " codex-desktop ")).toBe("codex");
       expect(resolveReviewStrategy(config.review.strategy, "kiro")).toBe("codex");
       expect(parseSmartFlowConfig({
         review: { strategy: "codex-desktop" }
       }).review.strategy).toBe("codex-desktop");
+      expect(parseSmartFlowConfig({
+        review: { strategy: "opencode", model: "anthropic/claude-sonnet-4" }
+      }).review).toMatchObject({
+        strategy: "opencode",
+        model: "anthropic/claude-sonnet-4"
+      });
       expect(config).not.toHaveProperty("version");
     } finally {
       if (previousConfigPath === undefined) {

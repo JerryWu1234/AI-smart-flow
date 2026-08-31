@@ -22,7 +22,8 @@ export {
   ClaudeCodeAdapter,
   ClaudeCodeDesktopAdapter,
   CodexAdapter,
-  CodexDesktopAdapter
+  CodexDesktopAdapter,
+  OpenCodeAdapter
 } from "./agents/index.js";
 export type {
   AgentAdapter,

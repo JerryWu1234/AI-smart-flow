@@ -6,7 +6,8 @@ export const REVIEW_STRATEGIES = [
   "codex",
   "codex-desktop",
   "claude-code",
-  "claude-code-desktop"
+  "claude-code-desktop",
+  "opencode"
 ] as const;
 export type ReviewStrategy = (typeof REVIEW_STRATEGIES)[number];
 

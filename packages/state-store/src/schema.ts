@@ -106,7 +106,8 @@ const runRecordSchema = z
       "codex",
       "codex-desktop",
       "claude-code",
-      "claude-code-desktop"
+      "claude-code-desktop",
+      "opencode"
     ]),
     approvedTasks: canonicalRecordSchema.optional(),
     baseline: artifactRefSchema.optional(),

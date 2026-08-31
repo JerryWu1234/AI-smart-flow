@@ -8,6 +8,7 @@ import {
   ClaudeCodeDesktopAdapter,
   CodexAdapter,
   CodexDesktopAdapter,
+  OpenCodeAdapter,
   type AgentAdapter
 } from "@smartflow/review";
 
@@ -32,7 +33,8 @@ const REVIEW_ADAPTER_FACTORIES = {
   "claude-code": (): AgentAdapter => new ClaudeCodeAdapter(),
   "claude-code-desktop": (): AgentAdapter => new ClaudeCodeDesktopAdapter(),
   codex: (): AgentAdapter => new CodexAdapter(),
-  "codex-desktop": (): AgentAdapter => new CodexDesktopAdapter()
+  "codex-desktop": (): AgentAdapter => new CodexDesktopAdapter(),
+  opencode: (): AgentAdapter => new OpenCodeAdapter()
 } satisfies Record<ReviewStrategy, () => AgentAdapter>;
 
 export interface SmartFlowDaemonOptions {
