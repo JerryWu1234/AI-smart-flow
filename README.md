@@ -17,6 +17,20 @@ Run `smartflow doctor --json` to verify Node, Pi, sandbox, model registration, s
 
 ## MCP workflow
 
+### Review Agent selection
+
+When `review.strategy` is omitted, the Daemon uses the MCP Host's unauthenticated
+`clientInfo.name` only as a coarse default. An exact registered strategy name selects itself;
+missing or unrecognized names fall back to `codex`. An explicit `review.strategy` always wins.
+Host identity never grants permissions.
+
+`claude-code` and `claude-code-desktop` are separate durable strategy identities, but both
+start a standalone local `claude -p` process. The Desktop strategy is a compatibility module
+for Desktop-host configuration; Claude Desktop exposes no headless reviewer transport, so
+SmartFlow does not attach to, resume, or control the Desktop conversation, embedded CLI, or
+GUI. The standalone Claude Code CLI must be installed and authenticated in the Daemon
+environment for either strategy.
+
 ### Host task preparation and approval
 
 Before `smartflow_execute`, the MCP Host must distinguish implementation intent from ordinary conversation. It must not create task files or execute SmartFlow for casual chat, explanations, evaluations, discussions, or planning-only requests. If an implementation request is missing a critical goal, scope, target, or acceptance criterion, the Host asks the user for that information instead of inventing it.

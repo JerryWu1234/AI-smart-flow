@@ -13,7 +13,12 @@ describe("SmartFlow daemon configuration", () => {
     const previousConfigPath = process.env.SMARTFLOW_CONFIG;
     Reflect.deleteProperty(process.env, "SMARTFLOW_CONFIG");
     try {
-      expect(REVIEW_STRATEGIES).toEqual(["codex", "codex-desktop", "claude-code"]);
+      expect(REVIEW_STRATEGIES).toEqual([
+        "codex",
+        "codex-desktop",
+        "claude-code",
+        "claude-code-desktop"
+      ]);
       expect(defaultSmartFlowConfig.review).not.toHaveProperty("strategy");
       const config = await loadSmartFlowConfig();
       expect(config.review).not.toHaveProperty("strategy");
@@ -35,6 +40,20 @@ describe("SmartFlow daemon configuration", () => {
         process.env.SMARTFLOW_CONFIG = previousConfigPath;
       }
     }
+  });
+
+  it("selects the Desktop compatibility strategy only by its registered name", () => {
+    expect(resolveReviewStrategy(undefined, "claude-code-desktop"))
+      .toBe("claude-code-desktop");
+    for (const clientName of [
+      "claude-ai",
+      "Anthropic",
+      "Anthropic/claude-desktop"
+    ]) {
+      expect(resolveReviewStrategy(undefined, clientName)).toBe("codex");
+    }
+    expect(resolveReviewStrategy("claude-code-desktop", "claude-ai"))
+      .toBe("claude-code-desktop");
   });
 
   it("accepts every registered review strategy", () => {

@@ -2,7 +2,12 @@ import { readFile } from "node:fs/promises";
 
 import { parse } from "yaml";
 
-export const REVIEW_STRATEGIES = ["codex", "codex-desktop", "claude-code"] as const;
+export const REVIEW_STRATEGIES = [
+  "codex",
+  "codex-desktop",
+  "claude-code",
+  "claude-code-desktop"
+] as const;
 export type ReviewStrategy = (typeof REVIEW_STRATEGIES)[number];
 
 export interface SmartFlowConfig {

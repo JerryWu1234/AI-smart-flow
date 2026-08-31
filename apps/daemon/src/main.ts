@@ -5,6 +5,7 @@ import { MetricsRegistry, StructuredLogger } from "@smartflow/observability";
 import type { WorkspaceApplyAdapter } from "@smartflow/publish";
 import {
   ClaudeCodeAdapter,
+  ClaudeCodeDesktopAdapter,
   CodexAdapter,
   CodexDesktopAdapter,
   type AgentAdapter
@@ -29,6 +30,7 @@ import {
 
 const REVIEW_ADAPTER_FACTORIES = {
   "claude-code": (): AgentAdapter => new ClaudeCodeAdapter(),
+  "claude-code-desktop": (): AgentAdapter => new ClaudeCodeDesktopAdapter(),
   codex: (): AgentAdapter => new CodexAdapter(),
   "codex-desktop": (): AgentAdapter => new CodexDesktopAdapter()
 } satisfies Record<ReviewStrategy, () => AgentAdapter>;
