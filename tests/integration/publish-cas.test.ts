@@ -59,11 +59,14 @@ class Store implements PublishAttemptStore {
     return Promise.resolve();
   }
 
-  public markSubmitted(operationId: string): Promise<void> {
+  public markSubmittedAndApply(
+    operationId: string,
+    apply: () => Promise<PublishResult>
+  ): Promise<PublishResult> {
     const value = this.attempts.get(operationId);
     if (value === undefined) throw new Error("attempt missing");
     this.attempts.set(operationId, { ...value, status: "SUBMITTED" });
-    return Promise.resolve();
+    return apply();
   }
 
   public complete(

@@ -36,9 +36,12 @@ class Store implements PublishAttemptStore {
   public get(): Promise<PublishAttemptRecord | undefined> { return Promise.resolve(this.value); }
   public prepare(value: PublishAttemptRecord): Promise<void> { this.value = value; return Promise.resolve(); }
   public beginRecovery(value: PublishAttemptRecord): Promise<void> { this.value = value; return Promise.resolve(); }
-  public markSubmitted(): Promise<void> {
+  public markSubmittedAndApply(
+    _operationId: string,
+    apply: () => Promise<PublishResult>
+  ): Promise<PublishResult> {
     if (this.value !== undefined) this.value = { ...this.value, status: "SUBMITTED" };
-    return Promise.resolve();
+    return apply();
   }
   public complete(_id: string, status: PublishAttemptRecord["status"], result: PublishResult): Promise<void> {
     if (this.value !== undefined) this.value = { ...this.value, status, result };
@@ -70,10 +73,13 @@ class LeaseStore implements PublishAttemptStore {
     this.attempts.set(value.operationId, value);
     return Promise.resolve();
   }
-  public markSubmitted(operationId: string): Promise<void> {
+  public markSubmittedAndApply(
+    operationId: string,
+    apply: () => Promise<PublishResult>
+  ): Promise<PublishResult> {
     const value = this.attempts.get(operationId);
     if (value !== undefined) this.attempts.set(operationId, { ...value, status: "SUBMITTED" });
-    return Promise.resolve();
+    return apply();
   }
   public complete(
     operationId: string,

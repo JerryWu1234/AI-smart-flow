@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   createCodexEventState,
   reduceCodexEventLine
-} from "@smartflow/review";
+} from "../../../../packages/review/src/agents/codex/cli/events.js";
 
 function reduceLines(lines: readonly string[]): ReturnType<typeof createCodexEventState> {
   return lines.reduce(reduceCodexEventLine, createCodexEventState());
