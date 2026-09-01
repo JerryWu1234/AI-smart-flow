@@ -56,7 +56,6 @@
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.83.0",
     "@modelcontextprotocol/sdk": "1.29.0",
-    "yaml": "2.9.0",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -67,6 +66,7 @@
     "tsdown": "0.22.13",
     "typescript": "6.0.3",
     "typescript-eslint": "8.65.0",
-    "vitest": "4.1.10"
+    "vitest": "4.1.10",
+    "yaml": "2.9.0"
   }
 }

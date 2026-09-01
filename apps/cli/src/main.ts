@@ -23,17 +23,24 @@ function flagValue(argv: string[], name: string): string | undefined {
   return value;
 }
 
+function rejectRemovedConfigFlag(argv: readonly string[]): void {
+  if (argv.some((value) => value === "--config" || value.startsWith("--config="))) {
+    throw new Error(
+      "--config is unsupported; configure Review with REVIEW_ADAPTER, REVIEW_MODEL, and REVIEW_EFFORT"
+    );
+  }
+}
+
 function print(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
 export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   const command = argv[0] ?? "help";
+  rejectRemovedConfigFlag(argv);
   if (command === "doctor") {
-    const configPath = flagValue(argv, "--config");
     const report = await runDoctor({
-      projectRoot: flagValue(argv, "--project") ?? process.cwd(),
-      ...(configPath === undefined ? {} : { configPath })
+      projectRoot: flagValue(argv, "--project") ?? process.cwd()
     });
     if (argv.includes("--json")) print(report);
     else {
@@ -46,11 +53,9 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   }
   if (command === "daemon") {
     const dataDirectory = flagValue(argv, "--data-dir");
-    const configPath = flagValue(argv, "--config");
     const workerLaunchConfiguration = resolveWorkerLaunchConfiguration(argv);
     await serveSmartFlowDaemon({
       ...(dataDirectory === undefined ? {} : { dataDirectory }),
-      ...(configPath === undefined ? {} : { configPath }),
       workerLaunchConfiguration
     });
     return 0;
@@ -85,11 +90,12 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
   process.stdout.write(
     [
       "Usage: smartflow <command>",
-      "  doctor [--json] [--project PATH] [--config PATH]",
-      "  daemon [--data-dir PATH] [--config PATH]",
+      "  doctor [--json] [--project PATH]",
+      "  daemon [--data-dir PATH]",
       "  mcp [--data-dir PATH]",
       "  Required MCP Pi env: BASE_URL, MODEL, API_KEY",
       "  Optional MCP Pi env: API, SMARTFLOW_PI_CONTEXT_WINDOW, SMARTFLOW_PI_MAX_TOKENS, EFFORT, SMARTFLOW_PI_ATTEMPT_DEADLINE_MS",
+      "  Optional MCP Review env: REVIEW_ADAPTER, REVIEW_MODEL, REVIEW_EFFORT",
       "  health [--data-dir PATH]",
       "  version"
     ].join("\n") + "\n"

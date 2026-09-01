@@ -72,6 +72,8 @@ type ReviewAdapterResolver = (
 ) => AgentAdapter;
 
 export class ProductionRuntimeComposition {
+  private readonly reviewOptions: Omit<ReviewRunnerOptions, "logger">;
+
   public constructor(
     private readonly reviewAdapter: AgentAdapter | ReviewAdapterResolver,
     private readonly logger = new StructuredLogger("smartflow-runtime"),
@@ -79,9 +81,11 @@ export class ProductionRuntimeComposition {
     private readonly provider?: WorkerProvider,
     private readonly providerRuntimeConfig: Readonly<Record<string, unknown>> = Object.freeze({}),
     private readonly providerRuntimeResolver?: ProviderRuntimeResolver,
-    private readonly reviewOptions: Omit<ReviewRunnerOptions, "logger"> = defaultReviewOptions,
+    reviewOptions: Partial<Omit<ReviewRunnerOptions, "logger">> = {},
     private readonly noProgressThreshold = DEFAULT_NO_PROGRESS_THRESHOLD
-  ) {}
+  ) {
+    this.reviewOptions = { ...defaultReviewOptions, ...reviewOptions };
+  }
 
   private repairCoordinator(
     store: ProjectPipelineContext["store"]

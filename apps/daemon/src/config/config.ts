@@ -1,7 +1,3 @@
-import { readFile } from "node:fs/promises";
-
-import { parse } from "yaml";
-
 export const REVIEW_STRATEGIES = [
   "codex",
   "codex-desktop",
@@ -13,26 +9,11 @@ export type ReviewStrategy = (typeof REVIEW_STRATEGIES)[number];
 export interface SmartFlowConfig {
   review: {
     strategy?: ReviewStrategy;
-    noProgressThreshold: 15;
     // Optional overrides passed through without a value allow list. The Review
     // Agent owns which values it accepts and supplies its own defaults.
     model?: string;
     effort?: string;
-    deadlineMs: number;
-    maxAttempts: number;
   };
-}
-
-export const defaultSmartFlowConfig: SmartFlowConfig = {
-  review: {
-    noProgressThreshold: 15,
-    deadlineMs: 45 * 60_000,
-    maxAttempts: 3
-  }
-};
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isReviewStrategy(value: unknown): value is ReviewStrategy {
@@ -47,67 +28,37 @@ export function resolveReviewStrategy(
   return isReviewStrategy(clientName) ? clientName : "codex";
 }
 
-function exactKeys(record: Record<string, unknown>, allowed: readonly string[], scope: string): void {
-  const unknown = Object.keys(record).filter((key) => !allowed.includes(key));
-  if (unknown.length > 0) throw new Error(`Unknown ${scope} configuration: ${unknown.join(",")}`);
+function environmentValue(environment: NodeJS.ProcessEnv, key: string): string | undefined {
+  const raw = environment[key];
+  if (raw === undefined) return undefined;
+  const value = raw.trim();
+  if (value.length === 0) {
+    throw new Error(`REVIEW_CONFIG_INVALID: ${key} must not be empty`);
+  }
+  return value;
 }
 
-export function parseSmartFlowConfig(value: unknown): SmartFlowConfig {
-  if (!isRecord(value)) throw new Error("SmartFlow configuration must be an object");
-  exactKeys(value, ["review"], "root");
-  const review = value.review ?? defaultSmartFlowConfig.review;
-  if (!isRecord(review)) {
-    throw new Error("SmartFlow review configuration must be an object");
+export function resolveSmartFlowConfig(
+  environment: NodeJS.ProcessEnv = process.env
+): SmartFlowConfig {
+  if (environment.SMARTFLOW_CONFIG !== undefined) {
+    throw new Error(
+      "REVIEW_CONFIG_INVALID: SMARTFLOW_CONFIG is unsupported; use REVIEW_ADAPTER, REVIEW_MODEL, and REVIEW_EFFORT"
+    );
   }
-  exactKeys(
-    review,
-    [
-      "strategy",
-      "noProgressThreshold",
-      "model",
-      "effort",
-      "deadlineMs",
-      "maxAttempts"
-    ],
-    "review"
-  );
-  const reviewStrategy = review.strategy;
-  const noProgressThreshold = review.noProgressThreshold ?? 15;
-  const model = review.model;
-  const effort = review.effort;
-  const deadlineMs = review.deadlineMs ?? 45 * 60_000;
-  const maxAttempts = review.maxAttempts ?? 3;
-  if (
-    (reviewStrategy !== undefined && !isReviewStrategy(reviewStrategy)) ||
-    noProgressThreshold !== 15 ||
-    (model !== undefined &&
-      (typeof model !== "string" || model.trim().length === 0)) ||
-    (effort !== undefined &&
-      (typeof effort !== "string" || effort.trim().length === 0)) ||
-    typeof deadlineMs !== "number" ||
-    !Number.isSafeInteger(deadlineMs) ||
-    deadlineMs < 30_000 ||
-    deadlineMs > 3_600_000 ||
-    typeof maxAttempts !== "number" ||
-    !Number.isSafeInteger(maxAttempts) ||
-    maxAttempts < 1 ||
-    maxAttempts > 10
-  ) {
-    throw new Error("SmartFlow configuration contains unsupported values");
+  const adapter = environmentValue(environment, "REVIEW_ADAPTER");
+  if (adapter !== undefined && !isReviewStrategy(adapter)) {
+    throw new Error(
+      `REVIEW_ADAPTER_INVALID: unsupported adapter "${adapter}"; expected codex, codex-desktop, claude-code, or claude-code-desktop`
+    );
   }
+  const model = environmentValue(environment, "REVIEW_MODEL");
+  const effort = environmentValue(environment, "REVIEW_EFFORT");
   return {
     review: {
-      ...(isReviewStrategy(reviewStrategy) ? { strategy: reviewStrategy } : {}),
-      noProgressThreshold,
-      ...(typeof model === "string" ? { model: model.trim() } : {}),
-      ...(typeof effort === "string" ? { effort: effort.trim() } : {}),
-      deadlineMs,
-      maxAttempts
+      ...(adapter === undefined ? {} : { strategy: adapter }),
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort })
     }
   };
-}
-
-export async function loadSmartFlowConfig(path = process.env.SMARTFLOW_CONFIG): Promise<SmartFlowConfig> {
-  if (path === undefined) return structuredClone(defaultSmartFlowConfig);
-  return parseSmartFlowConfig(parse(await readFile(path, "utf8")));
 }

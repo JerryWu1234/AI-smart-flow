@@ -512,12 +512,12 @@ daemon 自己跑的 review 本来就没有 host 拥有这个回合，不该留�
 - **不新建包** —— adapter 和 prompt 都进 `packages/review`。等真有第三个以上 agent、
   或者别的包也要用 adapter 时再拆
 - **`listSessions()`** —— 接口不放，等有消费者再加
-- **`providerRuntimeConfigHash` 不动** —— reviewer 的 model / effort / deadline 只进 `config.ts`，
-  不进入 Worker Provider config hash。已经绑定到 immutable Job 的 Provider config 不可原地替换；
-  如需有意更换，用户必须取消当前 Job，再用新配置调用 `smartflow_execute` 创建新 Job
-- **不复用 worker 的环境变量通道** —— `worker-config.ts:46` 的 `isWorkerConfigurationKey`
-  会把未知的 `SMARTFLOW_*` key 判成 `WORKER_CONFIGURATION_INVALID`。reviewer 配置走
-  `SMARTFLOW_CONFIG` 那个 YAML，不走 worker 握手
+- **`providerRuntimeConfigHash` 不动** —— reviewer 的 model / effort 只从 daemon 启动时的
+  `REVIEW_MODEL` / `REVIEW_EFFORT` 读取，不进入 Worker Provider config hash。已经绑定到 immutable Job
+  的 Provider config 不可原地替换；如需有意更换，用户必须取消当前 Job，再用新配置调用
+  `smartflow_execute` 创建新 Job
+- **不复用 worker 的环境变量通道** —— `REVIEW_ADAPTER` / `REVIEW_MODEL` / `REVIEW_EFFORT`
+  由 MCP 启动环境传给新 daemon，不进入每个 IPC 连接的 Worker 注册；修改后必须重启 daemon
 - **长轮询不做** —— 只把 `retryAfterMs` 调到 30 秒
 - **不共享 app-server、不控制 Desktop GUI** —— `codex-desktop` 每次 create/resume 只启动一个私有
   `codex app-server --listen stdio://`；不连接、启动或聚焦 GUI，不增加 socket、连接池或审批 UI

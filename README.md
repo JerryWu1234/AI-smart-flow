@@ -13,15 +13,17 @@ Each `smartflow_execute` call creates an immutable Job bound to one canonical ta
 
 Each MCP server instance binds one model directly from `BASE_URL`, `MODEL` and `API_KEY`. The optional `API` setting defaults to `openai-responses`; explicit supported values are `openai-completions`, `openai-responses`, `anthropic-messages` and `google-generative-ai`. SmartFlow does not probe endpoints or switch formats after a request fails. Optional MCP environment variables `SMARTFLOW_PI_CONTEXT_WINDOW`, `SMARTFLOW_PI_MAX_TOKENS`, `EFFORT` and `SMARTFLOW_PI_ATTEMPT_DEADLINE_MS` configure context, output, reasoning effort and the rolling Attempt deadline, defaulting to `1000000`, `384000`, `high` and `300000ms`; `EFFORT` accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`, and deadline overrides must be at least `60000ms`. SmartFlow registers the model in memory through a bundled Pi Extension and does not use `models.json`.
 
+Reviewer configuration uses `REVIEW_ADAPTER`, `REVIEW_MODEL` and `REVIEW_EFFORT` as its only configuration source. `REVIEW_ADAPTER` accepts `codex`, `codex-desktop`, `claude-code` or `claude-code-desktop`, while model and effort are passed through to the selected Reviewer. SmartFlow checks the explicitly selected local Agent before the MCP server or Daemon becomes ready: both Codex strategies require `codex` on `PATH`, and both Claude strategies require `claude`. Reviewer configuration is read when the Daemon starts, so restart the Daemon after changing any `REVIEW_*` value.
+
 Run `smartflow doctor --json` to verify Node, Pi, sandbox, model registration, signing and publish capabilities.
 
 ## MCP workflow
 
 ### Review Agent selection
 
-When `review.strategy` is omitted, the Daemon uses the MCP Host's unauthenticated
+When `REVIEW_ADAPTER` is omitted, the Daemon uses the MCP Host's unauthenticated
 `clientInfo.name` only as a coarse default. An exact registered strategy name selects itself;
-missing or unrecognized names fall back to `codex`. An explicit `review.strategy` always wins.
+missing or unrecognized names fall back to `codex`. An explicit `REVIEW_ADAPTER` always wins.
 Host identity never grants permissions.
 
 `claude-code` and `claude-code-desktop` are separate durable strategy identities, but both

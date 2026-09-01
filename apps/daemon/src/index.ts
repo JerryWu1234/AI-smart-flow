@@ -4,7 +4,7 @@ export {
 } from "./config/data-dir.js";
 export { CancelManager } from "./cancel/cancel-manager.js";
 export type { CancellationRuntime } from "./cancel/cancel-manager.js";
-export { loadSmartFlowConfig } from "./config/config.js";
+export { resolveSmartFlowConfig } from "./config/config.js";
 export type { SmartFlowConfig } from "./config/config.js";
 export { connectOrLaunchDaemon } from "./transport/daemon-launcher.js";
 export { LocalIpcClient } from "./transport/local-ipc-client.js";
@@ -24,6 +24,7 @@ export {
   DAEMON_REVIEWER_HOST_TURN_ID,
   pendingReviewAction
 } from "./review/review-coordinator.js";
+export { resolveReviewerExecutable } from "./review/reviewer-executable.js";
 export { ReviewRunner } from "./review/review-runner.js";
 export { WorkerRunner } from "./worker/worker-runner.js";
 export {
