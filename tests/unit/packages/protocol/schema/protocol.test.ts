@@ -5,7 +5,6 @@ import {
   durableReviewDecisionSchema,
   executeInputSchema,
   hostActionSchema,
-  mcpToolSchemas,
   piWorkerAttemptSchema,
   publicPiWorkerAttemptSchema,
   publishResultSchema,
@@ -14,24 +13,13 @@ import {
   reviewTurnInputSchema,
   reviewTurnOutputSchema,
   runPhaseSchema,
-  statusInputSchema
+  statusInputSchema,
+  statusOutputSchema
 } from "../../../../../packages/protocol/src/index.js";
 
 const digest = "a".repeat(64);
 
 describe("SmartFlow protocol schemas", () => {
-  it("defines exactly the six public MCP tools without manual Review primitives", () => {
-    expect(Object.keys(mcpToolSchemas).sort()).toEqual([
-      "smartflow_cancel",
-      "smartflow_execute",
-      "smartflow_result",
-      "smartflow_resume",
-      "smartflow_review_turn",
-      "smartflow_status"
-    ]);
-    expect("smartflow_submit_tool_decision" in mcpToolSchemas).toBe(false);
-  });
-
   it("projects a compact review turn and keeps Daemon bookkeeping off the wire", () => {
     const pausedResult = {
       projectId: "project-1",
@@ -321,7 +309,7 @@ describe("SmartFlow protocol schemas", () => {
       ...publicCompletedAttempt,
       sessionArtifact
     }).success).toBe(false);
-    expect(mcpToolSchemas.smartflow_status.output.safeParse({
+    expect(statusOutputSchema.safeParse({
       projectId: "project-1",
       jobId: "job-1",
       phase: "RUNNING",
