@@ -12,7 +12,7 @@ describe("structured observability", () => {
       event: "worker.completed",
       stage: "worker",
       durationMs: 12,
-      correlation: { projectId: "project-1", jobId: "job-1", attemptId: "attempt-1" },
+      correlation: { projectId: "project-1", jobId: "job-1", actionId: "action-1" },
       data: {
         token: "token-value",
         env: { SAFE: "visible", API_TOKEN: "secret-value" },
@@ -20,7 +20,7 @@ describe("structured observability", () => {
       }
     });
     const serialized = lines.join("\n");
-    expect(record.correlation).toMatchObject({ jobId: "job-1", attemptId: "attempt-1" });
+    expect(record.correlation).toMatchObject({ jobId: "job-1", actionId: "action-1" });
     expect(serialized).toContain("[REDACTED]");
     expect(serialized).not.toContain("token-value");
     expect(serialized).not.toContain("secret-value");
