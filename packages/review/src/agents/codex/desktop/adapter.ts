@@ -129,7 +129,6 @@ export class CodexDesktopAdapter implements AgentAdapter {
   private readonly killProcess: CodexDesktopKill;
   private readonly forceKillAfterMs: number;
   private readonly activeRuns = new Map<string, ActiveRun>();
-  private readonly reservedRunIds = new Set<string>();
 
   public constructor(options: CodexDesktopAdapterOptions = {}) {
     this.executable = options.executable ?? "codex";
@@ -179,7 +178,7 @@ export class CodexDesktopAdapter implements AgentAdapter {
         expectedSessionId
       );
     }
-    if (this.reservedRunIds.has(request.runId)) {
+    if (this.activeRuns.has(request.runId)) {
       return failedOutcome(
         "CODEX_RUN_ACTIVE",
         `A Codex Desktop process is already active for runId ${request.runId}`,
@@ -194,14 +193,10 @@ export class CodexDesktopAdapter implements AgentAdapter {
         return true;
       }
     };
-    this.reservedRunIds.add(request.runId);
     this.activeRuns.set(request.runId, preflightRun);
 
     const releasePreflight = (outcome: AgentRunOutcome): AgentRunOutcome => {
-      if (this.activeRuns.get(request.runId) === preflightRun) {
-        this.activeRuns.delete(request.runId);
-      }
-      this.reservedRunIds.delete(request.runId);
+      this.activeRuns.delete(request.runId);
       return outcome;
     };
     const preflightInterruption = (): AgentRunOutcome | undefined =>
@@ -378,7 +373,6 @@ export class CodexDesktopAdapter implements AgentAdapter {
         settled = true;
         clearTimeout(deadlineTimer);
         this.activeRuns.delete(request.runId);
-        this.reservedRunIds.delete(request.runId);
         rejectWaiters(new Error("Codex Desktop run has finished"));
         shutdown(shutdownMode);
         settle(outcome);
