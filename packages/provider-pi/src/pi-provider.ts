@@ -28,7 +28,7 @@ import {
   type PiRuntimeConfiguration
 } from "./runtime-config.js";
 import {
-  createPiRuntimeResources,
+  createPiSpawnRequest,
   piModelEnvironment
 } from "./runtime-resources.js";
 
@@ -213,12 +213,9 @@ export class PiProvider implements WorkerProvider {
       };
     };
     try {
-      const resources = createPiRuntimeResources(
-        input,
-        this.configuration,
-        credential
+      const handle = await sandbox.spawn(
+        createPiSpawnRequest(input, this.configuration, credential)
       );
-      const handle = await sandbox.spawn(resources.spawnRequest);
       handle.stderr.resume();
       active = { handle, canceled: false };
       this.active.set(input.attemptId, active);
