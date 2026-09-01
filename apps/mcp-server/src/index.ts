@@ -1,8 +1,10 @@
 import {
   connectOrLaunchDaemon,
   daemonEndpoint,
-  resolveWorkerLaunchConfiguration,
+  resolveMcpWorkerLaunchConfiguration,
   resolveInstallationDataDirectory,
+  resolveReviewerExecutable,
+  resolveSmartFlowConfig,
   workerLaunchEnvironment,
   type ResolvedWorkerLaunchConfiguration
 } from "@smartflow/daemon";
@@ -26,8 +28,12 @@ export interface SmartFlowMcpGatewayOptions {
 
 export async function runSmartFlowMcpGateway(options: SmartFlowMcpGatewayOptions): Promise<void> {
   const dataDirectory = options.dataDirectory ?? `${resolveInstallationDataDirectory()}/daemon`;
+  const config = resolveSmartFlowConfig();
+  if (config.review.strategy !== undefined) {
+    await resolveReviewerExecutable(config.review.strategy);
+  }
   const workerLaunchConfiguration = options.workerLaunchConfiguration ??
-    resolveWorkerLaunchConfiguration([]);
+    resolveMcpWorkerLaunchConfiguration([]);
   const workerEnvironment = workerLaunchEnvironment({}, workerLaunchConfiguration);
   const client = await connectOrLaunchDaemon(
     daemonEndpoint(dataDirectory),

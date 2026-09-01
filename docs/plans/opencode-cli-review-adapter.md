@@ -1,8 +1,8 @@
 # OpenCode CLI Review Adapter 实现计划
 
-> **状态：已完成。** Phase 0 已在 OpenCode 1.17.7 上通过；adapter、strategy wiring、隔离测试、全量测试与发布检查均已完成。
+> **状态：已完成。** Phase 0 已在 OpenCode 1.17.7 上通过；adapter、strategy wiring、隔离测试、全量测试与发布检查均已完成。与后续 `main` 合并后，配置入口已迁移到 `REVIEW_*` 环境变量并增加显式 executable availability preflight。
 >
-> **分支：** `feat/opencode-review-adapter`，基于 `main` / `origin/main` 的 `3d3b9933e84ff5a630051bdabad5adea691abf84`。
+> **分支：** `feat/opencode-review-adapter`，最初基于 `main` / `origin/main` 的 `3d3b9933e84ff5a630051bdabad5adea691abf84`。
 
 ## 1. 目标
 
@@ -12,14 +12,13 @@
 
 配置示例：
 
-```yaml
-review:
-  strategy: opencode
-  model: provider/model
-  effort: high
+```sh
+export REVIEW_ADAPTER=opencode
+export REVIEW_MODEL=provider/model
+export REVIEW_EFFORT=high # optional
 ```
 
-`review.model` 对 OpenCode 是必填项并原样映射为 `--model`；可选 `review.effort` 原样映射为 provider-specific `--variant`。
+`REVIEW_MODEL` 对 OpenCode 是必填项并原样映射为 `--model`；可选 `REVIEW_EFFORT` 原样映射为 provider-specific `--variant`。
 
 ## 2. 已验证的 Phase 0 契约
 
@@ -155,11 +154,12 @@ Global 和 `smartflow-reviewer` agent 复用相同对象：
 
 - `packages/review/src/agents/index.ts` 与 `src/index.ts`：导出 `OpenCodeAdapter`；
 - `apps/daemon/src/config/config.ts`：注册 `opencode`；
-- `apps/daemon/src/main.ts`：lazy factory；
+- `apps/daemon/src/main.ts`：executable-aware lazy factory；
+- `apps/daemon/src/review/reviewer-executable.ts`：显式选择时解析 `opencode` executable；
 - `packages/state-store/src/schema.ts`：durable `reviewAdapterId` enum；
 - `README.md` 与 changeset。
 
-选择规则保持不变：显式 YAML 优先；未配置时只有精确 `clientInfo.name === "opencode"` 自动选择；大小写变体、alias 和未知 Host 回退 `codex`。Job 创建后 strategy ID 持久化，retry、repair 和 daemon recovery 不重新选择。
+选择规则保持不变：显式 `REVIEW_ADAPTER` 优先；未配置时只有精确 `clientInfo.name === "opencode"` 自动选择；大小写变体、alias 和未知 Host 回退 `codex`。Job 创建后 strategy ID 持久化，retry、repair 和 daemon recovery 不重新选择。
 
 ## 5. 测试计划
 
@@ -174,7 +174,7 @@ Global 和 `smartflow-reviewer` agent 复用相同对象：
 
 ### Config/state/integration
 
-- YAML `opencode`；
+- `REVIEW_ADAPTER=opencode` 与 `REVIEW_MODEL`/`REVIEW_EFFORT` 透传；
 - exact Host 自动选择与 fallback；
 - state schema 接受 `opencode`；
 - ProjectRuntime 将 exact Host 固化为 durable `reviewAdapterId: "opencode"`。
@@ -191,7 +191,7 @@ Global 和 `smartflow-reviewer` agent 复用相同对象：
 ## 6. 明确不支持
 
 - CLI-native JSON Schema enforcement；
-- executable 配置与 daemon startup version preflight；
+- 自定义 executable 配置与 daemon startup version preflight；显式 `REVIEW_ADAPTER=opencode` 仍执行 `PATH` executable availability preflight；
 - 自动安装、升级、登录或 provider auth 管理；
 - custom provider definitions；
 - Host process/conversation/session attach；

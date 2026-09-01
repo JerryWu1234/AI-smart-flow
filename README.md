@@ -11,7 +11,9 @@ Shell commands and network access are allowed inside the sandbox. Project and us
 
 Each `smartflow_execute` call creates an immutable Job bound to one canonical task path, exact task source and TaskManifest, and Provider configuration. In-scope automatic Review repair starts a new fenced Worker Attempt in the same workspace and restores the same logical Pi session from its completed bundle; process restarts and Daemon crashes restore that session after containment reconciliation too. To change the task or configuration, or to act on an out-of-scope repair draft, cancel the current Job and execute the new task source as a new Job. Each Attempt starts with its configured rolling deadline, five minutes by default, which the Pi child renews with independent heartbeats; expiry pauses without automatic replacement, and cancellation must prove the full process tree is gone.
 
-Each MCP server instance binds one model directly from `BASE_URL`, `MODEL` and `API_KEY`. The optional `API` setting defaults to `openai-responses`; explicit supported values are `openai-completions`, `openai-responses`, `anthropic-messages` and `google-generative-ai`. SmartFlow does not probe endpoints or switch formats after a request fails. Optional context, output, thinking and rolling Attempt deadline fields default to `1000000`, `384000`, `high` and `300000ms`; deadline overrides must be at least `60000ms`. SmartFlow registers the model in memory through a bundled Pi Extension and does not use `models.json`.
+Each MCP server instance binds one model directly from `BASE_URL`, `MODEL` and `API_KEY`. The optional `API` setting defaults to `openai-responses`; explicit supported values are `openai-completions`, `openai-responses`, `anthropic-messages` and `google-generative-ai`. SmartFlow does not probe endpoints or switch formats after a request fails. Optional MCP environment variables `SMARTFLOW_PI_CONTEXT_WINDOW`, `SMARTFLOW_PI_MAX_TOKENS`, `EFFORT` and `SMARTFLOW_PI_ATTEMPT_DEADLINE_MS` configure context, output, reasoning effort and the rolling Attempt deadline, defaulting to `1000000`, `384000`, `high` and `300000ms`; `EFFORT` accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`, and deadline overrides must be at least `60000ms`. SmartFlow registers the model in memory through a bundled Pi Extension and does not use `models.json`.
+
+Reviewer configuration uses `REVIEW_ADAPTER`, `REVIEW_MODEL` and `REVIEW_EFFORT` as its only configuration source. `REVIEW_ADAPTER` accepts `codex`, `codex-desktop`, `claude-code`, `claude-code-desktop` or `opencode`, while model and effort are passed through to the selected Reviewer. SmartFlow checks the explicitly selected local Agent before the MCP server or Daemon becomes ready: both Codex strategies require `codex` on `PATH`, both Claude strategies require `claude`, and OpenCode requires `opencode`. Reviewer configuration is read when the Daemon starts, so restart the Daemon after changing any `REVIEW_*` value.
 
 Run `smartflow doctor --json` to verify Node, Pi, sandbox, model registration, signing and publish capabilities.
 
@@ -19,9 +21,9 @@ Run `smartflow doctor --json` to verify Node, Pi, sandbox, model registration, s
 
 ### Review Agent selection
 
-When `review.strategy` is omitted, the Daemon uses the MCP Host's unauthenticated
+When `REVIEW_ADAPTER` is omitted, the Daemon uses the MCP Host's unauthenticated
 `clientInfo.name` only as a coarse default. An exact registered strategy name selects itself;
-missing or unrecognized names fall back to `codex`. An explicit `review.strategy` always wins.
+missing or unrecognized names fall back to `codex`. An explicit `REVIEW_ADAPTER` always wins.
 Host identity never grants permissions.
 
 `claude-code` and `claude-code-desktop` are separate durable strategy identities, but both
@@ -33,15 +35,14 @@ environment for either strategy.
 
 `opencode` starts a separate local `opencode run` process for every create or resume call. It
 uses the same OpenCode installation, provider authentication, and local session store available
-to the Daemon, but it never attaches to the MCP Host process or Host conversation. Configure an
-explicit provider-qualified model; optional `effort` is forwarded as the provider-specific
-OpenCode variant:
+to the Daemon, but it never attaches to the MCP Host process or Host conversation. OpenCode
+requires an explicit provider-qualified `REVIEW_MODEL`; optional `REVIEW_EFFORT` is forwarded
+as the provider-specific OpenCode variant:
 
-```yaml
-review:
-  strategy: opencode
-  model: provider/model
-  effort: high
+```sh
+export REVIEW_ADAPTER=opencode
+export REVIEW_MODEL=provider/model
+export REVIEW_EFFORT=high # optional
 ```
 
 The OpenCode reviewer runs from a private Git root outside the candidate and receives the

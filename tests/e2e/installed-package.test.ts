@@ -183,7 +183,6 @@ describe("installed SmartFlow package", () => {
     const dataRoot = resolve(root, "data");
     const cacheRoot = resolve(root, "npm-cache");
     const daemonRoot = resolve(dataRoot, "daemon");
-    const smartFlowConfigPath = resolve(root, "smartflow.yml");
     const codexTracePath = resolve(root, "codex-trace.jsonl");
     const fakeCodexBin = resolve(process.cwd(), "tests", "fixtures", "bin");
     const repairMarker = `// SMARTFLOW_DYNAMIC_REPAIR_${randomUUID()
@@ -226,27 +225,20 @@ describe("installed SmartFlow package", () => {
         "dist",
         "smartflow.mjs"
       );
-      await writeFile(smartFlowConfigPath, [
-        "review:",
-        "  strategy: codex",
-        "  noProgressThreshold: 15",
-        "  model: e2e-review-model",
-        "  effort: low",
-        "  deadlineMs: 300000",
-        "  maxAttempts: 3",
-        ""
-      ].join("\n"), "utf8");
       const environment = {
         ...Object.fromEntries(
           Object.entries(process.env).filter(
             ([key]) =>
               !key.startsWith("VITEST") &&
               !key.startsWith("TIN_POOL") &&
+              key !== "SMARTFLOW_PI_THINKING" &&
               !new Set(["NODE_CHANNEL_FD", "NODE_OPTIONS", "NODE_UNIQUE_ID", "JEST_WORKER_ID"]).has(key)
           )
         ),
         PATH: `${fakeCodexBin}${delimiter}${process.env.PATH ?? ""}`,
-        SMARTFLOW_CONFIG: smartFlowConfigPath,
+        REVIEW_ADAPTER: "codex",
+        REVIEW_MODEL: "e2e-review-model",
+        REVIEW_EFFORT: "low",
         SMARTFLOW_DATA_HOME: dataRoot,
         XDG_DATA_HOME: resolve(dataRoot, "xdg"),
         API: process.env.API ?? "",
@@ -255,7 +247,7 @@ describe("installed SmartFlow package", () => {
         API_KEY: process.env.API_KEY ?? "",
         SMARTFLOW_PI_CONTEXT_WINDOW: process.env.SMARTFLOW_PI_CONTEXT_WINDOW ?? "1000000",
         SMARTFLOW_PI_MAX_TOKENS: process.env.SMARTFLOW_PI_MAX_TOKENS ?? "384000",
-        SMARTFLOW_PI_THINKING: process.env.SMARTFLOW_PI_THINKING ?? "high",
+        EFFORT: process.env.EFFORT ?? "high",
         SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: process.env.SMARTFLOW_PI_ATTEMPT_DEADLINE_MS ?? "300000",
         SMARTFLOW_TEST_REPAIR_MARKER: repairMarker,
         SMARTFLOW_TEST_CODEX_TRACE: codexTracePath,

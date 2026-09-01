@@ -26,6 +26,8 @@ export const WORKER_CONFIGURATION_ENVIRONMENT_KEYS = [
   "SMARTFLOW_PI_ATTEMPT_DEADLINE_MS"
 ] as const;
 
+const MCP_WORKER_EFFORT_ENVIRONMENT_KEY = "EFFORT";
+
 const unsupportedModelFlags = [
   "--model",
   "--base-url",
@@ -43,9 +45,10 @@ function required(environment: NodeJS.ProcessEnv, key: string): string {
 }
 
 function isWorkerConfigurationKey(key: string): boolean {
-  return WORKER_CONFIGURATION_ENVIRONMENT_KEYS.includes(
-    key as typeof WORKER_CONFIGURATION_ENVIRONMENT_KEYS[number]
-  ) || key.startsWith("SMARTFLOW_PI_") || /^SMARTFLOW_(?:MODEL(?:_|$)|WORKER$)/u.test(key);
+  return key === MCP_WORKER_EFFORT_ENVIRONMENT_KEY ||
+    WORKER_CONFIGURATION_ENVIRONMENT_KEYS.includes(
+      key as typeof WORKER_CONFIGURATION_ENVIRONMENT_KEYS[number]
+    ) || key.startsWith("SMARTFLOW_PI_") || /^SMARTFLOW_(?:MODEL(?:_|$)|WORKER$)/u.test(key);
 }
 
 function optionalPositiveInteger(
@@ -75,6 +78,22 @@ export function daemonConfigFingerprint(
       credentialDigest: createHash("sha256").update(credential).digest("hex")
     }))
     .digest("hex");
+}
+
+export function resolveMcpWorkerLaunchConfiguration(
+  argv: readonly string[],
+  environment: NodeJS.ProcessEnv = process.env
+): ResolvedWorkerLaunchConfiguration {
+  if (environment.SMARTFLOW_PI_THINKING !== undefined) {
+    throw new Error(
+      "WORKER_CONFIGURATION_INVALID: SMARTFLOW_PI_THINKING is internal; MCP configuration must use EFFORT"
+    );
+  }
+  const canonicalEnvironment = { ...environment };
+  const effort = canonicalEnvironment[MCP_WORKER_EFFORT_ENVIRONMENT_KEY];
+  Reflect.deleteProperty(canonicalEnvironment, MCP_WORKER_EFFORT_ENVIRONMENT_KEY);
+  if (effort !== undefined) canonicalEnvironment.SMARTFLOW_PI_THINKING = effort;
+  return resolveWorkerLaunchConfiguration(argv, canonicalEnvironment);
 }
 
 export function resolveWorkerLaunchConfiguration(
