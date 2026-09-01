@@ -16,20 +16,9 @@ export interface GitCapabilities {
   status: "READY" | "PAUSED";
   pause?: { code: GitPauseCode; message: string };
   repositoryId?: string;
-  repositoryRoot?: string;
-  gitDirectory?: string;
-  gitVersion?: string;
   worktreeSupported: boolean;
   symlinks: boolean;
   fileMode: boolean;
-  inclusionPolicy: {
-    tracked: true;
-    dirty: true;
-    untrackedNonIgnored: true;
-    ignored: false;
-    sensitive: false;
-    excludedPathPrefixes: typeof SMARTFLOW_CONTROL_PLANE_PATH_PREFIXES;
-  };
   inclusionPolicyHash: string;
 }
 
@@ -37,7 +26,10 @@ export interface ProbeGitRepositoryOptions {
   gitBinary?: string;
 }
 
-const inclusionPolicy = {
+// Exported so callers can verify that inclusionPolicyHash is the hash of this
+// exact policy. The policy itself is identical for every probe, so it is not
+// repeated in each GitCapabilities result.
+export const GIT_INCLUSION_POLICY = {
   tracked: true,
   dirty: true,
   untrackedNonIgnored: true,
@@ -47,7 +39,7 @@ const inclusionPolicy = {
 } as const;
 
 const inclusionPolicyHash = createHash("sha256")
-  .update(canonical(inclusionPolicy), "utf8")
+  .update(canonical(GIT_INCLUSION_POLICY), "utf8")
   .digest("hex");
 
 function paused(
@@ -62,7 +54,6 @@ function paused(
     ...details,
     status: "PAUSED",
     pause: { code, message },
-    inclusionPolicy,
     inclusionPolicyHash
   };
 }
@@ -105,9 +96,10 @@ export async function probeGitRepository(
   options: ProbeGitRepositoryOptions = {}
 ): Promise<GitCapabilities> {
   const gitBinary = options.gitBinary ?? "git";
-  let gitVersion: string;
+  // Probed only to detect an unavailable executable; the version string itself
+  // is not part of the reported capabilities.
   try {
-    gitVersion = (await runGitCommand(gitBinary, ["--version"])).stdout.toString("utf8").trim();
+    await runGitCommand(gitBinary, ["--version"]);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return paused("GIT_UNAVAILABLE", "Git executable is unavailable");
@@ -143,9 +135,6 @@ export async function probeGitRepository(
     .digest("hex");
   const repositoryDetails = {
     repositoryId,
-    repositoryRoot: root,
-    gitDirectory,
-    gitVersion,
     worktreeSupported: true,
     symlinks: await booleanConfig(gitBinary, root, "core.symlinks", process.platform !== "win32"),
     fileMode: await booleanConfig(gitBinary, root, "core.filemode", process.platform !== "win32")
@@ -174,7 +163,6 @@ export async function probeGitRepository(
   return {
     status: "READY",
     ...repositoryDetails,
-    inclusionPolicy,
     inclusionPolicyHash
   };
 }
