@@ -26,7 +26,6 @@ export interface ProjectMutationRequest {
 export interface ProjectMutationContext {
   fence: number;
   nextStateVersion: number;
-  run: RunRecord | undefined;
 }
 
 export interface ProjectMutationDraft<T> {
@@ -199,7 +198,7 @@ export class ProjectMutationExecutor {
         const fence = request.advanceFence === true
           ? nextProjectFence
           : (run?.fence ?? nextProjectFence);
-        const draft = await build(state, { fence, nextStateVersion, run });
+        const draft = await build(state, { fence, nextStateVersion });
         const responseHash = canonicalHash(draft.response);
         let nextState = draft.nextState;
         if (request.advanceFence === true && request.expectedJobId !== undefined) {
