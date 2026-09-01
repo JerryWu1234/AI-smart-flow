@@ -7,12 +7,10 @@ import type { RunRecord } from "@smartflow/state-store";
 
 export interface ResolvedRepairContinuation {
   sourceAttemptId: string;
-  sourceGeneration: number;
   prompt: string;
   workspaceSeedSnapshot: ArtifactRef;
   expectedPiSessionId: string;
   sessionArtifact: ArtifactRef;
-  providerRuntimeConfigHash: string;
 }
 
 function digest(value: string): string {
@@ -70,12 +68,10 @@ export function resolveRepairContinuation(
   }
   return {
     sourceAttemptId: sourceAttempt.attemptId,
-    sourceGeneration: sourceAttempt.generation,
     prompt: continuation.prompt,
     workspaceSeedSnapshot: workspaceSeedSnapshot.data,
     expectedPiSessionId: sourceAttempt.piSessionId,
-    sessionArtifact: sourceAttempt.sessionArtifact,
-    providerRuntimeConfigHash: sourceAttempt.providerRuntimeConfigHash
+    sessionArtifact: sourceAttempt.sessionArtifact
   };
 }
 
