@@ -296,7 +296,6 @@ function compositionFor(
   return new ProductionRuntimeComposition(
     adapter,
     undefined,
-    undefined,
     provider,
     Object.freeze({}),
     undefined,
