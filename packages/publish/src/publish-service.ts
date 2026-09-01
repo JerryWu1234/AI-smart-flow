@@ -16,8 +16,7 @@ export interface PublishAttemptStore {
   get(operationId: string): Promise<PublishAttemptRecord | undefined>;
   prepare(attempt: PublishAttemptRecord): Promise<void>;
   beginRecovery(attempt: PublishAttemptRecord): Promise<void>;
-  markSubmitted(operationId: string): Promise<void>;
-  markSubmittedAndApply?(
+  markSubmittedAndApply(
     operationId: string,
     apply: () => Promise<PublishResult>
   ): Promise<PublishResult>;
@@ -145,22 +144,13 @@ export class PublishService {
     }
     await beforeAdapterApply?.();
     let result: PublishResult;
-    if (this.store.markSubmittedAndApply === undefined) {
-      await this.store.markSubmitted(operationId);
-      try {
-        result = await adapter.apply({ operationId, operationsHash: hash, operations });
-      } catch {
-        return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
-      }
-    } else {
-      try {
-        result = await this.store.markSubmittedAndApply(
-          operationId,
-          () => adapter.apply({ operationId, operationsHash: hash, operations })
-        );
-      } catch {
-        return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
-      }
+    try {
+      result = await this.store.markSubmittedAndApply(
+        operationId,
+        () => adapter.apply({ operationId, operationsHash: hash, operations })
+      );
+    } catch {
+      return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
     }
     await afterAdapterApply?.(result);
     return this.finish(operationId, hash, operations, result);

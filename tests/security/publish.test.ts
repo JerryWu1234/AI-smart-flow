@@ -38,7 +38,7 @@ describe("publish path and Git safety", () => {
       get: (): Promise<undefined> => Promise.resolve(undefined),
       prepare: (): Promise<void> => Promise.resolve(),
       beginRecovery: (): Promise<void> => Promise.resolve(),
-      markSubmitted: (): Promise<void> => Promise.resolve(),
+      markSubmittedAndApply: (): Promise<never> => Promise.reject(new Error("must not submit")),
       complete: (): Promise<void> => Promise.resolve()
     };
     const result = await new PublishService(store).publish(
@@ -114,7 +114,7 @@ describe("publish path and Git safety", () => {
       get: (): Promise<undefined> => Promise.resolve(undefined),
       prepare: (): Promise<void> => Promise.resolve(),
       beginRecovery: (): Promise<void> => Promise.resolve(),
-      markSubmitted: (): Promise<void> => Promise.resolve(),
+      markSubmittedAndApply: (): Promise<never> => Promise.reject(new Error("must not submit")),
       complete: (): Promise<void> => Promise.resolve()
     };
     const result = await new PublishService(store).publish(
@@ -162,7 +162,7 @@ describe("publish path and Git safety", () => {
       get: (): Promise<undefined> => Promise.resolve(undefined),
       prepare: (): Promise<void> => Promise.resolve(),
       beginRecovery: (): Promise<void> => Promise.resolve(),
-      markSubmitted: (): Promise<void> => Promise.resolve(),
+      markSubmittedAndApply: (): Promise<never> => Promise.reject(new Error("must not submit")),
       complete: (): Promise<void> => Promise.resolve()
     }).publish(
       root,

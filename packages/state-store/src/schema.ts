@@ -102,7 +102,12 @@ const runRecordSchema = z
     phase: runPhaseSchema,
     taskManifest: artifactRefSchema,
     taskSource: artifactRefSchema,
-    reviewAdapterId: z.enum(["codex", "codex-desktop", "claude-code"]),
+    reviewAdapterId: z.enum([
+      "codex",
+      "codex-desktop",
+      "claude-code",
+      "claude-code-desktop"
+    ]),
     approvedTasks: canonicalRecordSchema.optional(),
     baseline: artifactRefSchema.optional(),
     gitWorkspace: gitRunWorkspaceSchema.optional(),

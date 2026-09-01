@@ -55,10 +55,10 @@ export function piModelEnvironment(
 export function createPiRuntimeResources(
   input: WorkerStartInput,
   configuration: PiRuntimeConfiguration,
-  credential: string,
-  workerEntry = piWorkerEntryPath(),
-  modelExtension = piMcpModelExtensionPath()
+  credential: string
 ): PiRuntimeResources {
+  const workerEntry = piWorkerEntryPath();
+  const modelExtension = piMcpModelExtensionPath();
   const runtimeDirectory = resolve(input.workspaceDir, ".smartflow-runtime");
   const agentDirectory = resolve(runtimeDirectory, "agent");
   const sessionDirectory = resolve(runtimeDirectory, "sessions");
