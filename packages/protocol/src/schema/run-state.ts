@@ -308,17 +308,9 @@ export const runSummarySchema = z
   });
 
 export type RunPhase = z.infer<typeof runPhaseSchema>;
-export type ProcessIdentity = z.infer<typeof processIdentitySchema>;
-export type PiWorkerAttemptStatus = z.infer<typeof piWorkerAttemptStatusSchema>;
-export type PublicPiWorkerAttempt = z.infer<typeof publicPiWorkerAttemptSchema>;
-export type PiWorkerAttempt = z.infer<typeof piWorkerAttemptSchema>;
-export type ReviewIssue = z.infer<typeof reviewIssueSchema>;
 export type TaskReview = z.infer<typeof taskReviewSchema>;
 export type ReviewResult = z.infer<typeof reviewResultSchema>;
-export type DurableReviewGate = z.infer<typeof durableReviewGateSchema>;
 export type DurableReviewDecision = z.infer<typeof durableReviewDecisionSchema>;
-export type DurableLeaderDecision = z.infer<typeof durableLeaderDecisionSchema>;
-export type PublishPathResult = z.infer<typeof publishPathResultSchema>;
 export type PublishResult = z.infer<typeof publishResultSchema>;
 export type HostAction = z.infer<typeof hostActionSchema>;
 export type RunSummary = z.infer<typeof runSummarySchema>;
