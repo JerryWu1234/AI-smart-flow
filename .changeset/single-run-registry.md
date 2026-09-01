@@ -1,5 +1,5 @@
 ---
-"@jerrywu1234/smartflow": patch
+"@smartflow/cli": patch
 ---
 
 Collapse the duplicate run-reservation bookkeeping in the Claude Code CLI and Codex Desktop review adapters. Both tracked in-flight runs twice, in `activeRuns` and in a parallel `reservedRunIds` set with an identical lifecycle, so the duplicate-`runId` guard now reads `activeRuns` directly.
