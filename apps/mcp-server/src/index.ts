@@ -1,3 +1,5 @@
+import { resolve } from "node:path";
+
 import {
   connectOrLaunchDaemon,
   daemonEndpoint,
@@ -41,7 +43,8 @@ export async function runSmartFlowMcpGateway(options: SmartFlowMcpGatewayOptions
       command: options.executablePath,
       argv: [options.entryPath, "daemon", "--data-dir", dataDirectory],
       cwd: process.cwd(),
-      env: workerLaunchEnvironment(process.env, workerLaunchConfiguration)
+      env: workerLaunchEnvironment(process.env, workerLaunchConfiguration),
+      logPath: resolve(dataDirectory, "daemon.log")
     },
     10_000,
     workerLaunchConfiguration.daemonConfigFingerprint,
