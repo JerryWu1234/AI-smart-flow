@@ -41,13 +41,13 @@ export function piModelEnvironment(
   credential: string
 ): Record<string, string> {
   return {
-    API: configuration.api,
-    BASE_URL: configuration.baseUrl,
-    MODEL: configuration.modelId,
-    SMARTFLOW_PI_CONTEXT_WINDOW: String(configuration.contextWindow),
-    SMARTFLOW_PI_MAX_TOKENS: String(configuration.maxTokens),
-    SMARTFLOW_PI_THINKING: configuration.thinkingLevel,
-    SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: String(configuration.attemptDeadlineMs),
+    WORK_API: configuration.api,
+    WORK_BASE_URL: configuration.baseUrl,
+    WORK_MODEL: configuration.modelId,
+    WORK_CONTEXT_WINDOW: String(configuration.contextWindow),
+    WORK_MAX_TOKENS: String(configuration.maxTokens),
+    WORK_EFFORT: configuration.thinkingLevel,
+    WORK_ATTEMPT_DEADLINE_MS: String(configuration.attemptDeadlineMs),
     [API_KEY_ENVIRONMENT_VARIABLE]: credential
   };
 }

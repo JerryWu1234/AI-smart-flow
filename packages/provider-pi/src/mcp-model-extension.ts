@@ -9,7 +9,10 @@ export {
   PI_HEARTBEAT_STATUS_KEY
 } from "./heartbeat.js";
 
-const API_KEY_ENVIRONMENT_VARIABLE = "API_KEY";
+// Duplicated instead of imported: this module is loaded standalone by the Pi
+// agent as an extension. Keep in sync with runtime-config.ts and the WORK_
+// namespace in apps/daemon/src/config/worker-config.ts.
+const API_KEY_ENVIRONMENT_VARIABLE = "WORK_API_KEY";
 const PI_INTERNAL_PROVIDER_ID = "smartflow-mcp";
 const PI_MODEL_APIS = [
   "openai-completions",
@@ -89,35 +92,35 @@ export function createMcpModelRegistration(
   environment: Readonly<Record<string, string | undefined>> = process.env
 ): McpModelRegistration {
   required(environment, API_KEY_ENVIRONMENT_VARIABLE);
-  const apiValue = required(environment, "API");
+  const apiValue = required(environment, "WORK_API");
   if (!(PI_MODEL_APIS as readonly string[]).includes(apiValue)) {
-    throw new Error("PI_MODEL_EXTENSION_INVALID: API is unsupported");
+    throw new Error("PI_MODEL_EXTENSION_INVALID: WORK_API is unsupported");
   }
-  const baseUrl = required(environment, "BASE_URL");
+  const baseUrl = required(environment, "WORK_BASE_URL");
   let parsedBaseUrl: URL;
   try {
     parsedBaseUrl = new URL(baseUrl);
   } catch {
-    throw new Error("PI_MODEL_EXTENSION_INVALID: BASE_URL is invalid");
+    throw new Error("PI_MODEL_EXTENSION_INVALID: WORK_BASE_URL is invalid");
   }
   if (
     !new Set(["http:", "https:"]).has(parsedBaseUrl.protocol) ||
     parsedBaseUrl.username.length > 0 ||
     parsedBaseUrl.password.length > 0
   ) {
-    throw new Error("PI_MODEL_EXTENSION_INVALID: BASE_URL is invalid");
+    throw new Error("PI_MODEL_EXTENSION_INVALID: WORK_BASE_URL is invalid");
   }
-  const modelId = required(environment, "MODEL");
-  const contextWindow = integer(environment, "SMARTFLOW_PI_CONTEXT_WINDOW");
-  const maxTokens = integer(environment, "SMARTFLOW_PI_MAX_TOKENS");
-  const thinkingLevel = required(environment, "SMARTFLOW_PI_THINKING");
+  const modelId = required(environment, "WORK_MODEL");
+  const contextWindow = integer(environment, "WORK_CONTEXT_WINDOW");
+  const maxTokens = integer(environment, "WORK_MAX_TOKENS");
+  const thinkingLevel = required(environment, "WORK_EFFORT");
   if (!PI_THINKING_LEVELS.has(thinkingLevel)) {
-    throw new Error("PI_MODEL_EXTENSION_INVALID: SMARTFLOW_PI_THINKING is unsupported");
+    throw new Error("PI_MODEL_EXTENSION_INVALID: WORK_EFFORT is unsupported");
   }
-  const attemptDeadlineMs = integer(environment, "SMARTFLOW_PI_ATTEMPT_DEADLINE_MS");
+  const attemptDeadlineMs = integer(environment, "WORK_ATTEMPT_DEADLINE_MS");
   if (attemptDeadlineMs < PI_MINIMUM_ATTEMPT_DEADLINE_MS) {
     throw new Error(
-      `PI_MODEL_EXTENSION_INVALID: SMARTFLOW_PI_ATTEMPT_DEADLINE_MS must be at least ${String(PI_MINIMUM_ATTEMPT_DEADLINE_MS)}`
+      `PI_MODEL_EXTENSION_INVALID: WORK_ATTEMPT_DEADLINE_MS must be at least ${String(PI_MINIMUM_ATTEMPT_DEADLINE_MS)}`
     );
   }
   if (maxTokens > contextWindow) {

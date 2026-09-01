@@ -100,10 +100,10 @@ describe("short MCP calls and independent daemon jobs", () => {
     activeHarnesses.push(harness);
     const dataDirectory = resolve(harness.dataDir, "prod");
     const workerLaunchConfiguration = resolveWorkerLaunchConfiguration([], {
-      API: "openai-responses",
-      BASE_URL: "https://models.example.test/v1",
-      MODEL: "test-model",
-      API_KEY: "test-credential"
+      WORK_API: "openai-responses",
+      WORK_BASE_URL: "https://models.example.test/v1",
+      WORK_MODEL: "test-model",
+      WORK_API_KEY: "test-credential"
     });
     const first = await startSmartFlowDaemon({
       dataDirectory,
@@ -178,9 +178,9 @@ describe("short MCP calls and independent daemon jobs", () => {
       "fingerprint-a",
       (environment) => {
         expect(environment).toMatchObject({
-          API: "openai-responses",
-          BASE_URL: "https://models.example.test/v1",
-          MODEL: "second-model"
+          WORK_API: "openai-responses",
+          WORK_BASE_URL: "https://models.example.test/v1",
+          WORK_MODEL: "second-model"
         });
         return {
           daemonConfigFingerprint: "fingerprint-b",
@@ -196,10 +196,10 @@ describe("short MCP calls and independent daemon jobs", () => {
       2_000,
       "fingerprint-b",
       {
-        API: "openai-responses",
-        BASE_URL: "https://models.example.test/v1",
-        MODEL: "second-model",
-        API_KEY: "secret-value"
+        WORK_API: "openai-responses",
+        WORK_BASE_URL: "https://models.example.test/v1",
+        WORK_MODEL: "second-model",
+        WORK_API_KEY: "secret-value"
       }
     );
 
