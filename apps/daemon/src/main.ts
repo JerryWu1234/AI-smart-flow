@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { MetricsRegistry, StructuredLogger } from "@smartflow/observability";
+import { StructuredLogger } from "@smartflow/observability";
 import type { WorkspaceApplyAdapter } from "@smartflow/publish";
 import {
   ClaudeCodeAdapter,
@@ -44,7 +44,6 @@ export interface SmartFlowDaemonOptions {
   dataDirectory?: string;
   handler?: IpcRequestHandler;
   logger?: StructuredLogger;
-  metrics?: MetricsRegistry;
   workspaceApplyAdapter?: WorkspaceApplyAdapter;
   workerLaunchConfiguration?: ResolvedWorkerLaunchConfiguration;
   reviewAdapter?: AgentAdapter;
@@ -61,7 +60,6 @@ export async function startSmartFlowDaemon(
   options: SmartFlowDaemonOptions = {}
 ): Promise<SmartFlowDaemonController> {
   const logger = options.logger ?? new StructuredLogger("smartflow-daemon");
-  const metrics = options.metrics ?? new MetricsRegistry();
   const timer = performance.now();
   const config = resolveSmartFlowConfig();
   const injectedReviewAdapter = options.reviewAdapter;
@@ -138,7 +136,6 @@ export async function startSmartFlowDaemon(
     await projectRuntime.recover();
     await server.start();
     const durationMs = performance.now() - timer;
-    metrics.recordStage("daemon.start", durationMs, true);
     logger.log({
       level: "info",
       event: "daemon.ready",
@@ -152,7 +149,6 @@ export async function startSmartFlowDaemon(
   } catch (error) {
     await server.close().catch(() => undefined);
     const durationMs = performance.now() - timer;
-    metrics.recordStage("daemon.start", durationMs, false);
     logger.log({ level: "error", event: "daemon.start_failed", stage: "daemon.start", durationMs, error });
     throw error;
   }
