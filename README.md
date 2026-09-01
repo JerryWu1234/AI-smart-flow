@@ -56,7 +56,7 @@ Canonical task syntax follows the SmartFlow parser contract:
 ## M01 User authentication
 
 - [ ] T001 [M01] Implement login validation in `src/auth/login.ts` — 验收：valid users can log in and invalid passwords return an explicit error
-- [ ] T002 [P] [M01] Add login coverage in `src/auth/login.test.ts` — 验收：success and failure cases pass
+- [ ] T002 [M01] Add login coverage in `src/auth/login.test.ts` — 验收：success and failure cases pass
 ```
 
 After writing the file, the Host re-reads it from disk, presents its project-relative path and complete contents, and explicitly asks the user whether to execute it. The initial request to implement something authorizes draft preparation, not execution. Only after explicit confirmation does the Host compute SHA-256 over the exact confirmed disk bytes and call `smartflow_execute` with the same `requestId` in both the input and `.smartflow/tasks/<requestId>/tasks.md` path.

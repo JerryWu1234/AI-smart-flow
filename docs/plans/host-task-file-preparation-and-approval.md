@@ -199,7 +199,7 @@ Host 生成的文件必须符合 `packages/task-manifest/src/tasks-parser.ts` �
 
 - 模块标题使用 `## M01 ...`；
 - 任务使用 `- [ ] T001 ...`；
-- 标签只使用 `[P]` 和 `[M01]` 形式的模块标签；
+- 标签只使用 `[M01]` 形式的模块标签；
 - 每个任务描述中包含至少一个反引号包裹的目标路径；
 - 描述与验收标准之间使用精确分隔符 ` — 验收：`；
 - Task ID 在当前 canonical 文件内全局唯一；
@@ -211,7 +211,7 @@ Host 生成的文件必须符合 `packages/task-manifest/src/tasks-parser.ts` �
 ## M01 用户认证
 
 - [ ] T001 [M01] 在 `src/auth/login.ts` 实现登录校验 — 验收：有效账号可以登录，错误密码返回明确错误
-- [ ] T002 [P] [M01] 在 `src/auth/login.test.ts` 补充登录场景测试 — 验收：成功和失败场景均有覆盖
+- [ ] T002 [M01] 在 `src/auth/login.test.ts` 补充登录场景测试 — 验收：成功和失败场景均有覆盖
 ```
 
 外部 `task.md`、`tasks.md` 或 Spec 文件不是因为扩展名正确就一定能被 SmartFlow parser 接受。Host 的职责是将来源内容转换成以上 canonical 格式，而不是直接把任意 Markdown 文件交给 Daemon。
@@ -563,7 +563,7 @@ tests/unit/helpers/host-workflow/workflow.test.ts
 
 - 模块标题可解析；
 - Task ID 唯一；
-- `[P]` 和模块标签可解析；
+- 模块标签可解析，`[P]` 等其他标签一律拒绝；
 - 反引号目标路径可提取；
 - ` — 验收：` 可提取 acceptance criteria；
 - 至少一个 enabled task。

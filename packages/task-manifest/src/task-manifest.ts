@@ -41,7 +41,6 @@ function toManifestTask(task: ParsedTask): ManifestTask {
   return {
     id: task.id,
     module: task.module,
-    parallel: task.parallel,
     description: task.description,
     filePaths: task.filePaths,
     acceptanceCriteria: task.acceptanceCriteria

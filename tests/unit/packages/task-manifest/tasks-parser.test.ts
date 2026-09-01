@@ -26,7 +26,6 @@ describe("tasks.md parser", () => {
       id: "T001",
       module: "M01",
       completed: false,
-      parallel: true,
       filePaths: ["packages/core/src/index.ts"],
       acceptanceCriteria: ["core review passes"]
     });
@@ -99,5 +98,22 @@ describe("tasks.md parser", () => {
       tasks: "## Phase 14: Convergence\n\n- [ ] T101 [M01] [M12] Edit `packages/a.ts` — 验收：pass"
     });
     expectErrorCode(() => parseTasksDocument(ambiguous), "TASK_TAG_INVALID");
+  });
+
+  it("rejects the retired [P] parallel tag instead of accepting it as a no-op", () => {
+    const parallelTag = createTasksSource({
+      tasks: "## M01 · Core\n\n- [ ] T001 [P] Edit `packages/a.ts` — 验收：pass"
+    });
+    expectErrorCode(() => parseTasksDocument(parallelTag), "TASK_TAG_INVALID");
+
+    const withModuleTag = createTasksSource({
+      tasks: "## M01 · Core\n\n- [ ] T001 [P] [M01] Edit `packages/a.ts` — 验收：pass"
+    });
+    expectErrorCode(() => parseTasksDocument(withModuleTag), "TASK_TAG_INVALID");
+  });
+
+  it("does not record a parallel field on parsed tasks", () => {
+    const [task] = parseTasksDocument(createTasksSource()).tasks;
+    expect(task).not.toHaveProperty("parallel");
   });
 });

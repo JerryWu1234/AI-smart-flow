@@ -25,7 +25,6 @@ describe("Host canonical SmartFlow tasks", () => {
       expect.objectContaining({
         id: "T001",
         module: "M01",
-        parallel: false,
         filePaths: ["src/auth/login.ts"],
         acceptanceCriteria: [
           "valid users can log in and invalid passwords return an explicit error"
@@ -34,11 +33,13 @@ describe("Host canonical SmartFlow tasks", () => {
       expect.objectContaining({
         id: "T002",
         module: "M01",
-        parallel: true,
         filePaths: ["src/auth/login.test.ts"],
         acceptanceCriteria: ["success and failure cases pass"]
       })
     ]);
+    for (const task of compiled.manifest.tasks) {
+      expect(task).not.toHaveProperty("parallel");
+    }
     expect(compiled.manifest).not.toHaveProperty("revision");
     expect(compiled.manifest).not.toHaveProperty("revisionId");
   });

@@ -4,7 +4,6 @@ export interface ParsedTask {
   id: string;
   module: string;
   completed: boolean;
-  parallel: boolean;
   description: string;
   filePaths: string[];
   acceptanceCriteria: string[];
@@ -59,7 +58,7 @@ function parseTaskLine(
     remaining = remaining.slice(tagMatch[0].length);
   }
   const moduleTags = tags.filter((tag) => /^M\d{2}$/u.test(tag));
-  const unknownTag = tags.find((tag) => tag !== "P" && !/^M\d{2}$/u.test(tag));
+  const unknownTag = tags.find((tag) => !/^M\d{2}$/u.test(tag));
   if (unknownTag !== undefined || moduleTags.length > 1) {
     throw new TaskManifestError(
       "TASK_TAG_INVALID",
@@ -102,7 +101,6 @@ function parseTaskLine(
     id,
     module: moduleId,
     completed: (checkboxMatch[1] ?? " ").toUpperCase() === "X",
-    parallel: tags.includes("P"),
     description,
     filePaths: extractTargetPaths(description),
     acceptanceCriteria: [parts[1]?.trim() ?? ""]
