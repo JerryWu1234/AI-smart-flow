@@ -245,13 +245,8 @@ export const mcpToolSchemas = {
 
 export type ExecuteInput = z.infer<typeof executeInputSchema>;
 export type ExecuteOutput = z.infer<typeof executeOutputSchema>;
-export type StatusInput = z.infer<typeof statusInputSchema>;
-export type StatusOutput = z.infer<typeof statusOutputSchema>;
 export type ResumeInput = z.infer<typeof resumeInputSchema>;
-export type ResumeOutput = z.infer<typeof resumeOutputSchema>;
 export type CancelInput = z.infer<typeof cancelInputSchema>;
-export type CancelOutput = z.infer<typeof cancelOutputSchema>;
-export type ResultInput = z.infer<typeof resultInputSchema>;
 export type ResultOutput = z.infer<typeof resultOutputSchema>;
 export type ReviewTurnInput = z.infer<typeof reviewTurnInputSchema>;
 export type ReviewTurnOutput = z.infer<typeof reviewTurnOutputSchema>;
