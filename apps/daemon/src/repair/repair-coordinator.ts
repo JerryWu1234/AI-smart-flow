@@ -22,20 +22,12 @@ import { getCandidateHash, type Candidate } from "@smartflow/workspace";
 
 import { ProjectMutationExecutor } from "../runtime/project-mutation-executor.js";
 
-export type RepairPreparationResult =
-  | {
-      phase: "PREPARING";
-      prompt: string;
-      resumeSession: {
-        sourceAttemptId: string;
-        expectedPiSessionId: string;
-        sessionArtifact: NonNullable<RunRecord["workerAttempts"][number]["sessionArtifact"]>;
-      };
-    }
-  | {
-      phase: "PAUSED";
-      code: "REPAIR_NO_PROGRESS" | "REPAIR_USER_APPROVAL_REQUIRED";
-    };
+// The prompt, resumed Pi session and pause code are all persisted by prepare()
+// itself, under run.recovery.repairContinuation and run.pause. Callers read
+// them from state, so only the resulting phase is reported back.
+export interface RepairPreparationResult {
+  phase: "PREPARING" | "PAUSED";
+}
 
 function nextTaskNumber(manifest: TaskManifest): number {
   return manifest.tasks.reduce((maximum, task) => {
@@ -196,7 +188,7 @@ export class RepairCoordinator {
           untrustedSeedCandidate: run.candidate
         }
       );
-      return { phase: "PAUSED", code: "REPAIR_USER_APPROVAL_REQUIRED" };
+      return { phase: "PAUSED" };
     }
 
     const previousRound = parsePreviousRound(run);
@@ -212,7 +204,7 @@ export class RepairCoordinator {
     );
     if (assessed.pauseRequired) {
       await this.pause(run, currentRound, assessed.noProgressCount, "REPAIR_NO_PROGRESS");
-      return { phase: "PAUSED", code: "REPAIR_NO_PROGRESS" };
+      return { phase: "PAUSED" };
     }
 
     const attempt = run.workerAttempts.at(-1);
@@ -305,15 +297,7 @@ export class RepairCoordinator {
             ...current,
             runs: { ...current.runs, [run.jobId]: nextRun }
           },
-          response: {
-            phase: "PREPARING" as const,
-            prompt,
-            resumeSession: {
-              sourceAttemptId: activeAttempt.attemptId,
-              expectedPiSessionId,
-              sessionArtifact
-            }
-          }
+          response: { phase: "PREPARING" as const }
         };
       }
     );
