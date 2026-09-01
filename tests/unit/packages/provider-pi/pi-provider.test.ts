@@ -32,7 +32,6 @@ const sessionFile = "/workspace/.smartflow-runtime/sessions/pi-session-1.jsonl";
 function input(resumeSession?: WorkerStartInput["resumeSession"]): WorkerStartInput {
   return {
     attemptId: "attempt-1",
-    jobId: "job-1",
     generation: 0,
     workspaceDir: "/workspace",
     prompt: "implement",
