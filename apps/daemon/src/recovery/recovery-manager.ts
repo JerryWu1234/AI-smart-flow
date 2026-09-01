@@ -51,14 +51,14 @@ export type RecoveryAction =
   | "BLOCKED";
 
 export interface PublishRecoveryObservation {
-  status: "COMMITTED" | "CONFLICT" | "PENDING" | "UNKNOWN" | "MISMATCH";
+  status: "COMMITTED" | "CONFLICT" | "UNKNOWN";
   result?: unknown;
 }
 
 export interface RecoveryRuntime {
   inspectWorker(attempt: WorkerAttempt | undefined): Promise<"STOPPED" | "UNKNOWN">;
   reconcilePublish(operationId: string, operationsHash: string): Promise<PublishRecoveryObservation>;
-  continueCancellation(jobId: string): Promise<"CANCELED" | "BLOCKED">;
+  continueCancellation(): Promise<"CANCELED" | "BLOCKED">;
 }
 
 export interface RecoveryResult {
@@ -498,8 +498,7 @@ export class RecoveryManager {
         recovery: {
           ...current.recovery,
           phase: "RUNNING",
-          action: "START_NEW_WORKER_ATTEMPT",
-          workerEpoch: recoveryEpoch
+          action: "START_NEW_WORKER_ATTEMPT"
         }
       })
     );
@@ -563,7 +562,7 @@ export class RecoveryManager {
   }
 
   private async recoverCancellation(run: RunRecord): Promise<RecoveryResult> {
-    const observed = await this.runtime.continueCancellation(run.jobId);
+    const observed = await this.runtime.continueCancellation();
     const current = await this.store.readState();
     const recovered = current.runs[run.jobId] ?? run;
     return observed === "CANCELED" && recovered.phase === "CANCELED"

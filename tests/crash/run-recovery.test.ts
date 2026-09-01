@@ -22,7 +22,7 @@ class Runtime implements RecoveryRuntime {
   }
 
   public reconcilePublish(): Promise<PublishRecoveryObservation> {
-    return Promise.resolve({ status: "PENDING" });
+    return Promise.resolve({ status: "UNKNOWN" });
   }
 
   public continueCancellation(): Promise<"CANCELED" | "BLOCKED"> {

@@ -22,7 +22,7 @@ import { createLifecycleStore } from "./recovery-test-fixture.js";
 
 const runtime: RecoveryRuntime = {
   inspectWorker: () => Promise.resolve("STOPPED"),
-  reconcilePublish: (): Promise<PublishRecoveryObservation> => Promise.resolve({ status: "PENDING" }),
+  reconcilePublish: (): Promise<PublishRecoveryObservation> => Promise.resolve({ status: "UNKNOWN" }),
   continueCancellation: () => Promise.resolve("BLOCKED")
 };
 
