@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { StructuredLogger } from "@smartflow/observability";
-import type { PublishServiceResult, WorkspaceApplyAdapter } from "@smartflow/publish";
+import type { PublishServiceResult } from "@smartflow/publish";
 import type { WorkerProvider } from "@smartflow/provider-core";
 import { PI_MINIMUM_ATTEMPT_DEADLINE_MS } from "@smartflow/provider-pi";
 import type { AgentAdapter } from "@smartflow/review";
@@ -64,8 +64,6 @@ const defaultReviewOptions: Omit<ReviewRunnerOptions, "logger"> = {
   maxAttempts: 3
 };
 
-const DEFAULT_NO_PROGRESS_THRESHOLD = 15;
-
 type WorkerContinuation = Pick<WorkerRunRequest, "prompt" | "resumeSession">;
 type ReviewAdapterResolver = (
   reviewAdapterId: RunRecord["reviewAdapterId"]
@@ -77,12 +75,10 @@ export class ProductionRuntimeComposition {
   public constructor(
     private readonly reviewAdapter: AgentAdapter | ReviewAdapterResolver,
     private readonly logger = new StructuredLogger("smartflow-runtime"),
-    private readonly workspaceApplyAdapter?: WorkspaceApplyAdapter,
     private readonly provider?: WorkerProvider,
     private readonly providerRuntimeConfig: Readonly<Record<string, unknown>> = Object.freeze({}),
     private readonly providerRuntimeResolver?: ProviderRuntimeResolver,
-    reviewOptions: Partial<Omit<ReviewRunnerOptions, "logger">> = {},
-    private readonly noProgressThreshold = DEFAULT_NO_PROGRESS_THRESHOLD
+    reviewOptions: Partial<Omit<ReviewRunnerOptions, "logger">> = {}
   ) {
     this.reviewOptions = { ...defaultReviewOptions, ...reviewOptions };
   }
@@ -90,7 +86,7 @@ export class ProductionRuntimeComposition {
   private repairCoordinator(
     store: ProjectPipelineContext["store"]
   ): RepairCoordinator {
-    return new RepairCoordinator(store, this.noProgressThreshold);
+    return new RepairCoordinator(store);
   }
 
   private async prepareRepairAndContinue(
@@ -196,10 +192,7 @@ export class ProductionRuntimeComposition {
     if (artifactFailure !== undefined) {
       throw new Error(`PUBLISH_ARTIFACT_INTEGRITY_BLOCKED:${artifactFailure}`);
     }
-    await new PublishCoordinator(
-      context.store,
-      this.workspaceApplyAdapter
-    ).publish(context.jobId);
+    await new PublishCoordinator(context.store).publish(context.jobId);
   };
 
   public cancel = async (context: ProjectPipelineContext): Promise<void> => {
@@ -213,8 +206,7 @@ export class ProductionRuntimeComposition {
       inspectWorker: (attempt) => this.inspectWorker(context, attempt),
       reconcilePublish: async (operationId, operationsHash) => {
         const result: PublishServiceResult = await new PublishCoordinator(
-          context.store,
-          this.workspaceApplyAdapter
+          context.store
         ).recover(context.jobId, operationId, operationsHash);
         if (result.status === "COMMITTED") return { status: "COMMITTED", result: result.result };
         if (result.status === "PUBLISH_RECOVERY_BLOCKED" && result.result?.status === "CONFLICT") {

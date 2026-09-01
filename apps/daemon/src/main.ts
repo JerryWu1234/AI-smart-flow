@@ -2,7 +2,6 @@ import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { StructuredLogger } from "@smartflow/observability";
-import type { WorkspaceApplyAdapter } from "@smartflow/publish";
 import {
   ClaudeCodeAdapter,
   ClaudeCodeDesktopAdapter,
@@ -14,8 +13,7 @@ import {
 import {
   resolveReviewStrategy,
   resolveSmartFlowConfig,
-  type ReviewStrategy,
-  type SmartFlowConfig
+  type ReviewStrategy
 } from "./config/config.js";
 import { resolveInstallationDataDirectory } from "./config/data-dir.js";
 import { LocalIpcServer, type IpcRequestHandler } from "./transport/local-ipc-server.js";
@@ -44,15 +42,12 @@ export interface SmartFlowDaemonOptions {
   dataDirectory?: string;
   handler?: IpcRequestHandler;
   logger?: StructuredLogger;
-  workspaceApplyAdapter?: WorkspaceApplyAdapter;
   workerLaunchConfiguration?: ResolvedWorkerLaunchConfiguration;
   reviewAdapter?: AgentAdapter;
 }
 
 export interface SmartFlowDaemonController {
   server: LocalIpcServer;
-  config: SmartFlowConfig;
-  dataDirectory: string;
   close(): Promise<void>;
 }
 
@@ -94,7 +89,6 @@ export async function startSmartFlowDaemon(
   const composition = new ProductionRuntimeComposition(
     resolveReviewAdapter,
     logger,
-    options.workspaceApplyAdapter,
     initialProviderRuntime.provider,
     providerRuntimeConfig,
     providers.resolve.bind(providers),
@@ -154,8 +148,6 @@ export async function startSmartFlowDaemon(
   }
   return {
     server,
-    config,
-    dataDirectory,
     async close(): Promise<void> {
       await server.close();
       logger.log({ level: "info", event: "daemon.stopped" });
