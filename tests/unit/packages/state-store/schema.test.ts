@@ -27,6 +27,19 @@ describe("ProjectState schema and recovery source", () => {
     ).toBe(false);
   });
 
+  it("accepts the durable OpenCode Review strategy and rejects unknown IDs", () => {
+    const run = createRunRecord({ reviewAdapterId: "opencode" });
+    const state = createProjectState({ runs: { [run.jobId]: run } });
+    expect(projectStateSchema.parse(state).runs[run.jobId]?.reviewAdapterId)
+      .toBe("opencode");
+    expect(projectStateSchema.safeParse({
+      ...state,
+      runs: {
+        [run.jobId]: { ...run, reviewAdapterId: "open-code" }
+      }
+    }).success).toBe(false);
+  });
+
   it("keeps only the active workspace path in state v7", () => {
     const run = createRunRecord({ workspace: { relativePath: "runs/job-1/workspace" } });
     const state = createProjectState({ runs: { [run.jobId]: run } });

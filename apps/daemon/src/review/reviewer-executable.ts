@@ -8,7 +8,8 @@ const REVIEWER_EXECUTABLES = {
   "claude-code": "claude",
   "claude-code-desktop": "claude",
   codex: "codex",
-  "codex-desktop": "codex"
+  "codex-desktop": "codex",
+  opencode: "opencode"
 } as const satisfies Record<ReviewStrategy, string>;
 
 function executableNames(executable: string, environment: NodeJS.ProcessEnv): readonly string[] {

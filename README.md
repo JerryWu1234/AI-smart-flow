@@ -13,7 +13,7 @@ Each `smartflow_execute` call creates an immutable Job bound to one canonical ta
 
 Each MCP server instance binds one model directly from `BASE_URL`, `MODEL` and `API_KEY`. The optional `API` setting defaults to `openai-responses`; explicit supported values are `openai-completions`, `openai-responses`, `anthropic-messages` and `google-generative-ai`. SmartFlow does not probe endpoints or switch formats after a request fails. Optional MCP environment variables `SMARTFLOW_PI_CONTEXT_WINDOW`, `SMARTFLOW_PI_MAX_TOKENS`, `EFFORT` and `SMARTFLOW_PI_ATTEMPT_DEADLINE_MS` configure context, output, reasoning effort and the rolling Attempt deadline, defaulting to `1000000`, `384000`, `high` and `300000ms`; `EFFORT` accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`, and deadline overrides must be at least `60000ms`. SmartFlow registers the model in memory through a bundled Pi Extension and does not use `models.json`.
 
-Reviewer configuration uses `REVIEW_ADAPTER`, `REVIEW_MODEL` and `REVIEW_EFFORT` as its only configuration source. `REVIEW_ADAPTER` accepts `codex`, `codex-desktop`, `claude-code` or `claude-code-desktop`, while model and effort are passed through to the selected Reviewer. SmartFlow checks the explicitly selected local Agent before the MCP server or Daemon becomes ready: both Codex strategies require `codex` on `PATH`, and both Claude strategies require `claude`. Reviewer configuration is read when the Daemon starts, so restart the Daemon after changing any `REVIEW_*` value.
+Reviewer configuration uses `REVIEW_ADAPTER`, `REVIEW_MODEL` and `REVIEW_EFFORT` as its only configuration source. `REVIEW_ADAPTER` accepts `codex`, `codex-desktop`, `claude-code`, `claude-code-desktop` or `opencode`, while model and effort are passed through to the selected Reviewer. SmartFlow checks the explicitly selected local Agent before the MCP server or Daemon becomes ready: both Codex strategies require `codex` on `PATH`, both Claude strategies require `claude`, and OpenCode requires `opencode`. Reviewer configuration is read when the Daemon starts, so restart the Daemon after changing any `REVIEW_*` value.
 
 Run `smartflow doctor --json` to verify Node, Pi, sandbox, model registration, signing and publish capabilities.
 
@@ -32,6 +32,27 @@ for Desktop-host configuration; Claude Desktop exposes no headless reviewer tran
 SmartFlow does not attach to, resume, or control the Desktop conversation, embedded CLI, or
 GUI. The standalone Claude Code CLI must be installed and authenticated in the Daemon
 environment for either strategy.
+
+`opencode` starts a separate local `opencode run` process for every create or resume call. It
+uses the same OpenCode installation, provider authentication, and local session store available
+to the Daemon, but it never attaches to the MCP Host process or Host conversation. OpenCode
+requires an explicit provider-qualified `REVIEW_MODEL`; optional `REVIEW_EFFORT` is forwarded
+as the provider-specific OpenCode variant:
+
+```sh
+export REVIEW_ADAPTER=opencode
+export REVIEW_MODEL=provider/model
+export REVIEW_EFFORT=high # optional
+```
+
+The OpenCode reviewer runs from a private Git root outside the candidate and receives the
+candidate only as an exact read-only external directory. Its isolated XDG configuration disables
+project/user plugins and MCP servers, exposes only `read`, `glob`, and `grep`, and denies shell,
+write, task, web, skill, and interactive tools. Consequently, custom providers defined only in a
+user `opencode.json` are not available; use a built-in provider authenticated in OpenCode's shared
+auth store. This is application-level OpenCode containment rather than an OS sandbox. SmartFlow
+does not install or log in OpenCode, attach to an existing server/session, or recover an orphaned
+reviewer process after a Daemon crash. The CLI contract was validated with OpenCode 1.17.7.
 
 ### Host task preparation and approval
 

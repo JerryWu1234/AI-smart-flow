@@ -12,7 +12,8 @@ describe("SmartFlow daemon configuration", () => {
       "codex",
       "codex-desktop",
       "claude-code",
-      "claude-code-desktop"
+      "claude-code-desktop",
+      "opencode"
     ]);
     const config = resolveSmartFlowConfig({});
     expect(config.review).toEqual({});
@@ -22,6 +23,10 @@ describe("SmartFlow daemon configuration", () => {
       .toBe("claude-code");
     expect(resolveReviewStrategy(config.review.strategy, "claude-code-desktop"))
       .toBe("claude-code-desktop");
+    expect(resolveReviewStrategy(config.review.strategy, "opencode"))
+      .toBe("opencode");
+    expect(resolveReviewStrategy(config.review.strategy, "OpenCode")).toBe("codex");
+    expect(resolveReviewStrategy(config.review.strategy, " open-code ")).toBe("codex");
     expect(resolveReviewStrategy(config.review.strategy, "CODEX-DESKTOP")).toBe("codex");
     expect(resolveReviewStrategy(config.review.strategy, " codex-desktop ")).toBe("codex");
     expect(resolveReviewStrategy(config.review.strategy, "kiro")).toBe("codex");
@@ -49,20 +54,20 @@ describe("SmartFlow daemon configuration", () => {
 
   it("trims and forwards REVIEW_MODEL and REVIEW_EFFORT", () => {
     expect(resolveSmartFlowConfig({
-      REVIEW_ADAPTER: " claude-code ",
-      REVIEW_MODEL: " gpt-5.6-terra ",
-      REVIEW_EFFORT: " max "
+      REVIEW_ADAPTER: " opencode ",
+      REVIEW_MODEL: " anthropic/claude-sonnet-4 ",
+      REVIEW_EFFORT: " high "
     }).review).toEqual({
-      strategy: "claude-code",
-      model: "gpt-5.6-terra",
-      effort: "max"
+      strategy: "opencode",
+      model: "anthropic/claude-sonnet-4",
+      effort: "high"
     });
   });
 
   it("rejects an unsupported REVIEW_ADAPTER without falling back", () => {
     expect(() => resolveSmartFlowConfig({ REVIEW_ADAPTER: "missing-agent" }))
       .toThrow(
-        "REVIEW_ADAPTER_INVALID: unsupported adapter \"missing-agent\"; expected codex, codex-desktop, claude-code, or claude-code-desktop"
+        "REVIEW_ADAPTER_INVALID: unsupported adapter \"missing-agent\"; expected codex, codex-desktop, claude-code, claude-code-desktop, or opencode"
       );
   });
 
