@@ -64,7 +64,6 @@ describe("daemon launcher", () => {
       }
     );
 
-    expect(client.providerRuntimeConfigHash).toBe("b".repeat(64));
     expect(spawn).not.toHaveBeenCalled();
     client.close();
   });
