@@ -30,11 +30,7 @@ export default tseslint.config(
   },
   {
     ...tseslint.configs.disableTypeChecked,
-    files: [
-      "tsdown*.config.mjs",
-      "apps/flow-visualizer/src/**/*.js",
-      "apps/flow-visualizer/scripts/**/*.mjs"
-    ],
+    files: ["tsdown*.config.mjs"],
     rules: {
       ...tseslint.configs.disableTypeChecked.rules,
       "@typescript-eslint/explicit-function-return-type": "off"
