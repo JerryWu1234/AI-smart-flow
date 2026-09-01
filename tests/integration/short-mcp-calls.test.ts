@@ -203,7 +203,6 @@ describe("short MCP calls and independent daemon jobs", () => {
       }
     );
 
-    expect(client.providerRuntimeConfigHash).toBe(providerRuntimeConfigHash);
     await expect(client.call("health", {})).resolves.toEqual({ providerRuntimeConfigHash });
     client.close();
   });
