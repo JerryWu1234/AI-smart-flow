@@ -234,15 +234,6 @@ export const reviewTurnOutputSchema = z.discriminatedUnion("kind", [
   }
 });
 
-export const mcpToolSchemas = {
-  smartflow_execute: { input: executeInputSchema, output: executeOutputSchema },
-  smartflow_review_turn: { input: reviewTurnInputSchema, output: reviewTurnOutputSchema },
-  smartflow_status: { input: statusInputSchema, output: statusOutputSchema },
-  smartflow_resume: { input: resumeInputSchema, output: resumeOutputSchema },
-  smartflow_cancel: { input: cancelInputSchema, output: cancelOutputSchema },
-  smartflow_result: { input: resultInputSchema, output: resultOutputSchema }
-} as const;
-
 export type ExecuteInput = z.infer<typeof executeInputSchema>;
 export type ExecuteOutput = z.infer<typeof executeOutputSchema>;
 export type StatusInput = z.infer<typeof statusInputSchema>;
