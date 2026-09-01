@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 import {
   loadSmartFlowConfig,
-  resolveWorkerLaunchConfiguration,
+  resolveMcpWorkerLaunchConfiguration,
   resolveInstallationDataDirectory,
   resolveProjectDataDirectory,
   type ResolvedWorkerLaunchConfiguration,
@@ -164,7 +164,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
   if (probes === undefined) {
     try {
       config = await loadSmartFlowConfig(options.configPath ?? environment.SMARTFLOW_CONFIG);
-      const workerConfiguration = resolveWorkerLaunchConfiguration([], environment);
+      const workerConfiguration = resolveMcpWorkerLaunchConfiguration([], environment);
       probes = defaultProbes(projectRoot, dataDirectory, environment, workerConfiguration);
     } catch (error) {
       probes = [

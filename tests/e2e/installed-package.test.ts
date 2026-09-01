@@ -242,6 +242,7 @@ describe("installed SmartFlow package", () => {
             ([key]) =>
               !key.startsWith("VITEST") &&
               !key.startsWith("TIN_POOL") &&
+              key !== "SMARTFLOW_PI_THINKING" &&
               !new Set(["NODE_CHANNEL_FD", "NODE_OPTIONS", "NODE_UNIQUE_ID", "JEST_WORKER_ID"]).has(key)
           )
         ),
@@ -255,7 +256,7 @@ describe("installed SmartFlow package", () => {
         API_KEY: process.env.API_KEY ?? "",
         SMARTFLOW_PI_CONTEXT_WINDOW: process.env.SMARTFLOW_PI_CONTEXT_WINDOW ?? "1000000",
         SMARTFLOW_PI_MAX_TOKENS: process.env.SMARTFLOW_PI_MAX_TOKENS ?? "384000",
-        SMARTFLOW_PI_THINKING: process.env.SMARTFLOW_PI_THINKING ?? "high",
+        EFFORT: process.env.EFFORT ?? "high",
         SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: process.env.SMARTFLOW_PI_ATTEMPT_DEADLINE_MS ?? "300000",
         SMARTFLOW_TEST_REPAIR_MARKER: repairMarker,
         SMARTFLOW_TEST_CODEX_TRACE: codexTracePath,
