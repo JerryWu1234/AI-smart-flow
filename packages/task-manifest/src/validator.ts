@@ -15,12 +15,7 @@ export function validateTaskSelection(
   if (enabledTasks.length === 0) {
     issues.push({ code: "TASKS_EMPTY", message: "At least one enabled, incomplete task is required" });
   }
-  const taskIds = new Set<string>();
   for (const task of enabledTasks) {
-    if (taskIds.has(task.id)) {
-      issues.push({ code: "TASK_ID_DUPLICATE", message: `Duplicate Task ID: ${task.id}`, taskId: task.id });
-    }
-    taskIds.add(task.id);
     if (task.filePaths.length === 0) {
       issues.push({
         code: "TARGET_PATH_MISSING",

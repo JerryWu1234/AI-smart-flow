@@ -8,7 +8,6 @@ export interface ParsedTask {
   description: string;
   filePaths: string[];
   acceptanceCriteria: string[];
-  line: number;
 }
 
 export interface ParsedTasksDocument {
@@ -106,8 +105,7 @@ function parseTaskLine(
     parallel: tags.includes("P"),
     description,
     filePaths: extractTargetPaths(description),
-    acceptanceCriteria: [parts[1]?.trim() ?? ""],
-    line: lineNumber
+    acceptanceCriteria: [parts[1]?.trim() ?? ""]
   };
 }
 
