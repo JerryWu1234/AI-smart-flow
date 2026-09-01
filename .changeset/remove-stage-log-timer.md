@@ -1,5 +1,5 @@
 ---
-"@jerrywu1234/smartflow": patch
+"@smartflow/cli": patch
 ---
 
 Remove the unused stage-timing path from the observability logger. `StructuredLogger.stage()` had no callers anywhere in the workspace, and the `StageLogTimer` it returned was referenced only by that method and was never exported from the package index. Stage timing in the daemon goes through `MetricsRegistry.recordStage` instead.
