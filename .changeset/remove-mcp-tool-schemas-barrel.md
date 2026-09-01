@@ -1,5 +1,5 @@
 ---
-"@jerrywu1234/smartflow": patch
+"@smartflow/cli": patch
 ---
 
 Remove the `mcpToolSchemas` barrel from `@smartflow/protocol`. It enumerated the six public MCP tools as input/output schema pairs, but no production code imported it — its only consumers were three assertions in the protocol unit test.
