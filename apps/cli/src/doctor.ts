@@ -3,14 +3,14 @@ import { access, mkdir, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import {
-  resolveMcpWorkerLaunchConfiguration,
+  resolveWorkerLaunchConfiguration,
   resolveInstallationDataDirectory,
   resolveProjectDataDirectory,
   resolveSmartFlowConfig,
   type ResolvedWorkerLaunchConfiguration,
   type SmartFlowConfig
 } from "@smartflow/daemon";
-import { PiProvider } from "@smartflow/provider-pi";
+import { API_KEY_ENVIRONMENT_VARIABLE, PiProvider } from "@smartflow/provider-pi";
 import { FilesystemWorkspaceApplyAdapter } from "@smartflow/publish";
 import { ExecutionSandboxAdapter } from "@smartflow/workspace";
 
@@ -111,7 +111,7 @@ function defaultProbes(
         const result = await new PiProvider({
           runtimeConfig: workerConfiguration.runtimeConfig,
           environment: {
-            API_KEY: workerConfiguration.credential
+            [API_KEY_ENVIRONMENT_VARIABLE]: workerConfiguration.credential
           }
         }).probe();
         return {
@@ -163,7 +163,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
   if (probes === undefined) {
     try {
       config = resolveSmartFlowConfig(environment);
-      const workerConfiguration = resolveMcpWorkerLaunchConfiguration([], environment);
+      const workerConfiguration = resolveWorkerLaunchConfiguration([], environment);
       probes = defaultProbes(projectRoot, dataDirectory, environment, workerConfiguration);
     } catch (error) {
       probes = [

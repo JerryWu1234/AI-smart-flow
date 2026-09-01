@@ -28,8 +28,12 @@ export { resolveReviewerExecutable } from "./review/reviewer-executable.js";
 export { ReviewRunner } from "./review/review-runner.js";
 export { WorkerRunner } from "./worker/worker-runner.js";
 export {
-  resolveMcpWorkerLaunchConfiguration,
+  WORK_ENVIRONMENT_KEYS,
   resolveWorkerLaunchConfiguration,
   workerLaunchEnvironment
 } from "./config/worker-config.js";
-export type { ResolvedWorkerLaunchConfiguration } from "./config/worker-config.js";
+export type {
+  ResolvedWorkerLaunchConfiguration,
+  WorkEnvironment,
+  WorkEnvironmentKey
+} from "./config/worker-config.js";

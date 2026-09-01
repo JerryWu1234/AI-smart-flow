@@ -20,7 +20,7 @@
   "scripts": {
     "build": "tsdown --config ../../tsdown.workspace.config.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --root ../.. --passWithNoTests apps/mcp-server/src"
+    "test": "vitest run --root ../.. tests/contract/mcp-tools.test.ts tests/contract/mcp-server-instructions.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

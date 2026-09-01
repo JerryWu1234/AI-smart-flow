@@ -58,8 +58,6 @@ export const idempotentReceiptSchema = z
   .strict();
 
 export type ArtifactRef = z.infer<typeof artifactRefSchema>;
-export type StructuredError = z.infer<typeof structuredErrorSchema>;
-export type IdempotentReceipt = z.infer<typeof idempotentReceiptSchema>;
 
 export function artifactRefsEqual(left: ArtifactRef, right: ArtifactRef): boolean {
   return left.relativePath === right.relativePath &&

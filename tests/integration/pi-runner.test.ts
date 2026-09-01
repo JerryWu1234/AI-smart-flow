@@ -278,14 +278,14 @@ describe("Pi WorkerRunner", () => {
         PATH: process.env.PATH,
         HOME: resolve(root, "home"),
         PI_CODING_AGENT_DIR: resolve(root, "agent"),
-        API: "openai-completions",
-        BASE_URL: "https://models.example.test/v1",
-        MODEL: "model-test",
-        SMARTFLOW_PI_CONTEXT_WINDOW: "1000000",
-        SMARTFLOW_PI_MAX_TOKENS: "384000",
-        SMARTFLOW_PI_THINKING: "high",
-        SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "300000",
-        API_KEY: credentialCanary
+        WORK_API: "openai-completions",
+        WORK_BASE_URL: "https://models.example.test/v1",
+        WORK_MODEL: "model-test",
+        WORK_CONTEXT_WINDOW: "1000000",
+        WORK_MAX_TOKENS: "384000",
+        WORK_EFFORT: "high",
+        WORK_ATTEMPT_DEADLINE_MS: "300000",
+        WORK_API_KEY: credentialCanary
       }
     });
 

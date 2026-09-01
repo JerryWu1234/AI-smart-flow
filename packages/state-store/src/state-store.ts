@@ -28,11 +28,6 @@ CREATE TABLE IF NOT EXISTS project_state (
   state_json TEXT NOT NULL,
   updated_at TEXT NOT NULL
 ) STRICT;
-CREATE TABLE IF NOT EXISTS audit_events (
-  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-  event_json TEXT NOT NULL,
-  created_at TEXT NOT NULL
-) STRICT;
 CREATE TABLE IF NOT EXISTS mutation_lease (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   owner_token TEXT NOT NULL UNIQUE,
@@ -579,23 +574,6 @@ export class StateStore {
       throw new StateStoreError("STATE_INVALID", `Artifact hash mismatch: ${ref.relativePath}`);
     }
     return bytes;
-  }
-
-  public async appendAuditEvent(event: unknown): Promise<void> {
-    const eventJson = canonicalJson(event);
-    await this.withDatabase((database) => {
-      beginImmediate(database);
-      try {
-        database.prepare(`
-          INSERT INTO audit_events (event_json, created_at)
-          VALUES (?, ?)
-        `).run(eventJson, new Date().toISOString());
-        commit(database);
-      } catch (error) {
-        rollback(database);
-        throw error;
-      }
-    });
   }
 
   private async readDatabaseState(): Promise<ParsedStateDocument | undefined> {

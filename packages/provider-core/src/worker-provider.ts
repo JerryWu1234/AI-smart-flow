@@ -32,7 +32,6 @@ export interface WorkerContainmentInput {
 
 export interface WorkerStartInput {
   readonly attemptId: string;
-  readonly jobId: string;
   readonly generation: number;
   readonly workspaceDir: string;
   readonly prompt: string;

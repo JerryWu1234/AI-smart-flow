@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { MetricsRegistry, StructuredLogger } from "@smartflow/observability";
+import { StructuredLogger } from "@smartflow/observability";
 import {
   ClaudeCodeAdapter,
   ClaudeCodeDesktopAdapter,
@@ -23,7 +23,7 @@ import { ProductionRuntimeComposition } from "./runtime/runtime-composition.js";
 import { resolveReviewerExecutable } from "./review/reviewer-executable.js";
 import {
   resolveWorkerLaunchConfiguration,
-  WORKER_CONFIGURATION_ENVIRONMENT_KEYS,
+  WORK_ENVIRONMENT_KEYS,
   type ResolvedWorkerLaunchConfiguration
 } from "./config/worker-config.js";
 
@@ -42,7 +42,6 @@ export interface SmartFlowDaemonOptions {
   dataDirectory?: string;
   handler?: IpcRequestHandler;
   logger?: StructuredLogger;
-  metrics?: MetricsRegistry;
   workerLaunchConfiguration?: ResolvedWorkerLaunchConfiguration;
   reviewAdapter?: AgentAdapter;
 }
@@ -56,7 +55,6 @@ export async function startSmartFlowDaemon(
   options: SmartFlowDaemonOptions = {}
 ): Promise<SmartFlowDaemonController> {
   const logger = options.logger ?? new StructuredLogger("smartflow-daemon");
-  const metrics = options.metrics ?? new MetricsRegistry();
   const timer = performance.now();
   const config = resolveSmartFlowConfig();
   const injectedReviewAdapter = options.reviewAdapter;
@@ -66,7 +64,7 @@ export async function startSmartFlowDaemon(
       : undefined;
   const workerLaunchConfiguration = options.workerLaunchConfiguration ??
     resolveWorkerLaunchConfiguration([]);
-  for (const key of WORKER_CONFIGURATION_ENVIRONMENT_KEYS) {
+  for (const key of WORK_ENVIRONMENT_KEYS) {
     Reflect.deleteProperty(process.env, key);
   }
   const providers = new ProviderRegistry();
@@ -132,7 +130,6 @@ export async function startSmartFlowDaemon(
     await projectRuntime.recover();
     await server.start();
     const durationMs = performance.now() - timer;
-    metrics.recordStage("daemon.start", durationMs, true);
     logger.log({
       level: "info",
       event: "daemon.ready",
@@ -146,7 +143,6 @@ export async function startSmartFlowDaemon(
   } catch (error) {
     await server.close().catch(() => undefined);
     const durationMs = performance.now() - timer;
-    metrics.recordStage("daemon.start", durationMs, false);
     logger.log({ level: "error", event: "daemon.start_failed", stage: "daemon.start", durationMs, error });
     throw error;
   }
