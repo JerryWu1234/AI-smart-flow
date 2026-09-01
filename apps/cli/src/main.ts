@@ -5,7 +5,6 @@ import { realpath } from "node:fs/promises";
 import {
   LocalIpcClient,
   daemonEndpoint,
-  resolveMcpWorkerLaunchConfiguration,
   resolveWorkerLaunchConfiguration,
   resolveInstallationDataDirectory,
   serveSmartFlowDaemon
@@ -64,7 +63,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
     const entryPath = process.argv[1];
     if (entryPath === undefined) throw new Error("CLI entry path is unavailable");
     const dataDirectory = flagValue(argv, "--data-dir");
-    const workerLaunchConfiguration = resolveMcpWorkerLaunchConfiguration(argv);
+    const workerLaunchConfiguration = resolveWorkerLaunchConfiguration(argv);
     await runSmartFlowMcpGateway({
       executablePath: process.execPath,
       entryPath,
@@ -93,8 +92,8 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       "  doctor [--json] [--project PATH]",
       "  daemon [--data-dir PATH]",
       "  mcp [--data-dir PATH]",
-      "  Required MCP Pi env: BASE_URL, MODEL, API_KEY",
-      "  Optional MCP Pi env: API, SMARTFLOW_PI_CONTEXT_WINDOW, SMARTFLOW_PI_MAX_TOKENS, EFFORT, SMARTFLOW_PI_ATTEMPT_DEADLINE_MS",
+      "  Required MCP Worker env: WORK_BASE_URL, WORK_MODEL, WORK_API_KEY",
+      "  Optional MCP Worker env: WORK_API, WORK_CONTEXT_WINDOW, WORK_MAX_TOKENS, WORK_EFFORT, WORK_ATTEMPT_DEADLINE_MS",
       "  Optional MCP Review env: REVIEW_ADAPTER, REVIEW_MODEL, REVIEW_EFFORT",
       "  health [--data-dir PATH]",
       "  version"

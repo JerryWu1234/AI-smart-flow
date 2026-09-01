@@ -45,7 +45,7 @@ describe("Pi runtime configuration", () => {
   it("fails a Worker Attempt before launch when the frozen hash drifts", async () => {
     const provider = new PiProvider({
       runtimeConfig: configuration,
-      environment: { API_KEY: "secret-value" }
+      environment: { WORK_API_KEY: "secret-value" }
     });
     const events = provider.start({
       attemptId: "attempt-1",

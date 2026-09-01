@@ -162,7 +162,7 @@ describe("Pi Provider", () => {
   it("probes the one-model Extension registration without a model request", async () => {
     const provider = new PiProvider({
       runtimeConfig: configuration,
-      environment: { API_KEY: "test-credential" },
+      environment: { WORK_API_KEY: "test-credential" },
       createSandbox: (): ExecutionSandboxAdapter => new FakeSandbox()
     });
     await expect(provider.probe()).resolves.toMatchObject({
@@ -180,7 +180,7 @@ describe("Pi Provider", () => {
     const sandbox = new FakeSandbox();
     const provider = new PiProvider({
       runtimeConfig: configuration,
-      environment: { API_KEY: "test-credential" },
+      environment: { WORK_API_KEY: "test-credential" },
       createSandbox: (): ExecutionSandboxAdapter => sandbox
     });
     const events = [];
@@ -209,10 +209,10 @@ describe("Pi Provider", () => {
     ]));
     expect(sandbox.lastRequest?.argv).not.toContain("--session");
     expect(sandbox.lastRequest?.environment).toMatchObject({
-      API: "openai-completions",
-      BASE_URL: "https://models.example.test/v1",
-      MODEL: "test-model",
-      API_KEY: "test-credential"
+      WORK_API: "openai-completions",
+      WORK_BASE_URL: "https://models.example.test/v1",
+      WORK_MODEL: "test-model",
+      WORK_API_KEY: "test-credential"
     });
     expect(sandbox.lastRequest?.argv.join(" ")).not.toContain("test-credential");
   });
@@ -221,7 +221,7 @@ describe("Pi Provider", () => {
     const sandbox = new FakeSandbox();
     const provider = new PiProvider({
       runtimeConfig: configuration,
-      environment: { API_KEY: "test-credential" },
+      environment: { WORK_API_KEY: "test-credential" },
       createSandbox: (): ExecutionSandboxAdapter => sandbox
     });
     const events = [];
@@ -249,7 +249,7 @@ describe("Pi Provider", () => {
     });
     const provider = new PiProvider({
       runtimeConfig: configuration,
-      environment: { API_KEY: "test-credential" },
+      environment: { WORK_API_KEY: "test-credential" },
       createSandbox: (): ExecutionSandboxAdapter => sandbox
     });
     const events = [];
@@ -271,7 +271,7 @@ describe("Pi Provider", () => {
     const sandbox = new FakeSandbox();
     const provider = new PiProvider({
       runtimeConfig: configuration,
-      environment: { API_KEY: "test-credential" },
+      environment: { WORK_API_KEY: "test-credential" },
       createSandbox: (): ExecutionSandboxAdapter => sandbox
     });
     const iterator = provider.start(input())[Symbol.asyncIterator]();

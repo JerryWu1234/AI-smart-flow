@@ -7,9 +7,9 @@ describe("SmartFlow doctor classification", () => {
     const report = await runDoctor({
       projectRoot: process.cwd(),
       environment: {
-        API: "openai-completions",
-        MODEL: "model-test",
-        API_KEY: "doctor-secret-canary"
+        WORK_API: "openai-completions",
+        WORK_MODEL: "model-test",
+        WORK_API_KEY: "doctor-secret-canary"
       }
     });
     expect(report).toMatchObject({ status: "blocking-unavailable", ready: false });
@@ -21,7 +21,7 @@ describe("SmartFlow doctor classification", () => {
       "status"
     ]);
     expect(report.capabilities[0]?.id).toBe("config");
-    expect(report.capabilities[0]?.summary).toMatch(/BASE_URL is required/u);
+    expect(report.capabilities[0]?.summary).toMatch(/WORK_BASE_URL is required/u);
     expect(JSON.stringify(report)).not.toContain("doctor-secret-canary");
   });
 
@@ -59,10 +59,10 @@ describe("SmartFlow doctor Review configuration", () => {
     const report = await runDoctor({
       projectRoot: process.cwd(),
       environment: {
-        API: "openai-completions",
-        BASE_URL: "https://models.example.test/v1",
-        MODEL: "model-test",
-        API_KEY: "doctor-secret-canary",
+        WORK_API: "openai-completions",
+        WORK_BASE_URL: "https://models.example.test/v1",
+        WORK_MODEL: "model-test",
+        WORK_API_KEY: "doctor-secret-canary",
         REVIEW_ADAPTER: "unknown-reviewer"
       }
     });

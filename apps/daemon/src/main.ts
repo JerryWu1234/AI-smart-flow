@@ -25,7 +25,7 @@ import { ProductionRuntimeComposition } from "./runtime/runtime-composition.js";
 import { resolveReviewerExecutable } from "./review/reviewer-executable.js";
 import {
   resolveWorkerLaunchConfiguration,
-  WORKER_CONFIGURATION_ENVIRONMENT_KEYS,
+  WORK_ENVIRONMENT_KEYS,
   type ResolvedWorkerLaunchConfiguration
 } from "./config/worker-config.js";
 
@@ -71,7 +71,7 @@ export async function startSmartFlowDaemon(
       : undefined;
   const workerLaunchConfiguration = options.workerLaunchConfiguration ??
     resolveWorkerLaunchConfiguration([]);
-  for (const key of WORKER_CONFIGURATION_ENVIRONMENT_KEYS) {
+  for (const key of WORK_ENVIRONMENT_KEYS) {
     Reflect.deleteProperty(process.env, key);
   }
   const providers = new ProviderRegistry();

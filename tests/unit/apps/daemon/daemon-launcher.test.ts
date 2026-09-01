@@ -57,10 +57,10 @@ describe("daemon launcher", () => {
       10_000,
       "fingerprint-b",
       {
-        API: "openai-responses",
-        BASE_URL: "https://models.example.test/v1",
-        MODEL: "second-model",
-        API_KEY: "secret-value"
+        WORK_API: "openai-responses",
+        WORK_BASE_URL: "https://models.example.test/v1",
+        WORK_MODEL: "second-model",
+        WORK_API_KEY: "secret-value"
       }
     );
 
