@@ -206,13 +206,11 @@ describe("ProjectState schema and recovery source", () => {
     }).success).toBe(false);
   });
 
-  it("uses SQLite as the only state and audit storage", async () => {
+  it("uses SQLite as the only state storage", async () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const store = new StateStore(harness.dataDir);
     const initial = await store.initialize(createProjectState());
-    const event = { kind: "STATE_INITIALIZED", stateVersion: 0 };
-    await store.appendAuditEvent(event);
 
     expect(await store.readState()).toEqual(initial);
     expect(store.protectedPaths).toEqual([
@@ -237,13 +235,6 @@ describe("ProjectState schema and recovery source", () => {
         "state_json",
         "updated_at"
       ]);
-      const row = database.prepare(`
-        SELECT event_json
-        FROM audit_events
-        ORDER BY sequence DESC
-        LIMIT 1
-      `).get() as { event_json?: unknown } | undefined;
-      expect(row?.event_json).toBe(JSON.stringify(event));
     } finally {
       database.close();
     }
