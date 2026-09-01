@@ -20,10 +20,9 @@ export {
 } from "./review-prompt.js";
 export {
   ClaudeCodeAdapter,
+  ClaudeCodeDesktopAdapter,
   CodexAdapter,
-  CodexDesktopAdapter,
-  createCodexEventState,
-  reduceCodexEventLine
+  CodexDesktopAdapter
 } from "./agents/index.js";
 export type {
   AgentAdapter,

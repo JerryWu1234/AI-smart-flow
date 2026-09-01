@@ -38,13 +38,45 @@ const legacyRequiredEnvironmentKeys = [
 ] as const;
 
 describe("Pi Worker launch configuration", () => {
-  it("requires explicit model and credential configuration", () => {
-    expect(() => resolveMcpWorkerLaunchConfiguration(["mcp"], {}))
-      .toThrow(/API is required/u);
+  it("defaults an omitted API before hashing, registration, and launch", () => {
+    const mcpWithoutApi = { ...mcpEnvironment };
+    Reflect.deleteProperty(mcpWithoutApi, "API");
+    const registrationWithoutApi = { ...canonicalEnvironment };
+    Reflect.deleteProperty(registrationWithoutApi, "API");
+
+    const resolved = resolveMcpWorkerLaunchConfiguration(["mcp"], mcpWithoutApi);
+    const explicit = resolveMcpWorkerLaunchConfiguration(["mcp"], mcpEnvironment);
+
+    expect(resolved.runtimeConfig.api).toBe("openai-responses");
+    expect(resolveWorkerRegistration(registrationWithoutApi).runtimeConfig.api)
+      .toBe("openai-responses");
+    expect(piRuntimeConfigHash(resolved.runtimeConfig))
+      .toBe(piRuntimeConfigHash(explicit.runtimeConfig));
+    expect(resolved.daemonConfigFingerprint).toBe(explicit.daemonConfigFingerprint);
+    expect(workerLaunchEnvironment({}, resolved).API).toBe("openai-responses");
+  });
+
+  it("requires explicit endpoint, model, and credential configuration", () => {
+    expect(() => resolveMcpWorkerLaunchConfiguration(["mcp"], {
+      API_KEY: "secret-value"
+    })).toThrow(/BASE_URL is required/u);
+    expect(() => resolveMcpWorkerLaunchConfiguration(["mcp"], {
+      ...mcpEnvironment,
+      MODEL: ""
+    })).toThrow(/MODEL is required/u);
     expect(() => resolveMcpWorkerLaunchConfiguration(["mcp"], {
       ...mcpEnvironment,
       API_KEY: ""
     })).toThrow(/API_KEY is required/u);
+  });
+
+  it("rejects blank and unsupported explicit APIs", () => {
+    for (const API of ["", "unknown-api"]) {
+      expect(() => resolveMcpWorkerLaunchConfiguration(["mcp"], {
+        ...mcpEnvironment,
+        API
+      })).toThrow(/API is unsupported/u);
+    }
   });
 
   it("rejects former required names without compatibility aliases", () => {
@@ -127,8 +159,10 @@ describe("Pi Worker launch configuration", () => {
   });
 
   it("rejects model flags and invalid capabilities", () => {
-    expect(() => resolveMcpWorkerLaunchConfiguration(["mcp", "--model", "gpt-test"], mcpEnvironment))
-      .toThrow(/must use API, BASE_URL, MODEL, and API_KEY environment variables/u);
+    expect(() => resolveMcpWorkerLaunchConfiguration(
+      ["mcp", "--model", "gpt-test"],
+      mcpEnvironment
+    )).toThrow(/must use BASE_URL, MODEL, and API_KEY environment variables; API is optional/u);
     expect(() => resolveMcpWorkerLaunchConfiguration(["mcp"], {
       ...mcpEnvironment,
       SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: "0"

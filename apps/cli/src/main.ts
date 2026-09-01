@@ -93,8 +93,8 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       "  doctor [--json] [--project PATH]",
       "  daemon [--data-dir PATH]",
       "  mcp [--data-dir PATH]",
-      "  Required MCP Pi env: API, BASE_URL, MODEL, API_KEY",
-      "  Optional MCP Pi env: SMARTFLOW_PI_CONTEXT_WINDOW, SMARTFLOW_PI_MAX_TOKENS, EFFORT, SMARTFLOW_PI_ATTEMPT_DEADLINE_MS",
+      "  Required MCP Pi env: BASE_URL, MODEL, API_KEY",
+      "  Optional MCP Pi env: API, SMARTFLOW_PI_CONTEXT_WINDOW, SMARTFLOW_PI_MAX_TOKENS, EFFORT, SMARTFLOW_PI_ATTEMPT_DEADLINE_MS",
       "  Optional MCP Review env: REVIEW_ADAPTER, REVIEW_MODEL, REVIEW_EFFORT",
       "  health [--data-dir PATH]",
       "  version"

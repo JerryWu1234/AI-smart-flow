@@ -5,6 +5,7 @@ import { MetricsRegistry, StructuredLogger } from "@smartflow/observability";
 import type { WorkspaceApplyAdapter } from "@smartflow/publish";
 import {
   ClaudeCodeAdapter,
+  ClaudeCodeDesktopAdapter,
   CodexAdapter,
   CodexDesktopAdapter,
   type AgentAdapter
@@ -31,6 +32,8 @@ import {
 const REVIEW_ADAPTER_FACTORIES = {
   "claude-code": (executable: string | undefined): AgentAdapter =>
     new ClaudeCodeAdapter(executable === undefined ? {} : { executable }),
+  "claude-code-desktop": (executable: string | undefined): AgentAdapter =>
+    new ClaudeCodeDesktopAdapter(executable === undefined ? {} : { executable }),
   codex: (executable: string | undefined): AgentAdapter =>
     new CodexAdapter(executable === undefined ? {} : { executable }),
   "codex-desktop": (executable: string | undefined): AgentAdapter =>

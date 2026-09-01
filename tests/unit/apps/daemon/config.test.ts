@@ -8,16 +8,37 @@ import {
 
 describe("SmartFlow daemon configuration", () => {
   it("uses Host selection when REVIEW_ADAPTER is omitted", () => {
-    expect(REVIEW_STRATEGIES).toEqual(["codex", "codex-desktop", "claude-code"]);
+    expect(REVIEW_STRATEGIES).toEqual([
+      "codex",
+      "codex-desktop",
+      "claude-code",
+      "claude-code-desktop"
+    ]);
     const config = resolveSmartFlowConfig({});
     expect(config.review).toEqual({});
     expect(resolveReviewStrategy(config.review.strategy, "codex-desktop"))
       .toBe("codex-desktop");
     expect(resolveReviewStrategy(config.review.strategy, "claude-code"))
       .toBe("claude-code");
+    expect(resolveReviewStrategy(config.review.strategy, "claude-code-desktop"))
+      .toBe("claude-code-desktop");
     expect(resolveReviewStrategy(config.review.strategy, "CODEX-DESKTOP")).toBe("codex");
     expect(resolveReviewStrategy(config.review.strategy, " codex-desktop ")).toBe("codex");
     expect(resolveReviewStrategy(config.review.strategy, "kiro")).toBe("codex");
+  });
+
+  it("selects the Desktop compatibility strategy only by its registered name", () => {
+    expect(resolveReviewStrategy(undefined, "claude-code-desktop"))
+      .toBe("claude-code-desktop");
+    for (const clientName of [
+      "claude-ai",
+      "Anthropic",
+      "Anthropic/claude-desktop"
+    ]) {
+      expect(resolveReviewStrategy(undefined, clientName)).toBe("codex");
+    }
+    expect(resolveReviewStrategy("claude-code-desktop", "claude-ai"))
+      .toBe("claude-code-desktop");
   });
 
   it("accepts every registered REVIEW_ADAPTER", () => {
@@ -41,7 +62,7 @@ describe("SmartFlow daemon configuration", () => {
   it("rejects an unsupported REVIEW_ADAPTER without falling back", () => {
     expect(() => resolveSmartFlowConfig({ REVIEW_ADAPTER: "missing-agent" }))
       .toThrow(
-        "REVIEW_ADAPTER_INVALID: unsupported adapter \"missing-agent\"; expected codex, codex-desktop, or claude-code"
+        "REVIEW_ADAPTER_INVALID: unsupported adapter \"missing-agent\"; expected codex, codex-desktop, claude-code, or claude-code-desktop"
       );
   });
 

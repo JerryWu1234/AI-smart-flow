@@ -1,4 +1,9 @@
-export const REVIEW_STRATEGIES = ["codex", "codex-desktop", "claude-code"] as const;
+export const REVIEW_STRATEGIES = [
+  "codex",
+  "codex-desktop",
+  "claude-code",
+  "claude-code-desktop"
+] as const;
 export type ReviewStrategy = (typeof REVIEW_STRATEGIES)[number];
 
 export interface SmartFlowConfig {
@@ -44,7 +49,7 @@ export function resolveSmartFlowConfig(
   const adapter = environmentValue(environment, "REVIEW_ADAPTER");
   if (adapter !== undefined && !isReviewStrategy(adapter)) {
     throw new Error(
-      `REVIEW_ADAPTER_INVALID: unsupported adapter "${adapter}"; expected codex, codex-desktop, or claude-code`
+      `REVIEW_ADAPTER_INVALID: unsupported adapter "${adapter}"; expected codex, codex-desktop, claude-code, or claude-code-desktop`
     );
   }
   const model = environmentValue(environment, "REVIEW_MODEL");

@@ -37,7 +37,7 @@ afterEach(async () => {
 });
 
 describe("Reviewer executable resolution", () => {
-  it("maps both Codex adapters to codex and Claude Code to claude", async () => {
+  it("maps both Codex adapters to codex and both Claude adapters to claude", async () => {
     const directory = await temporaryDirectory();
     const codex = await writeExecutable(directory, "codex");
     const claude = await writeExecutable(directory, "claude");
@@ -46,6 +46,7 @@ describe("Reviewer executable resolution", () => {
     await expect(resolveReviewerExecutable("codex", environment)).resolves.toBe(codex);
     await expect(resolveReviewerExecutable("codex-desktop", environment)).resolves.toBe(codex);
     await expect(resolveReviewerExecutable("claude-code", environment)).resolves.toBe(claude);
+    await expect(resolveReviewerExecutable("claude-code-desktop", environment)).resolves.toBe(claude);
   });
 
   it("does not search the project directory when PATH is unset", async () => {

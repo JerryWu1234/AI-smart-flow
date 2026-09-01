@@ -6,6 +6,7 @@ import type { ReviewStrategy } from "../config/config.js";
 
 const REVIEWER_EXECUTABLES = {
   "claude-code": "claude",
+  "claude-code-desktop": "claude",
   codex: "codex",
   "codex-desktop": "codex"
 } as const satisfies Record<ReviewStrategy, string>;
