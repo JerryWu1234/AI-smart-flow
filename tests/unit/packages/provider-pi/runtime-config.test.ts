@@ -49,7 +49,6 @@ describe("Pi runtime configuration", () => {
     });
     const events = provider.start({
       attemptId: "attempt-1",
-      jobId: "job-1",
       generation: 0,
       workspaceDir: "/workspace",
       prompt: "work",

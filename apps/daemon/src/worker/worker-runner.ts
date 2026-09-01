@@ -350,7 +350,6 @@ export class WorkerRunner {
         : await this.restoreResumeSession(runtimeRoot, resumeSession);
       const providerInput: WorkerStartInput = {
         attemptId,
-        jobId: request.jobId,
         generation,
         workspaceDir: prepared.workspaceRoot,
         prompt: request.prompt,
