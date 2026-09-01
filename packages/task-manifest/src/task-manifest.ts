@@ -70,17 +70,11 @@ export function compileTaskManifest(
 
   const tasks = enabledTasks.map((task) => toManifestTask(task));
   const enabledTaskIds = tasks.map((task) => task.id);
-  const tasksHash = hashCanonical({
-    enabledTaskIds,
-    allowNoChange,
-    tasks
-  });
   const frozenProviderRuntimeConfigHash = providerRuntimeConfigHash(options.providerRuntimeConfig);
   const sourceHash = sha256Bytes(document.sourceBytes);
   const manifest = taskManifestSchema.parse({
     projectId: options.projectId,
     jobId: options.jobId,
-    runId: options.jobId,
     canonicalTaskPath: options.canonicalTaskPath,
     taskSourceArtifact: {
       relativePath: `runs/${options.jobId}/task-source.md`,
@@ -88,8 +82,6 @@ export function compileTaskManifest(
       size: document.sourceBytes.byteLength
     },
     sourceHash,
-    tasksSha256: sourceHash,
-    tasksHash,
     allowNoChange,
     providerRuntimeConfigHash: frozenProviderRuntimeConfigHash,
     enabledTaskIds,
