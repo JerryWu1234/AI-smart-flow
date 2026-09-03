@@ -463,10 +463,10 @@ D01 或 D02 会改变严格的 state v6 文档形状。推荐：
 以下内容不与 state v7 清理强制绑定：
 
 - `CaptureGitSnapshotInput.activeWorktreeRoot` 当前只触发一次 `realpath()`，输出仍固定为 `"."`；
-- TaskManifest 中 `runId === jobId`；
-- `tasksSha256`、`sourceHash` 与 `taskSourceArtifact.sha256` 的重复身份。
+- ~~TaskManifest 中 `runId === jobId`~~ 已完成，连同同样无读取方的 `tasksHash` 一并删除；
+- ~~`tasksSha256`、`sourceHash` 与 `taskSourceArtifact.sha256` 的重复身份~~ `tasksSha256` 已删除；`sourceHash` 与 `taskSourceArtifact.sha256` 仍是同一值的两份副本，但两处都有生产读取方，留待后续单独收敛。
 
-如果删除 snapshot 输出字段或 TaskManifest 字段，必须分别提升对应 artifact schemaVersion。不要为了顺手减少字段而扩大本轮 state 清理范围。
+应用级 `schemaVersion` 已随 `remove-application-schema-versions` 整体移除，删除 artifact 字段不再有版本号可提升，按同一套 latest-only 策略处理：不迁移、不双读，发布前清理本地 Daemon 数据。仍然不要为了顺手减少字段而扩大 state 清理范围。
 
 ### Batch D 验收
 

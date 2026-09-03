@@ -16,7 +16,6 @@ export const taskManifestSchema = z
   .object({
     projectId: z.string().min(1),
     jobId: z.string().min(1),
-    runId: z.string().min(1),
     canonicalTaskPath: z.string().min(1),
     taskSourceArtifact: z.object({
       relativePath: z.string().min(1),
@@ -24,8 +23,6 @@ export const taskManifestSchema = z
       size: z.number().int().nonnegative()
     }).strict(),
     sourceHash: z.string().regex(/^[a-f0-9]{64}$/u),
-    tasksSha256: z.string().regex(/^[a-f0-9]{64}$/u),
-    tasksHash: z.string().regex(/^[a-f0-9]{64}$/u),
     allowNoChange: z.boolean(),
     providerRuntimeConfigHash: z.string().regex(/^[a-f0-9]{64}$/u),
     enabledTaskIds: z.array(z.string().regex(/^T\d{3,}$/u)),
@@ -40,13 +37,6 @@ export const taskManifestSchema = z
   })
   .strict()
   .superRefine((manifest, context) => {
-    if (manifest.runId !== manifest.jobId) {
-      context.addIssue({
-        code: "custom",
-        path: ["runId"],
-        message: "runId must equal jobId"
-      });
-    }
     if (manifest.taskSourceArtifact.relativePath !== `runs/${manifest.jobId}/task-source.md`) {
       context.addIssue({
         code: "custom",
@@ -54,10 +44,7 @@ export const taskManifestSchema = z
         message: "task source Artifact path must be bound to jobId"
       });
     }
-    if (
-      manifest.taskSourceArtifact.sha256 !== manifest.sourceHash ||
-      manifest.tasksSha256 !== manifest.sourceHash
-    ) {
+    if (manifest.taskSourceArtifact.sha256 !== manifest.sourceHash) {
       context.addIssue({
         code: "custom",
         path: ["taskSourceArtifact"],
