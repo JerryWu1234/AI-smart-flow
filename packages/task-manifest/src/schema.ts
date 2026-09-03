@@ -6,7 +6,6 @@ const manifestTaskSchema = z
   .object({
     id: z.string().regex(/^T\d{3,}$/u),
     module: moduleIdSchema,
-    parallel: z.boolean(),
     description: z.string().min(1),
     filePaths: z.array(z.string().min(1)).min(1),
     acceptanceCriteria: z.array(z.string().min(1)).min(1)

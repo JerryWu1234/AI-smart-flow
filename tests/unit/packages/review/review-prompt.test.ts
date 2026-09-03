@@ -57,7 +57,6 @@ function manifest(): TaskManifest {
     tasks: [{
       id: "T001",
       module: "M01",
-      parallel: false,
       description: "Implement deterministic review output",
       filePaths: ["packages/review/src/review-prompt.ts"],
       acceptanceCriteria: [
