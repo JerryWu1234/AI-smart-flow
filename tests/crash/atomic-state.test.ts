@@ -202,13 +202,16 @@ async function waitForLine(
 }
 
 describe("atomic state replacement crash points", () => {
-  for (const checkpoint of [
-    "AFTER_TEMP_WRITE",
-    "AFTER_FILE_FSYNC",
-    "AFTER_RENAME",
-    "AFTER_DIRECTORY_FSYNC"
+  // writeState fires AFTER_TEMP_WRITE and AFTER_FILE_FSYNC back to back before
+  // the SQLite transaction, then AFTER_RENAME and AFTER_DIRECTORY_FSYNC back to
+  // back after it. Each pair injects at the same instant, so the only boundary
+  // worth crashing at is the transaction itself. These two checkpoints bracket
+  // it; the other two are the same two scenarios under different names.
+  for (const [checkpoint, committed] of [
+    ["AFTER_FILE_FSYNC", false],
+    ["AFTER_RENAME", true]
   ] as const) {
-    it(`recovers only the complete old or new state after ${checkpoint}`, async () => {
+    it(`recovers the ${committed ? "new" : "old"} state after a crash at ${checkpoint}`, async () => {
       const harness = await createRuntimeHarness();
       activeHarnesses.push(harness);
       const store = new StateStore(resolve(harness.dataDir, checkpoint));
@@ -226,10 +229,7 @@ describe("atomic state replacement crash points", () => {
         })
       ).rejects.toThrow(/simulated crash/u);
       const recovered = await store.readState();
-      const expected = checkpoint === "AFTER_TEMP_WRITE" || checkpoint === "AFTER_FILE_FSYNC"
-        ? oldState
-        : newState;
-      expect(recovered).toEqual(expected);
+      expect(recovered).toEqual(committed ? newState : oldState);
     });
   }
 
