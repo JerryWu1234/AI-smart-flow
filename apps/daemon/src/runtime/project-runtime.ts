@@ -33,10 +33,7 @@ import {
   type ProjectState,
   type RunRecord
 } from "@smartflow/state-store";
-import {
-  compileTaskManifest,
-  sha256Bytes
-} from "@smartflow/task-manifest";
+import { compileTaskManifest } from "@smartflow/task-manifest";
 import { cleanupGitRunTemporaryState } from "@smartflow/workspace";
 
 import { observeApprovedSource } from "../worker/approved-source.js";
@@ -516,15 +513,15 @@ export class ProjectRuntime {
     const providerRuntimeConfig = this.resolveProviderRuntimeConfig(providerRuntimeConfigHash);
     const reviewAdapterId = this.options.resolveReviewAdapterId?.(clientName) ?? "codex";
     const canonicalRoot = await realpath(input.projectRoot);
-    const { canonicalPath: canonicalTasksPath, sourceBytes } = await readProjectTasksFile(
-      canonicalRoot,
-      input.tasksPath
-    );
-    if (sha256Bytes(sourceBytes) !== input.approvedSourceHash.replace(/^sha256:/u, "")) {
-      throw new ProjectRuntimeError("APPROVED_SOURCE_DRIFT", "tasks source differs from the approved hash");
-    }
     const projectId = projectIdForRoot(canonicalRoot);
     const store = this.store(projectId);
+    let initialTaskSource: Awaited<ReturnType<typeof readProjectTasksFile>> | undefined;
+    try {
+      const stateDatabase = await open(store.databasePath, constants.O_RDONLY);
+      await stateDatabase.close();
+    } catch {
+      initialTaskSource = await readProjectTasksFile(canonicalRoot, input.tasksPath);
+    }
     await store.initialize({
       projectId,
       canonicalProjectRoot: canonicalRoot,
@@ -545,6 +542,8 @@ export class ProjectRuntime {
         reviewAdapterId
       },
       async (state, nextStateVersion, fence) => {
+        const { canonicalPath: canonicalTasksPath, sourceBytes } = initialTaskSource ??
+          await readProjectTasksFile(canonicalRoot, input.tasksPath);
         const activeJobId = state.activeRunsByTaskPath[canonicalTasksPath];
         if (activeJobId !== undefined) {
           throw new ProjectRuntimeError("TASK_ALREADY_ACTIVE", `Task file already has active run ${activeJobId}`);

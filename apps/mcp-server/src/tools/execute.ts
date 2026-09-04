@@ -1,5 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import {
@@ -18,7 +18,7 @@ export interface SmartFlowMcpSession {
 }
 
 interface PendingExecute {
-  sourceHash: string;
+  sourceVersion: string;
   requestId: string;
   inFlight?: Promise<ExecuteOutput>;
   receipt?: ExecuteOutput;
@@ -32,13 +32,22 @@ export function createExecuteHandler(
 
   return async (input: unknown): Promise<ExecuteOutput> => {
     executeInputSchema.parse(input);
-    const sourceBytes = await readFile(resolve(session.projectRoot, session.tasksPath));
-    const sourceHash = createHash("sha256").update(sourceBytes).digest("hex");
+    const source = await stat(
+      resolve(session.projectRoot, session.tasksPath),
+      { bigint: true }
+    );
+    const sourceVersion = [
+      source.dev,
+      source.ino,
+      source.size,
+      source.mtimeNs,
+      source.ctimeNs
+    ].join(":");
 
     let current = pending;
-    if (current === undefined || current.sourceHash !== sourceHash) {
+    if (current === undefined || current.sourceVersion !== sourceVersion) {
       current = {
-        sourceHash,
+        sourceVersion,
         requestId: `execute:${session.sessionId}:${randomUUID()}`
       };
       pending = current;
@@ -49,7 +58,6 @@ export function createExecuteHandler(
     const request = daemonExecuteInputSchema.parse({
       projectRoot: session.projectRoot,
       tasksPath: session.tasksPath,
-      approvedSourceHash: sourceHash,
       requestId: current.requestId
     });
     const inFlight = gateway.call("smartflow_execute", request)

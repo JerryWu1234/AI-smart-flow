@@ -19,7 +19,7 @@ export function createSmartFlowMcpInstructions(tasksPath: string): string {
     `For this MCP session, normalize chat context, one source file, or multiple source files into exactly one canonical SmartFlow file at ${tasksPath}. This path is fixed for the session. Prepare a new batch only after the previous Job is done, then replace the file with the new canonical tasks.`,
     "Generate canonical SmartFlow syntax: use ## M01 module headings; - [ ] T001 tasks with unique IDs; only [M01]-style module labels; at least one backtick-wrapped target path per task; the exact separator ' — 验收：' before acceptance criteria; and at least one incomplete task.",
     "After writing the canonical file, re-read it from disk, show the user its project-relative path and complete contents, and explicitly ask whether to execute those tasks. The user's initial implementation request is permission to prepare the draft, not permission to execute it. Do not call smartflow_execute until the user explicitly confirms the displayed file.",
-    "After explicit confirmation, call smartflow_execute with an empty object. Do not pass projectRoot, tasksPath, approvedSourceHash, requestId, expectedStateVersion, or a business Revision; the MCP session owns the project root, canonical path, source hash, and execute idempotency identity.",
+    "After explicit confirmation, call smartflow_execute with an empty object. Do not pass projectRoot, tasksPath, requestId, expectedStateVersion, or a business Revision; the MCP session owns the project root, canonical path, file-version tracking, and execute idempotency identity.",
     "After smartflow_execute, keep one stable hostTurnId for the whole composite Host flow, then repeatedly call smartflow_review_turn with a new requestId plus projectId, jobId, and that hostTurnId until it returns DONE. Do not track or invent internal run epochs, stateVersion, Review attempt identity, Provider session identity, or Reviewer session identity; the Daemon owns all of it.",
     "smartflow_review_turn returns exactly one of NOT_READY, USER_INPUT_REQUIRED, or DONE. On NOT_READY, sleep for retryAfterMs and poll again with a new requestId.",
     "Review is performed internally by the Daemon. Keep polling until DONE, and read the latest per-Task completion and issues from result.review when present.",
@@ -30,7 +30,7 @@ export function createSmartFlowMcpInstructions(tasksPath: string): string {
 }
 
 export function createSmartFlowExecuteDescription(tasksPath: string): string {
-  return `Execute the canonical SmartFlow task file at ${tasksPath} after the Host re-read it from disk, showed it in full, and received explicit user confirmation. This tool does not plan or generate tasks and accepts no arguments. The MCP session supplies the project root, path, source hash, and execute idempotency identity. Continue only with smartflow_review_turn until it returns DONE or requires user input.`;
+  return `Execute the canonical SmartFlow task file at ${tasksPath} after the Host re-read it from disk, showed it in full, and received explicit user confirmation. This tool does not plan or generate tasks and accepts no arguments. The MCP session supplies the project root, path, file-version tracking, and execute idempotency identity. The Daemon reads and snapshots the task content once when it creates the Job. Continue only with smartflow_review_turn until it returns DONE or requires user input.`;
 }
 
 function toolResult(value: unknown): { content: Array<{ type: "text"; text: string }> } {

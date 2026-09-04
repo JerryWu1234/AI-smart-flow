@@ -43,7 +43,7 @@ describe("SmartFlow MCP Host policy", () => {
     expect(instructions).toContain("The user's initial implementation request");
     expect(instructions).toContain("exact separator ' — 验收：'");
     expect(instructions).toContain(
-      "Do not pass projectRoot, tasksPath, approvedSourceHash, requestId"
+      "Do not pass projectRoot, tasksPath, requestId"
     );
   });
 
@@ -54,7 +54,8 @@ describe("SmartFlow MCP Host policy", () => {
     expect(description).toContain("explicit user confirmation");
     expect(description).toContain("accepts no arguments");
     expect(description).toContain(
-      "MCP session supplies the project root, path, source hash, and execute idempotency identity"
+      "MCP session supplies the project root, path, file-version tracking, and execute idempotency identity"
     );
+    expect(description).toContain("Daemon reads and snapshots the task content once");
   });
 });

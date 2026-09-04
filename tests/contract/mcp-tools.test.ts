@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -83,8 +82,8 @@ describe("SmartFlow MCP handlers", () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "smartflow-mcp-tools-"));
     const tasksPath = ".smartflow/tasks/session-test/tasks.md";
     const absoluteTasksPath = join(projectRoot, tasksPath);
+    const replacementTasksPath = `${absoluteTasksPath}.replacement`;
     const firstSource = "# Tasks\n\nfirst batch\n";
-    const secondSource = "# Tasks\n\nsecond batch\n";
     await mkdir(dirname(absoluteTasksPath), { recursive: true });
     await writeFile(absoluteTasksPath, firstSource, "utf8");
     const gateway = new FakeDaemonGateway();
@@ -109,19 +108,19 @@ describe("SmartFlow MCP handlers", () => {
       await expect(handlers.smartflow_execute({})).resolves.toEqual(first);
       expect(gateway.executeRequests).toHaveLength(1);
       const firstRequest = gateway.executeRequests[0];
-      expect(firstRequest).toMatchObject({
-        projectRoot,
-        tasksPath,
-        approvedSourceHash: createHash("sha256").update(firstSource).digest("hex")
-      });
+      expect(Object.keys(firstRequest ?? {}).sort()).toEqual([
+        "projectRoot",
+        "requestId",
+        "tasksPath"
+      ]);
+      expect(firstRequest).toMatchObject({ projectRoot, tasksPath });
       expect(firstRequest?.requestId).toMatch(/^execute:session-test:/u);
 
-      await writeFile(absoluteTasksPath, secondSource, "utf8");
+      await writeFile(replacementTasksPath, firstSource, "utf8");
+      await rename(replacementTasksPath, absoluteTasksPath);
       await handlers.smartflow_execute({});
       expect(gateway.executeRequests).toHaveLength(2);
-      expect(gateway.executeRequests[1]?.approvedSourceHash).toBe(
-        createHash("sha256").update(secondSource).digest("hex")
-      );
+      expect(gateway.executeRequests[1]).toMatchObject({ projectRoot, tasksPath });
       expect(gateway.executeRequests[1]?.requestId).not.toBe(firstRequest?.requestId);
 
       await expect(
@@ -132,7 +131,7 @@ describe("SmartFlow MCP handlers", () => {
     }
   });
 
-  it("retries unchanged bytes with the same identity after an invalid response", async () => {
+  it("retries an unchanged file version with the same identity after an invalid response", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "smartflow-mcp-retry-"));
     const tasksPath = "tasks.md";
     await writeFile(join(projectRoot, tasksPath), "# Tasks\n\nretry batch\n", "utf8");

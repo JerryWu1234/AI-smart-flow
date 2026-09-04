@@ -160,7 +160,7 @@ describe("SmartFlow protocol schemas", () => {
     const removedManifestApprovalAnswer = {
       action: "approve_new_manifest_revision" as const,
       tasksPath: "tasks.md",
-      approvedSourceHash: digest
+      expectedStateVersion: 0
     };
     expect(reviewTurnOutputSchema.safeParse({
       ...repairPause,
@@ -424,7 +424,7 @@ describe("SmartFlow protocol schemas", () => {
     for (const extra of [
       { projectRoot: "/tmp/project" },
       { tasksPath: "tasks.md" },
-      { approvedSourceHash: digest },
+      { unexpected: true },
       { requestId: "req-1" },
       { expectedStateVersion: 0 }
     ]) {
@@ -432,26 +432,26 @@ describe("SmartFlow protocol schemas", () => {
     }
   });
 
-  it("requires internal execute approval to bind the source hash", () => {
-    expect(() =>
-      daemonExecuteInputSchema.parse({
-        projectRoot: "/tmp/project",
-        tasksPath: "tasks.md",
-        requestId: "req-1"
-      })
-    ).toThrow();
-    expect(daemonExecuteInputSchema.safeParse({
+  it("requires internal execute routing and idempotency fields", () => {
+    const request = {
       projectRoot: "/tmp/project",
       tasksPath: "tasks.md",
-      approvedSourceHash: digest,
       requestId: "req-1"
-    }).success).toBe(true);
+    };
+    expect(daemonExecuteInputSchema.parse(request)).toEqual(request);
+    expect(daemonExecuteInputSchema.safeParse({
+      projectRoot: request.projectRoot,
+      tasksPath: request.tasksPath
+    }).success).toBe(false);
+    expect(daemonExecuteInputSchema.safeParse({
+      ...request,
+      unexpected: true
+    }).success).toBe(false);
   });
 
   it("requires internal tasksPath to be relative and free of parent traversal", () => {
     const base = {
       projectRoot: "/tmp/project",
-      approvedSourceHash: digest,
       requestId: "req-path"
     };
     for (const tasksPath of [

@@ -50,7 +50,6 @@ export const daemonExecuteInputSchema = z
   .object({
     projectRoot: z.string().min(1),
     tasksPath: tasksPathSchema,
-    approvedSourceHash: sha256Schema,
     requestId: identifierSchema
   })
   .strict();

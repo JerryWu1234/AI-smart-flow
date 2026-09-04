@@ -214,7 +214,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       const request = {
         projectRoot: harness.projectDir,
         tasksPath: "tasks.md",
-        approvedSourceHash: createHash("sha256").update(tasksSource).digest("hex"),
         requestId: "real-execute-1"
       };
       const execute = await firstClient.call("smartflow_execute", request) as {
@@ -224,6 +223,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         phase: RunPhase;
       };
       expect(execute).toMatchObject({ stateVersion: 1, phase: "PREPARING" });
+      await rm(resolve(harness.projectDir, "tasks.md"));
       expect(await firstClient.call("smartflow_execute", request)).toEqual(execute);
       const deadline = Date.now() + 2_000;
       let status: unknown;
@@ -247,6 +247,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       try {
         const restartedClient = await LocalIpcClient.connect(restartedServer.endpoint);
         try {
+          expect(await restartedClient.call("smartflow_execute", request)).toEqual(execute);
           expect(await restartedClient.call("smartflow_result", {
             projectId: execute.projectId,
             jobId: execute.jobId
@@ -294,7 +295,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     const firstRequest = {
       projectRoot: harness.projectDir,
       tasksPath: "tasks.md",
-      approvedSourceHash: createHash("sha256").update(tasksSource).digest("hex"),
       requestId: "active-project-first"
     };
     try {
@@ -350,13 +350,11 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       const first = await client.call("smartflow_execute", {
         projectRoot: harness.projectDir,
         tasksPath: "tasks-a.md",
-        approvedSourceHash: createHash("sha256").update(firstSource).digest("hex"),
         requestId: "multi-active-first"
       }) as { projectId: string; jobId: string };
       const second = await client.call("smartflow_execute", {
         projectRoot: harness.projectDir,
         tasksPath: "tasks-b.md",
-        approvedSourceHash: createHash("sha256").update(secondSource).digest("hex"),
         requestId: "multi-active-second"
       }) as { projectId: string; jobId: string };
       await bothStarted;
@@ -396,7 +394,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const tasksSource = createTasksSource();
-    const approvedSourceHash = createHash("sha256").update(tasksSource).digest("hex");
     await writeFile(resolve(harness.projectDir, "tasks.md"), tasksSource, "utf8");
     await mkdir(resolve(harness.projectDir, "task-directory"));
     const outsideTasks = resolve(harness.dataDir, "outside-tasks.md");
@@ -433,7 +430,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       payload: {
         projectRoot: harness.projectDir,
         tasksPath,
-        approvedSourceHash,
         requestId
       }
     });
@@ -492,7 +488,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         jobId: "job-1",
         resumeAction: "approve_new_manifest_revision",
         tasksPath: "tasks.md",
-        approvedSourceHash: "0".repeat(64),
         approval: { kind: "USER", parentRevision: null, authorizedCriterionIds: [] }
       }
     })).rejects.toMatchObject({ name: "ZodError" });
@@ -523,7 +518,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       payload: {
         projectRoot: harness.projectDir,
         tasksPath: "tasks.md",
-        approvedSourceHash: createHash("sha256").update(tasksSource).digest("hex"),
         requestId: "execute-late-failure"
       }
     }) as { projectId: string; jobId: string };
@@ -1205,7 +1199,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         jobId: "job-1",
         resumeAction: "retry_cancel",
         tasksPath: "tasks.md",
-        approvedSourceHash: "0".repeat(64),
         approval: { kind: "USER", parentRevision: null, authorizedCriterionIds: [] }
       }
     })).rejects.toMatchObject({ name: "ZodError" });
