@@ -544,7 +544,6 @@ export class ProjectRuntime {
         ...(providerRuntimeConfigHash === undefined ? {} : { providerRuntimeConfigHash }),
         reviewAdapterId
       },
-      input.expectedStateVersion,
       async (state, nextStateVersion, fence) => {
         const activeJobId = state.activeRunsByTaskPath[canonicalTasksPath];
         if (activeJobId !== undefined) {
@@ -664,7 +663,6 @@ export class ProjectRuntime {
       store,
       input.requestId,
       mutationPayload,
-      input.expectedStateVersion,
       async (state, nextStateVersion) => {
         const run = state.runs[input.jobId];
         if (run === undefined) {
@@ -817,7 +815,6 @@ export class ProjectRuntime {
       store,
       input.requestId,
       input,
-      input.expectedStateVersion,
       (state, nextStateVersion) => {
         const run = state.runs[input.jobId];
         if (run === undefined) throw new ProjectRuntimeError("RUN_NOT_FOUND", input.jobId);
@@ -1099,7 +1096,6 @@ export class ProjectRuntime {
     store: StateStore,
     requestId: string,
     payload: unknown,
-    expectedStateVersion: number | undefined,
     build: (
       state: ProjectState,
       nextStateVersion: number,
@@ -1114,7 +1110,6 @@ export class ProjectRuntime {
       {
         requestId,
         payload,
-        ...(expectedStateVersion === undefined ? {} : { expectedStateVersion }),
         ...(jobId === undefined ? {} : { expectedJobId: jobId })
       },
       async (state, context) => build(state, context.nextStateVersion, context.fence)

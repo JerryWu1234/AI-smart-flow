@@ -75,8 +75,7 @@ describe("Provider configuration binding", () => {
         projectRoot: harness.projectDir,
         tasksPath: "tasks.md",
         approvedSourceHash,
-        requestId,
-        expectedStateVersion: 0
+        requestId
       }
     }) as Promise<{ projectId: string; jobId: string }>;
 

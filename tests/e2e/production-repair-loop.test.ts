@@ -804,8 +804,7 @@ describe("production daemon Review repair loop", () => {
         requestId: "cancel-running-review",
         projectId: execute.projectId,
         jobId: execute.jobId,
-        reason: "user canceled daemon review",
-        expectedStateVersion: reviewing.stateVersion
+        reason: "user canceled daemon review"
       }
     })).resolves.toMatchObject({ phase: "CANCELING" });
 

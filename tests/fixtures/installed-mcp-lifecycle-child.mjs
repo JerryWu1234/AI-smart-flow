@@ -68,21 +68,11 @@ async function executeAndCancelSecondary(client, primaryScope) {
   if (secondScope.jobId === primaryScope.jobId) {
     throw new Error("Secondary execute reused the primary job");
   }
-  let secondCancel;
-  for (let attempt = 0; attempt < 5 && secondCancel === undefined; attempt += 1) {
-    const secondStatus = await callMcp(client, "smartflow_status", secondScope);
-    try {
-      secondCancel = await callMcp(client, "smartflow_cancel", {
-        ...secondScope,
-        expectedStateVersion: Number(secondStatus.stateVersion),
-        requestId: `cancel-secondary-${randomUUID()}`,
-        reason: "installed multi-run isolation check complete"
-      });
-    } catch (error) {
-      if (attempt === 4) throw error;
-    }
-  }
-  if (secondCancel === undefined) throw new Error("Secondary cancel was not accepted");
+  const secondCancel = await callMcp(client, "smartflow_cancel", {
+    ...secondScope,
+    requestId: `cancel-secondary-${randomUUID()}`,
+    reason: "installed multi-run isolation check complete"
+  });
   const secondCanceled = await waitForPhase(
     client,
     secondScope,
@@ -123,8 +113,7 @@ try {
     projectRoot,
     tasksPath: TASKS_PATH,
     approvedSourceHash,
-    requestId: `execute-approved-${randomUUID()}`,
-    expectedStateVersion: 0
+    requestId: `execute-approved-${randomUUID()}`
   });
   const scope = {
     projectId: asString(execute.projectId, "smartflow_execute projectId"),

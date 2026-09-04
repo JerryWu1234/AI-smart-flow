@@ -336,8 +336,7 @@ Repair attempt 继续复用同一 Job 的 result snapshot 和 PI session；由�
   projectRoot,
   tasksPath,
   approvedSourceHash,
-  requestId,
-  expectedStateVersion?
+  requestId
 }
 ```
 
@@ -347,7 +346,6 @@ Repair attempt 继续复用同一 Job 的 result snapshot 和 PI session；由�
 - `tasksPath`：当前请求唯一 canonical 文件的项目相对路径；
 - `approvedSourceHash`：用户已确认文件精确字节的 SHA-256；
 - `requestId`：当前新 execute 请求的唯一幂等身份，同时用于隔离任务目录；
-- `expectedStateVersion`：现有项目状态 CAS，与 Revision 无关。
 
 不新增：
 

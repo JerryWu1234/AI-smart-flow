@@ -187,13 +187,17 @@ describe("SmartFlow protocol schemas", () => {
     const resumeInput = {
       requestId: "resume-request-1",
       projectId: "project-1",
-      jobId: "job-1",
-      expectedStateVersion: 3
+      jobId: "job-1"
     };
     expect(resumeInputSchema.safeParse({
       ...resumeInput,
       resumeAction: "cancel"
     }).success).toBe(true);
+    expect(resumeInputSchema.safeParse({
+      ...resumeInput,
+      expectedStateVersion: 3,
+      resumeAction: "cancel"
+    }).success).toBe(false);
     expect(resumeInputSchema.safeParse({
       ...resumeInput,
       expectedRevision: 1,
