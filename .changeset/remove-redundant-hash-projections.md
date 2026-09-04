@@ -2,6 +2,6 @@
 "@smartflow/cli": patch
 ---
 
-Remove unread and duplicate Hash projections from compiled manifests, approved-source and manual-publish recovery metadata, repair continuations, and review action preparation.
+Remove duplicate task-source and task-manifest hash fields from repair continuations, omit the redundant confirmation request hash from manual-publish mutation payloads, and reuse the verified task-source `ArtifactRef.sha256` during review preparation instead of hashing the bytes twice.
 
-Artifact integrity remains bound to the existing task-source and task-manifest `ArtifactRef` SHA values. Manual publish confirmation keeps its stable request ID, and review preparation still verifies task-source bytes before reusing the verified Artifact SHA.
+Artifact reads still verify integrity against `ArtifactRef.sha256`, repair continuation identity remains bound by its referenced run and source attempt, and manual publish confirmation keeps its stable hash-derived request ID.

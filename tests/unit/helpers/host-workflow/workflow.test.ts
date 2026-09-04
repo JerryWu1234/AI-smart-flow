@@ -164,9 +164,6 @@ describe("executeApprovedWorkflow", () => {
         sha256: digest,
         size: 10
       },
-      sourceHash: digest,
-      baseTaskSourceHash: digest,
-      baseTaskManifestHash: digest,
       suggestedTasksPath: "tasks.md",
       appendText: "\n- [ ] T002 repair",
       addedTaskLines: ["- [ ] T002 repair"],

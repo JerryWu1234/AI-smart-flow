@@ -37,7 +37,7 @@ describe("TaskManifest compiler", () => {
     expect(JSON.parse(artifactText(first))).toEqual(first.manifest);
   });
 
-  it("binds the canonical task path into the Manifest identity", () => {
+  it("binds the canonical task path into the Manifest artifact", () => {
     const first = compileTaskManifest(createTasksSource(), baseOptions);
     const second = compileTaskManifest(createTasksSource(), {
       ...baseOptions,
@@ -47,7 +47,7 @@ describe("TaskManifest compiler", () => {
     expect(artifactText(second)).not.toBe(artifactText(first));
   });
 
-  it("changes manifest artifact bytes for task, acceptance, and no-change changes", () => {
+  it("changes canonical artifact bytes for task, acceptance, and no-change changes", () => {
     const base = artifactText(compileTaskManifest(createTasksSource(), baseOptions));
     const changedTask = artifactText(compileTaskManifest(
       createTasksSource({
@@ -73,7 +73,7 @@ describe("TaskManifest compiler", () => {
     expect(new Set([base, changedTask, changedAcceptance, allowNoChange]).size).toBe(4);
   });
 
-  it("changes manifest artifact bytes for provider runtime changes", () => {
+  it("changes canonical artifact bytes for provider runtime changes", () => {
     const base = compileTaskManifest(createTasksSource(), baseOptions);
     const providerRuntimeChanged = compileTaskManifest(createTasksSource(), {
       ...baseOptions,
@@ -96,6 +96,7 @@ describe("TaskManifest compiler", () => {
 
   it("rejects the removed duplicate identity and hash fields", () => {
     const compiled = compileTaskManifest(createTasksSource(), baseOptions);
+    expect(compiled).not.toHaveProperty("manifestHash");
     expect(compiled.manifest).not.toHaveProperty("runId");
     expect(compiled.manifest).not.toHaveProperty("tasksSha256");
     expect(compiled.manifest).not.toHaveProperty("tasksHash");

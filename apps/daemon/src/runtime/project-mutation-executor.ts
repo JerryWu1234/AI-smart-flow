@@ -199,7 +199,6 @@ export class ProjectMutationExecutor {
           ? nextProjectFence
           : (run?.fence ?? nextProjectFence);
         const draft = await build(state, { fence, nextStateVersion });
-        const responseHash = canonicalHash(draft.response);
         let nextState = draft.nextState;
         if (request.advanceFence === true && request.expectedJobId !== undefined) {
           const nextRun = nextState.runs[request.expectedJobId];
@@ -225,7 +224,6 @@ export class ProjectMutationExecutor {
                 requestId: request.requestId,
                 requestHash,
                 response: draft.response,
-                responseHash,
                 committedAtStateVersion: nextStateVersion
               }
             },

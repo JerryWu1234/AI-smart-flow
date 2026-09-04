@@ -89,9 +89,6 @@ export const resultInputSchema = statusInputSchema;
 export const repairDraftSchema = z
   .object({
     sourceArtifact: artifactRefSchema,
-    sourceHash: sha256Schema,
-    baseTaskSourceHash: sha256Schema,
-    baseTaskManifestHash: sha256Schema,
     suggestedTasksPath: z.string().min(1),
     appendText: z.string().min(1),
     addedTaskLines: z.array(z.string().min(1)).min(1),
