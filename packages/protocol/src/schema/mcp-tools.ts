@@ -17,8 +17,7 @@ const stateMutationSchema = z
   .object({
     requestId: identifierSchema,
     projectId: identifierSchema,
-    jobId: identifierSchema,
-    expectedStateVersion: nonNegativeIntegerSchema
+    jobId: identifierSchema
   })
   .strict();
 
@@ -50,8 +49,7 @@ export const executeInputSchema = z
     projectRoot: z.string().min(1),
     tasksPath: tasksPathSchema,
     approvedSourceHash: sha256Schema,
-    requestId: identifierSchema,
-    expectedStateVersion: nonNegativeIntegerSchema.optional()
+    requestId: identifierSchema
   })
   .strict();
 export const executeOutputSchema = mutationResultSchema;

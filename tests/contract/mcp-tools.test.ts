@@ -63,8 +63,7 @@ const executeInput = {
   projectRoot: "/work/project",
   tasksPath: "tasks.md",
   approvedSourceHash: `sha256:${"a".repeat(64)}`,
-  requestId: "request-1",
-  expectedStateVersion: 0
+  requestId: "request-1"
 };
 
 describe("SmartFlow MCP handlers", () => {
@@ -100,8 +99,11 @@ describe("SmartFlow MCP handlers", () => {
     });
   });
 
-  it("requires state-version CAS and rejects removed Revision CAS", async () => {
+  it("accepts daemon-owned concurrency and rejects removed public CAS fields", async () => {
     const handlers = createToolHandlers(new FakeDaemonGateway());
+    await expect(
+      handlers.smartflow_execute({ ...executeInput, expectedStateVersion: 0 })
+    ).rejects.toMatchObject({ name: "ZodError" });
     await expect(
       handlers.smartflow_cancel({
         requestId: "request-2",
@@ -109,13 +111,21 @@ describe("SmartFlow MCP handlers", () => {
         jobId: "job-1",
         reason: "stop"
       })
-    ).rejects.toMatchObject({ name: "ZodError" });
+    ).resolves.toMatchObject({ phase: "CANCELING" });
     await expect(
       handlers.smartflow_cancel({
-        requestId: "request-2-legacy-cas",
+        requestId: "request-2-state-cas",
         projectId: "project-1",
         jobId: "job-1",
         expectedStateVersion: 1,
+        reason: "stop"
+      })
+    ).rejects.toMatchObject({ name: "ZodError" });
+    await expect(
+      handlers.smartflow_cancel({
+        requestId: "request-2-revision-cas",
+        projectId: "project-1",
+        jobId: "job-1",
         expectedRevision: 1,
         reason: "stop"
       })
@@ -129,7 +139,6 @@ describe("SmartFlow MCP handlers", () => {
         requestId: "request-3",
         projectId: "other-project",
         jobId: "job-1",
-        expectedStateVersion: 1,
         reason: "stop"
       })
     ).rejects.toMatchObject({ code: "PROJECT_MISMATCH" });

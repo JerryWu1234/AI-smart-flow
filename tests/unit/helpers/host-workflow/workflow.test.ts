@@ -57,8 +57,7 @@ describe("executeApprovedWorkflow", () => {
         projectRoot,
         approval: approveTasksSource("tasks.md", "# Tasks"),
         requestId: "execute-workflow",
-        hostTurnId: "host-turn-1",
-        expectedStateVersion: 0
+        hostTurnId: "host-turn-1"
       });
 
       expect(result).toEqual(completedResult());
@@ -142,8 +141,7 @@ describe("executeApprovedWorkflow", () => {
         projectRoot,
         approval: approveTasksSource("tasks.md", "# Tasks"),
         requestId: "execute-workflow-limit",
-        hostTurnId: "host-turn-limit",
-        expectedStateVersion: 0
+        hostTurnId: "host-turn-limit"
       });
 
       expect(result).toEqual(completedResult());
@@ -224,8 +222,7 @@ describe("executeApprovedWorkflow", () => {
         projectRoot,
         approval: approveTasksSource("tasks.md", "# Tasks"),
         requestId: "execute-workflow-user-input",
-        hostTurnId: "host-turn-user-input",
-        expectedStateVersion: 0
+        hostTurnId: "host-turn-user-input"
       });
 
       expect(result).toEqual(completedResult());

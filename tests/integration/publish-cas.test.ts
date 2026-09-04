@@ -450,7 +450,6 @@ describe("durable CAS publish", () => {
       const publishing = new PublishCoordinator(store, adapter).publish("job-1");
       await applyEntered.promise;
 
-      const beforeCancel = await store.readState();
       const cancelStartedAt = Date.now();
       const cancel = new ProjectRuntime({
         dataDirectory: harness.dataDir,
@@ -462,7 +461,6 @@ describe("durable CAS publish", () => {
           requestId: "cancel-pending-publish",
           projectId,
           jobId: "job-1",
-          expectedStateVersion: beforeCancel.stateVersion,
           reason: "cancel while adapter apply is pending"
         }
       });
@@ -688,8 +686,7 @@ describe("durable CAS publish", () => {
           requestId: "manual-recovery-bypass",
           projectId,
           jobId: "job-1",
-          resumeAction: "confirm_manual_publish",
-          expectedStateVersion: before.stateVersion
+          resumeAction: "confirm_manual_publish"
         }
       })).rejects.toMatchObject({ code: "RESUME_CODE_ACTION_MISMATCH" });
       expect(await store.readState()).toEqual(before);

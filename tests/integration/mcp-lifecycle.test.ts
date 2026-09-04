@@ -49,13 +49,11 @@ class LifecycleGateway implements HostGateway {
     if (toolName !== "smartflow_execute") this.assertRun(request);
     if (toolName === "smartflow_execute") return this.execute(request);
     if (toolName === "smartflow_resume") {
-      this.assertMutation(request);
       this.phase = "RUNNING";
       this.stateVersion += 1;
       return this.mutationResult();
     }
     if (toolName === "smartflow_cancel") {
-      this.assertMutation(request);
       this.phase = "CANCELING";
       this.stateVersion += 1;
       return this.mutationResult();
@@ -97,13 +95,6 @@ class LifecycleGateway implements HostGateway {
     }
   }
 
-  private assertMutation(request: Record<string, unknown>): void {
-    this.assertRun(request);
-    if (request.expectedStateVersion !== this.stateVersion) {
-      throw new LifecycleError("STATE_VERSION_MISMATCH", "Stale stateVersion");
-    }
-  }
-
   private mutationResult(): object {
     return {
       projectId: "project-1",
@@ -141,7 +132,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
 
     await writeFile(tasksPath, `${finalDraft.source}drift`, "utf8");
     await expect(
-      executeApprovedTasks(gateway, harness.projectDir, approval, "execute-1", 0)
+      executeApprovedTasks(gateway, harness.projectDir, approval, "execute-1")
     ).rejects.toMatchObject({ code: "APPROVED_SOURCE_DRIFT" });
     expect(gateway.executeCalls).toBe(0);
 
@@ -150,12 +141,11 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       gateway,
       harness.projectDir,
       approval,
-      "execute-1",
-      0
+      "execute-1"
     );
     expect(execute).toMatchObject({ phase: "PREPARING", stateVersion: 1 });
     expect(
-      await executeApprovedTasks(gateway, harness.projectDir, approval, "execute-1", 0)
+      await executeApprovedTasks(gateway, harness.projectDir, approval, "execute-1")
     ).toEqual(execute);
     expect(gateway.executeCalls).toBe(1);
 
@@ -163,7 +153,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     await gateway.call("smartflow_resume", {
       projectId: "project-1",
       jobId: "job-1",
-      expectedStateVersion: gateway.stateVersion,
       requestId: "resume-1",
       resumeAction: "retry"
     });
@@ -173,7 +162,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       gateway.call("smartflow_cancel", {
         projectId: "other-project",
         jobId: "job-1",
-        expectedStateVersion: gateway.stateVersion,
         requestId: "cross-project",
         reason: "stop"
       })
@@ -181,7 +169,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     await gateway.call("smartflow_cancel", {
       projectId: "project-1",
       jobId: "job-1",
-      expectedStateVersion: gateway.stateVersion,
       requestId: "cancel-1",
       reason: "stop"
     });
@@ -235,8 +222,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         projectRoot: harness.projectDir,
         tasksPath: "tasks.md",
         approvedSourceHash: createHash("sha256").update(tasksSource).digest("hex"),
-        requestId: "real-execute-1",
-        expectedStateVersion: 0
+        requestId: "real-execute-1"
       };
       const execute = await firstClient.call("smartflow_execute", request) as {
         projectId: string;
@@ -316,8 +302,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       projectRoot: harness.projectDir,
       tasksPath: "tasks.md",
       approvedSourceHash: createHash("sha256").update(tasksSource).digest("hex"),
-      requestId: "active-project-first",
-      expectedStateVersion: 0
+      requestId: "active-project-first"
     };
     try {
       const first = await client.call("smartflow_execute", firstRequest) as {
@@ -330,8 +315,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       await expect(client.call("smartflow_execute", {
         ...firstRequest,
         tasksPath: "tasks-alias.md",
-        requestId: "active-project-second",
-        expectedStateVersion: undefined
+        requestId: "active-project-second"
       })).rejects.toMatchObject({ code: "TASK_ALREADY_ACTIVE" });
       expect(await store.readState()).toEqual(before);
       expect(await client.call("smartflow_execute", firstRequest)).toEqual(first);
@@ -374,8 +358,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         projectRoot: harness.projectDir,
         tasksPath: "tasks-a.md",
         approvedSourceHash: createHash("sha256").update(firstSource).digest("hex"),
-        requestId: "multi-active-first",
-        expectedStateVersion: 0
+        requestId: "multi-active-first"
       }) as { projectId: string; jobId: string };
       const second = await client.call("smartflow_execute", {
         projectRoot: harness.projectDir,
@@ -458,8 +441,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         projectRoot: harness.projectDir,
         tasksPath,
         approvedSourceHash,
-        requestId,
-        expectedStateVersion: 0
+        requestId
       }
     });
 
@@ -518,8 +500,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         resumeAction: "approve_new_manifest_revision",
         tasksPath: "tasks.md",
         approvedSourceHash: "0".repeat(64),
-        approval: { kind: "USER", parentRevision: null, authorizedCriterionIds: [] },
-        expectedStateVersion: before.stateVersion
+        approval: { kind: "USER", parentRevision: null, authorizedCriterionIds: [] }
       }
     })).rejects.toMatchObject({ name: "ZodError" });
     expect(await store.readState()).toEqual(before);
@@ -550,10 +531,9 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         projectRoot: harness.projectDir,
         tasksPath: "tasks.md",
         approvedSourceHash: createHash("sha256").update(tasksSource).digest("hex"),
-        requestId: "execute-late-failure",
-        expectedStateVersion: 0
+        requestId: "execute-late-failure"
       }
-    }) as { projectId: string; jobId: string; stateVersion: number };
+    }) as { projectId: string; jobId: string };
     await started;
     await runtime.handle({
       id: "ipc-cancel-late-failure",
@@ -561,7 +541,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       payload: {
         projectId: execute.projectId,
         jobId: execute.jobId,
-        expectedStateVersion: execute.stateVersion,
         requestId: "cancel-before-late-failure",
         reason: "race test"
       }
@@ -848,8 +827,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         requestId: "retry-publish-with-missing-candidate",
         projectId,
         jobId: "job-1",
-        resumeAction: "retry_publish",
-        expectedStateVersion: state.stateVersion + 1
+        resumeAction: "retry_publish"
       }
     })).rejects.toMatchObject({
       code: "ARTIFACT_INTEGRITY_BLOCKED",
@@ -899,8 +877,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         requestId: "retry-host-review-with-missing-candidate",
         projectId,
         jobId: "job-1",
-        resumeAction: "retry_host_review",
-        expectedStateVersion: state.stateVersion + 1
+        resumeAction: "retry_host_review"
       }
     })).rejects.toMatchObject({
       code: "ARTIFACT_INTEGRITY_BLOCKED",
@@ -960,8 +937,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         requestId: "primitive-resume-owner-bypass",
         projectId,
         jobId: "job-1",
-        resumeAction: "retry_host_review",
-        expectedStateVersion: paused.stateVersion
+        resumeAction: "retry_host_review"
       }
     })).rejects.toMatchObject({ code: "HOST_TURN_ACTIVE" });
     expect(await store.readState()).toEqual(paused);
@@ -973,8 +949,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         requestId: "primitive-cancel-owner-bypass",
         projectId,
         jobId: "job-1",
-        reason: "attacker cancellation",
-        expectedStateVersion: paused.stateVersion
+        reason: "attacker cancellation"
       }
     })).rejects.toMatchObject({ code: "HOST_TURN_ACTIVE" });
     expect(await store.readState()).toEqual(paused);
@@ -1020,8 +995,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         requestId: "inspect-processes-is-readonly",
         projectId,
         jobId: "job-1",
-        resumeAction: "inspect_processes",
-        expectedStateVersion: paused.stateVersion
+        resumeAction: "inspect_processes"
       }
     })).rejects.toMatchObject({ name: "ZodError" });
     expect(await store.readState()).toEqual(paused);
@@ -1033,8 +1007,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         requestId: "illegal-code-action-pair",
         projectId,
         jobId: "job-1",
-        resumeAction: "resume_review_decision",
-        expectedStateVersion: paused.stateVersion
+        resumeAction: "resume_review_decision"
       }
     })).rejects.toMatchObject({ code: "RESUME_CODE_ACTION_MISMATCH" });
     expect(await store.readState()).toEqual(paused);
@@ -1089,7 +1062,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         return Promise.resolve();
       }
     });
-    const paused = await store.readState();
     const retry = await runtime.handle({
       id: "retry-provider-through-recovery",
       method: "smartflow_resume",
@@ -1097,8 +1069,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         requestId: "retry-provider-through-recovery",
         projectId,
         jobId: "job-1",
-        resumeAction: "retry_provider",
-        expectedStateVersion: paused.stateVersion
+        resumeAction: "retry_provider"
       }
     });
     expect(retry).toMatchObject({ phase: "PREPARING" });
@@ -1124,7 +1095,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       },
       updatedAt: new Date().toISOString()
     });
-    const cancelState = await store.readState();
     const canceled = await runtime.handle({
       id: "cancel-through-cancel-chain",
       method: "smartflow_resume",
@@ -1132,8 +1102,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         requestId: "cancel-through-cancel-chain",
         projectId,
         jobId: "job-1",
-        resumeAction: "cancel",
-        expectedStateVersion: cancelState.stateVersion
+        resumeAction: "cancel"
       }
     });
     expect(canceled).toMatchObject({ phase: "CANCELING" });
@@ -1187,7 +1156,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         return Promise.resolve();
       }
     });
-    const leaderPaused = await leaderStore.readState();
     const leaderResult = await leaderRuntime.handle({
       id: "resume-leader-decision",
       method: "smartflow_resume",
@@ -1195,8 +1163,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         requestId: "resume-leader-decision",
         projectId: leaderProjectId,
         jobId: "job-1",
-        resumeAction: "resume_review_decision",
-        expectedStateVersion: leaderPaused.stateVersion
+        resumeAction: "resume_review_decision"
       }
     });
     expect(leaderResult).toMatchObject({ phase: "READY_TO_PUBLISH" });
@@ -1246,8 +1213,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         resumeAction: "retry_cancel",
         tasksPath: "tasks.md",
         approvedSourceHash: "0".repeat(64),
-        approval: { kind: "USER", parentRevision: null, authorizedCriterionIds: [] },
-        expectedStateVersion: state.stateVersion + 1
+        approval: { kind: "USER", parentRevision: null, authorizedCriterionIds: [] }
       }
     })).rejects.toMatchObject({ name: "ZodError" });
     expect(await store.readState()).toEqual(before);

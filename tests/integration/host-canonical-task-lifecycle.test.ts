@@ -50,7 +50,7 @@ describe("Host canonical task lifecycle", () => {
     ];
 
     const executions: Array<{ projectId: string; jobId: string }> = [];
-    for (const [index, request] of requests.entries()) {
+    for (const request of requests) {
       const tasksPath = `.smartflow/tasks/${request.id}/tasks.md`;
       const absolutePath = resolve(harness.projectDir, tasksPath);
       await mkdir(dirname(absolutePath), { recursive: true });
@@ -61,8 +61,7 @@ describe("Host canonical task lifecycle", () => {
         gateway,
         harness.projectDir,
         approval,
-        request.id,
-        index === 0 ? 0 : undefined
+        request.id
       );
       executions.push(execution);
       expect(execution).not.toHaveProperty("revision");

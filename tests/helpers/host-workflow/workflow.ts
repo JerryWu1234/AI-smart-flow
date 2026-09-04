@@ -31,7 +31,6 @@ export interface ExecuteApprovedWorkflowInput {
   approval?: ApprovedTasksSnapshot;
   requestId: string;
   hostTurnId: string;
-  expectedStateVersion?: number;
 }
 
 function wait(delayMs: number): Promise<void> {
@@ -47,8 +46,7 @@ export async function executeApprovedWorkflow(
     gateway,
     input.projectRoot,
     input.approval,
-    input.requestId,
-    input.expectedStateVersion
+    input.requestId
   );
   let sequence = 0;
   let continuation: Partial<Pick<ReviewTurnInput, "turnToken" | "answer">> = {};
