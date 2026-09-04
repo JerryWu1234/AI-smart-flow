@@ -4,6 +4,7 @@ import { realpath } from "node:fs/promises";
 import {
   connectOrLaunchDaemon,
   daemonEndpoint,
+  resolveReviewEnabled,
   resolveWorkerLaunchConfiguration,
   resolveInstallationDataDirectory,
   resolveReviewerExecutable,
@@ -40,7 +41,7 @@ export async function runSmartFlowMcpGateway(options: SmartFlowMcpGatewayOptions
   };
   const dataDirectory = options.dataDirectory ?? `${resolveInstallationDataDirectory()}/daemon`;
   const config = resolveSmartFlowConfig();
-  if (config.review.strategy !== undefined) {
+  if (resolveReviewEnabled() && config.review.strategy !== undefined) {
     await resolveReviewerExecutable(config.review.strategy);
   }
   const workerLaunchConfiguration = options.workerLaunchConfiguration ??

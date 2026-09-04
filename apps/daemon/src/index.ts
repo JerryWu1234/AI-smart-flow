@@ -4,7 +4,7 @@ export {
 } from "./config/data-dir.js";
 export { CancelManager } from "./cancel/cancel-manager.js";
 export type { CancellationRuntime } from "./cancel/cancel-manager.js";
-export { resolveSmartFlowConfig } from "./config/config.js";
+export { resolveReviewEnabled, resolveSmartFlowConfig } from "./config/config.js";
 export type { SmartFlowConfig } from "./config/config.js";
 export { connectOrLaunchDaemon } from "./transport/daemon-launcher.js";
 export { LocalIpcClient } from "./transport/local-ipc-client.js";

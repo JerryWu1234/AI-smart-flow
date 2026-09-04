@@ -73,14 +73,14 @@ export function stableOperationId(bindings: {
   projectId: string;
   jobId: string;
   candidateHash: string;
-  reviewHash: string;
+  reviewHash?: string;
   operationsHash: string;
 }): string {
   const hashBindings = {
     projectId: bindings.projectId,
     jobId: bindings.jobId,
     candidateHash: bindings.candidateHash,
-    reviewHash: bindings.reviewHash,
+    ...(bindings.reviewHash === undefined ? {} : { reviewHash: bindings.reviewHash }),
     operationsHash: bindings.operationsHash
   };
   return `publish-${createHash("sha256").update(canonical(hashBindings), "utf8").digest("hex")}`;

@@ -157,6 +157,10 @@ export class ProductionRuntimeComposition {
     }
     if (postWorkerRun?.phase === "REVIEW_PENDING") {
       await this.review(this.contextForRun(context, postWorkerRun));
+      return;
+    }
+    if (postWorkerRun?.phase === "READY_TO_PUBLISH") {
+      await this.publish(this.contextForRun(context, postWorkerRun));
     }
   };
 

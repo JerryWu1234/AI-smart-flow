@@ -47,7 +47,7 @@ interface PublishBindings {
   projectId: string;
   jobId: string;
   candidateHash: string;
-  reviewHash: string;
+  reviewHash?: string;
 }
 
 function reconcile(
@@ -90,7 +90,7 @@ export class PublishService {
       projectId: bindings.projectId,
       jobId: bindings.jobId,
       candidateHash: bindings.candidateHash,
-      reviewHash: bindings.reviewHash,
+      ...(bindings.reviewHash === undefined ? {} : { reviewHash: bindings.reviewHash }),
       operationsHash: hash
     });
     if (adapter === undefined) return { status: "MANUAL_PUBLISH_REQUIRED", reason: "PUBLISH_ADAPTER_UNAVAILABLE" };

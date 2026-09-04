@@ -33,6 +33,7 @@ import {
   type GitWorkspaceSnapshot
 } from "@smartflow/workspace";
 
+import { resolveReviewEnabled } from "../config/config.js";
 import { gitPublishOperations } from "../publish/git-publish-source.js";
 import { ProjectMutationExecutor } from "../runtime/project-mutation-executor.js";
 
@@ -114,6 +115,7 @@ function semanticHashMatches(value: object, hashKey: string): boolean {
 }
 
 function requiresPublishApproval(run: RunRecord): boolean {
+  if (!resolveReviewEnabled()) return false;
   if (new Set<RunPhase>(["READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase)) {
     return true;
   }
@@ -382,7 +384,11 @@ export async function verifyRunArtifacts(
     }
 
     if (run.publish !== undefined) {
-      if (candidate === undefined || resultSnapshot === undefined || reviewHash === undefined) {
+      if (
+        candidate === undefined ||
+        resultSnapshot === undefined ||
+        (resolveReviewEnabled() && reviewHash === undefined)
+      ) {
         return "ARTIFACT_SEMANTIC_MISMATCH:publish";
       }
       const operations = gitPublishOperations(candidate, resultSnapshot);
@@ -393,7 +399,7 @@ export async function verifyRunArtifacts(
           projectId: state.projectId,
           jobId: run.jobId,
           candidateHash: getCandidateHash(candidate),
-          reviewHash,
+          ...(reviewHash === undefined ? {} : { reviewHash }),
           operationsHash: expectedOperationsHash
         }) ||
         (run.publish.result !== undefined &&

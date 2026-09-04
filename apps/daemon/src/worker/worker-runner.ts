@@ -30,6 +30,7 @@ import {
   type GitWorkspaceSnapshot
 } from "@smartflow/workspace";
 
+import { resolveReviewEnabled } from "../config/config.js";
 import { ProjectMutationExecutor } from "../runtime/project-mutation-executor.js";
 import {
   clearRepairContinuation,
@@ -1123,9 +1124,12 @@ export class WorkerRunner {
     const manifest = taskManifestSchema.parse(JSON.parse(
       new TextDecoder().decode(await this.store.readArtifact(prepared.run.taskManifest))
     ));
-    const reviewTaskSourceHash = createHash("sha256")
-      .update(await this.store.readArtifact(prepared.run.taskSource))
-      .digest("hex");
+    const reviewEnabled = resolveReviewEnabled();
+    const reviewTaskSourceHash = reviewEnabled
+      ? createHash("sha256")
+          .update(await this.store.readArtifact(prepared.run.taskSource))
+          .digest("hex")
+      : undefined;
     const candidateIncomplete = candidate.operations.length === 0 && !manifest.allowNoChange;
 
     await this.mutations.mutate(
@@ -1148,8 +1152,9 @@ export class WorkerRunner {
         const activeWorkspace = run.gitWorkspace?.current;
         if (activeWorkspace === undefined) throw new Error("GIT_CURRENT_WORKSPACE_MISSING");
         let pendingAction: RunRecord["pendingAction"];
-        if (!candidateIncomplete) {
+        if (!candidateIncomplete && reviewEnabled) {
           if (attempt.piSessionId === undefined) throw new Error("PI_SESSION_MISSING");
+          if (reviewTaskSourceHash === undefined) throw new Error("REVIEW_TASK_SOURCE_HASH_MISSING");
           const reviewerSessions = [...new Set((run.reviewHistory ?? []).flatMap((entry) =>
             typeof entry.reviewerSessionId === "string" ? [entry.reviewerSessionId] : []
           ))];
@@ -1170,10 +1175,15 @@ export class WorkerRunner {
             )
           };
         }
+        const phase: RunRecord["phase"] = candidateIncomplete
+          ? "FIXING"
+          : reviewEnabled
+            ? "REVIEW_PENDING"
+            : "READY_TO_PUBLISH";
         return {
           nextState: nextStateWithRun(state, request.jobId, (active) => ({
             ...active,
-            phase: candidateIncomplete ? "FIXING" : "REVIEW_PENDING",
+            phase,
             candidate: candidateRef,
             recovery: clearRepairContinuation(active.recovery),
             gitWorkspace: active.gitWorkspace === undefined
@@ -1200,7 +1210,7 @@ export class WorkerRunner {
                 }
               : { lastError: undefined, pause: undefined })
           })),
-          response: { phase: candidateIncomplete ? "FIXING" : "REVIEW_PENDING" }
+          response: { phase }
         };
       }
     );
