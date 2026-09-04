@@ -25,7 +25,7 @@ function flagValue(argv: string[], name: string): string | undefined {
 function rejectRemovedConfigFlag(argv: readonly string[]): void {
   if (argv.some((value) => value === "--config" || value.startsWith("--config="))) {
     throw new Error(
-      "--config is unsupported; configure Review with REVIEW_ADAPTER, REVIEW_MODEL, and REVIEW_EFFORT"
+      "--config is unsupported; configure Review with REVIEW_ENABLED, REVIEW_ADAPTER, REVIEW_MODEL, and REVIEW_EFFORT"
     );
   }
 }
@@ -94,7 +94,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       "  mcp [--data-dir PATH]",
       "  Required MCP Worker env: WORK_BASE_URL, WORK_MODEL, WORK_API_KEY",
       "  Optional MCP Worker env: WORK_API, WORK_CONTEXT_WINDOW, WORK_MAX_TOKENS, WORK_EFFORT, WORK_ATTEMPT_DEADLINE_MS",
-      "  Optional MCP Review env: REVIEW_ADAPTER, REVIEW_MODEL, REVIEW_EFFORT",
+      "  Optional MCP Review env: REVIEW_ENABLED, REVIEW_ADAPTER, REVIEW_MODEL, REVIEW_EFFORT",
       "  health [--data-dir PATH]",
       "  version"
     ].join("\n") + "\n"

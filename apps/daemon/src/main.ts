@@ -11,6 +11,7 @@ import {
 } from "@smartflow/review";
 
 import {
+  resolveReviewEnabled,
   resolveReviewStrategy,
   resolveSmartFlowConfig,
   type ReviewStrategy
@@ -59,7 +60,9 @@ export async function startSmartFlowDaemon(
   const config = resolveSmartFlowConfig();
   const injectedReviewAdapter = options.reviewAdapter;
   const configuredReviewExecutable =
-    injectedReviewAdapter === undefined && config.review.strategy !== undefined
+    resolveReviewEnabled() &&
+    injectedReviewAdapter === undefined &&
+    config.review.strategy !== undefined
       ? await resolveReviewerExecutable(config.review.strategy)
       : undefined;
   const workerLaunchConfiguration = options.workerLaunchConfiguration ??

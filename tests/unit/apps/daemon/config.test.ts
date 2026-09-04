@@ -76,7 +76,7 @@ describe("SmartFlow daemon configuration", () => {
   it("rejects the removed SMARTFLOW_CONFIG file setting", () => {
     expect(() => resolveSmartFlowConfig({ SMARTFLOW_CONFIG: "/tmp/smartflow.yml" }))
       .toThrow(
-        "REVIEW_CONFIG_INVALID: SMARTFLOW_CONFIG is unsupported; use REVIEW_ADAPTER, REVIEW_MODEL, and REVIEW_EFFORT"
+        "REVIEW_CONFIG_INVALID: SMARTFLOW_CONFIG is unsupported; use REVIEW_ENABLED, REVIEW_ADAPTER, REVIEW_MODEL, and REVIEW_EFFORT"
       );
   });
 });

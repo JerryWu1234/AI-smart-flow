@@ -9,7 +9,7 @@ describe("SmartFlow CLI configuration", () => {
       ["daemon", "--config=smartflow.yml"]
     ]) {
       await expect(runCli(argv)).rejects.toThrow(
-        "--config is unsupported; configure Review with REVIEW_ADAPTER, REVIEW_MODEL, and REVIEW_EFFORT"
+        "--config is unsupported; configure Review with REVIEW_ENABLED, REVIEW_ADAPTER, REVIEW_MODEL, and REVIEW_EFFORT"
       );
     }
   });

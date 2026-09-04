@@ -28,6 +28,12 @@ export function resolveReviewStrategy(
   return isReviewStrategy(clientName) ? clientName : "codex";
 }
 
+export function resolveReviewEnabled(
+  environment: NodeJS.ProcessEnv = process.env
+): boolean {
+  return environment.REVIEW_ENABLED?.trim() !== "false";
+}
+
 function environmentValue(environment: NodeJS.ProcessEnv, key: string): string | undefined {
   const raw = environment[key];
   if (raw === undefined) return undefined;
@@ -43,7 +49,7 @@ export function resolveSmartFlowConfig(
 ): SmartFlowConfig {
   if (environment.SMARTFLOW_CONFIG !== undefined) {
     throw new Error(
-      "REVIEW_CONFIG_INVALID: SMARTFLOW_CONFIG is unsupported; use REVIEW_ADAPTER, REVIEW_MODEL, and REVIEW_EFFORT"
+      "REVIEW_CONFIG_INVALID: SMARTFLOW_CONFIG is unsupported; use REVIEW_ENABLED, REVIEW_ADAPTER, REVIEW_MODEL, and REVIEW_EFFORT"
     );
   }
   const adapter = environmentValue(environment, "REVIEW_ADAPTER");
