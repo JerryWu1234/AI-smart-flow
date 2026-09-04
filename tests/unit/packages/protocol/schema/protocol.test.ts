@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  daemonExecuteInputSchema,
   durableLeaderDecisionSchema,
   durableReviewDecisionSchema,
   executeInputSchema,
@@ -418,17 +419,36 @@ describe("SmartFlow protocol schemas", () => {
     }).success).toBe(false);
   });
 
-  it("requires execute approval to bind the source hash", () => {
+  it("exposes execute as a strict zero-argument public input", () => {
+    expect(executeInputSchema.parse({})).toEqual({});
+    for (const extra of [
+      { projectRoot: "/tmp/project" },
+      { tasksPath: "tasks.md" },
+      { approvedSourceHash: digest },
+      { requestId: "req-1" },
+      { expectedStateVersion: 0 }
+    ]) {
+      expect(executeInputSchema.safeParse(extra).success).toBe(false);
+    }
+  });
+
+  it("requires internal execute approval to bind the source hash", () => {
     expect(() =>
-      executeInputSchema.parse({
+      daemonExecuteInputSchema.parse({
         projectRoot: "/tmp/project",
         tasksPath: "tasks.md",
         requestId: "req-1"
       })
     ).toThrow();
+    expect(daemonExecuteInputSchema.safeParse({
+      projectRoot: "/tmp/project",
+      tasksPath: "tasks.md",
+      approvedSourceHash: digest,
+      requestId: "req-1"
+    }).success).toBe(true);
   });
 
-  it("requires tasksPath to be relative and free of parent traversal", () => {
+  it("requires internal tasksPath to be relative and free of parent traversal", () => {
     const base = {
       projectRoot: "/tmp/project",
       approvedSourceHash: digest,
@@ -441,9 +461,12 @@ describe("SmartFlow protocol schemas", () => {
       "sub/../tasks.md",
       "sub\\..\\tasks.md"
     ]) {
-      expect(executeInputSchema.safeParse({ ...base, tasksPath }).success).toBe(false);
+      expect(daemonExecuteInputSchema.safeParse({ ...base, tasksPath }).success).toBe(false);
     }
-    expect(executeInputSchema.safeParse({ ...base, tasksPath: "approved/tasks.md" }).success).toBe(true);
+    expect(daemonExecuteInputSchema.safeParse({
+      ...base,
+      tasksPath: "approved/tasks.md"
+    }).success).toBe(true);
   });
 
   it("strictly models durable Review, Leader, and Publish evidence", () => {

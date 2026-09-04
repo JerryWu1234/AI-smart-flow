@@ -22,12 +22,14 @@ function completedResult(): object {
 
 class PollingGateway implements HostGateway {
   public readonly toolNames: string[] = [];
+  public readonly executeInputs: Array<Record<string, unknown>> = [];
   public readonly reviewTurnInputs: Array<Record<string, unknown>> = [];
   private polls = 0;
 
   public call(toolName: string, input: unknown): Promise<unknown> {
     this.toolNames.push(toolName);
     if (toolName === "smartflow_execute") {
+      this.executeInputs.push(input as Record<string, unknown>);
       return Promise.resolve({
         projectId: "project-1",
         jobId: "job-1",
@@ -61,6 +63,7 @@ describe("executeApprovedWorkflow", () => {
       });
 
       expect(result).toEqual(completedResult());
+      expect(gateway.executeInputs).toEqual([{}]);
       expect(gateway.reviewTurnInputs).toHaveLength(2);
       for (const input of gateway.reviewTurnInputs) {
         expect(input).not.toHaveProperty("review");

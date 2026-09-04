@@ -37,18 +37,13 @@ environment for either strategy.
 
 Before `smartflow_execute`, the MCP Host must distinguish implementation intent from ordinary conversation. It must not create task files or execute SmartFlow for casual chat, explanations, evaluations, discussions, or planning-only requests. If an implementation request is missing a critical goal, scope, target, or acceptance criterion, the Host asks the user for that information instead of inventing it.
 
-For every new implementation request—even a later request in the same Host conversation—the Host creates a fresh filesystem-safe `requestId` and writes exactly one canonical file inside the user project:
+Each stdio MCP session serves one project. At startup, SmartFlow canonicalizes the process working directory, generates a session ID, and exposes one project-relative task path in its MCP instructions and execute-tool description:
 
 ```text
-<projectRoot>/.smartflow/tasks/<requestId>/tasks.md
+<projectRoot>/.smartflow/tasks/<sessionId>/tasks.md
 ```
 
-Chat context, one existing task file, or multiple existing task/spec files are preparation inputs; they are always normalized into that one canonical file for the current request. The Host never overwrites a previous request directory. For example, two sequential requests use independent paths:
-
-```text
-.smartflow/tasks/550e8400-e29b-41d4-a716-446655440000/tasks.md
-.smartflow/tasks/6ba7b810-9dad-41d1-80b4-00c04fd430c8/tasks.md
-```
+Chat context, one existing task file, or multiple existing task/spec files are preparation inputs; the Host always normalizes them into that one canonical session file. For a later batch in the same session, the Host waits until the previous Job is done, then replaces the same file with the new canonical tasks.
 
 Canonical task syntax follows the SmartFlow parser contract:
 
@@ -59,15 +54,17 @@ Canonical task syntax follows the SmartFlow parser contract:
 - [ ] T002 [M01] Add login coverage in `src/auth/login.test.ts` — 验收：success and failure cases pass
 ```
 
-After writing the file, the Host re-reads it from disk, presents its project-relative path and complete contents, and explicitly asks the user whether to execute it. The initial request to implement something authorizes draft preparation, not execution. Only after explicit confirmation does the Host compute SHA-256 over the exact confirmed disk bytes and call `smartflow_execute` with the same `requestId` in both the input and `.smartflow/tasks/<requestId>/tasks.md` path.
+After writing the file, the Host re-reads it from disk, presents its project-relative path and complete contents, and explicitly asks the user whether to execute it. The initial request to implement something authorizes draft preparation, not execution. Only after explicit confirmation does the Host call `smartflow_execute({})`; public callers do not pass `projectRoot`, `tasksPath`, `approvedSourceHash`, or an execute `requestId`.
 
-The task file is created by the Host's native filesystem capabilities at request time; it is not stored in the npm package or `node_modules`. `.smartflow/tasks/**` is SmartFlow control-plane data: tracked, untracked, and ignored files under that prefix are excluded from Run baselines, RUN_RESULT snapshots, Candidates, and Publish. The Worker workspace receives only the current Job's immutable task source from the Daemon artifact; historical request directories are not materialized. Daemon artifacts remain under `projects/<projectId>/runs/<jobId>/task-source.md` and `task-manifest.json` in the configured SmartFlow data directory.
+The MCP adapter obtains the project root and path from its session, reads the task bytes, computes their SHA-256, and generates the internal idempotency request ID sent to the Daemon. Retries for unchanged bytes in the same running MCP session reuse the in-flight call or receipt; changing the bytes creates a new internal request identity. Consecutive batches with identical bytes are therefore treated as retries, and this in-memory replay state does not survive an MCP process restart.
 
-This approval flow is a trusted Host policy. `approvedSourceHash` binds execute to exact bytes, but it is not a server-verifiable proof that a human confirmed them.
+The task file is created by the Host's native filesystem capabilities at request time; it is not stored in the npm package or `node_modules`. `.smartflow/tasks/**` is SmartFlow control-plane data: tracked, untracked, and ignored files under that prefix are excluded from Run baselines, RUN_RESULT snapshots, Candidates, and Publish. The Worker workspace receives only the current Job's immutable task source from the Daemon artifact; the session control-plane path is not materialized from the project snapshot. Daemon artifacts remain under `projects/<projectId>/runs/<jobId>/task-source.md` and `task-manifest.json` in the configured SmartFlow data directory.
+
+This approval flow remains a trusted Host policy. The MCP-computed source hash binds the internal execute request to the bytes it read, but it is not a server-verifiable proof that a human confirmed them.
 
 ### Execution and Review loop
 
-The public MCP surface contains exactly six tools. For each newly confirmed request, call `smartflow_execute` once with its canonical task source, then call `smartflow_review_turn` until it returns `DONE`. Review runs inside the Daemon; the Host only polls and answers explicit user-input checkpoints. The turn API returns one of three states:
+The public MCP surface contains exactly six tools. For each newly confirmed batch, call `smartflow_execute({})` once, then call `smartflow_review_turn` until it returns `DONE`. Review runs inside the Daemon; the Host only polls and answers explicit user-input checkpoints. The turn API returns one of three states:
 
 - `NOT_READY`: wait for `retryAfterMs` and call it again. This includes Daemon-owned Review and repair work.
 - `USER_INPUT_REQUIRED`: present the message and available actions to the user, then return the selected action with the unchanged `turnToken`.

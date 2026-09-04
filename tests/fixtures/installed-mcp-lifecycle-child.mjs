@@ -1,6 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -12,7 +12,7 @@ if (smartflowBin === undefined || projectRoot === undefined || daemonRoot === un
   throw new Error("installed MCP lifecycle child requires bin, project, and daemon paths");
 }
 
-const TASKS_PATH = "tasks.md";
+const TASKS_SOURCE_PATH = "tasks.md";
 
 function asRecord(value, context) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -53,14 +53,10 @@ async function waitForPhase(client, scope, expected, timeoutMs) {
   throw new Error(`Installed lifecycle did not reach ${[...expected].join("/")}`);
 }
 
-async function executeAndCancelSecondary(client, primaryScope) {
-  const secondTasks = await readFile(`${projectRoot}/tasks-b.md`);
-  const secondExecute = await callMcp(client, "smartflow_execute", {
-    projectRoot,
-    tasksPath: "tasks-b.md",
-    approvedSourceHash: createHash("sha256").update(secondTasks).digest("hex"),
-    requestId: `execute-secondary-${randomUUID()}`
-  });
+async function executeAndCancelSecondary(client, primaryScope, sessionTasksPath) {
+  const secondTasks = await readFile(resolve(projectRoot, "tasks-b.md"));
+  await writeFile(resolve(projectRoot, sessionTasksPath), secondTasks);
+  const secondExecute = await callMcp(client, "smartflow_execute", {});
   const secondScope = {
     projectId: String(secondExecute.projectId),
     jobId: String(secondExecute.jobId)
@@ -68,7 +64,7 @@ async function executeAndCancelSecondary(client, primaryScope) {
   if (secondScope.jobId === primaryScope.jobId) {
     throw new Error("Secondary execute reused the primary job");
   }
-  const secondCancel = await callMcp(client, "smartflow_cancel", {
+  await callMcp(client, "smartflow_cancel", {
     ...secondScope,
     requestId: `cancel-secondary-${randomUUID()}`,
     reason: "installed multi-run isolation check complete"
@@ -99,22 +95,39 @@ const client = new Client({ name: "smartflow-installed-e2e", version: "1.0.0" })
 let stage = "connect";
 try {
   await client.connect(transport);
-  const publicToolNames = (await client.listTools()).tools
-    .map((tool) => tool.name)
-    .sort();
+  const instructions = client.getInstructions();
+  if (typeof instructions !== "string") {
+    throw new Error("Installed MCP server omitted session instructions");
+  }
+  const sessionTasksPath = instructions.match(
+    /\.smartflow\/tasks\/[0-9a-f-]+\/tasks\.md/u
+  )?.[0];
+  if (sessionTasksPath === undefined) {
+    throw new Error("Installed MCP instructions omitted the session task path");
+  }
+  const sessionTasksAbsolutePath = resolve(projectRoot, sessionTasksPath);
+  await mkdir(dirname(sessionTasksAbsolutePath), { recursive: true });
+  await writeFile(
+    sessionTasksAbsolutePath,
+    await readFile(resolve(projectRoot, TASKS_SOURCE_PATH))
+  );
 
-  const tasks = await readFile(resolve(projectRoot, TASKS_PATH));
-  const approvedSourceHash = createHash("sha256").update(tasks).digest("hex");
+  const publicTools = (await client.listTools()).tools;
+  const publicToolNames = publicTools.map((tool) => tool.name).sort();
+  const executeTool = publicTools.find((tool) => tool.name === "smartflow_execute");
+  if (executeTool === undefined) throw new Error("Installed MCP server omitted smartflow_execute");
+  const executeSchema = asRecord(executeTool.inputSchema, "smartflow_execute input schema");
+  const executeInputPropertyNames = executeSchema.properties === undefined
+    ? []
+    : Object.keys(asRecord(executeSchema.properties, "smartflow_execute input properties"));
+  if (executeInputPropertyNames.length !== 0) {
+    throw new Error(`smartflow_execute exposed inputs: ${executeInputPropertyNames.join(",")}`);
+  }
   const workflowToolNames = [];
 
   stage = "execute";
   workflowToolNames.push("smartflow_execute");
-  const execute = await callMcp(client, "smartflow_execute", {
-    projectRoot,
-    tasksPath: TASKS_PATH,
-    approvedSourceHash,
-    requestId: `execute-approved-${randomUUID()}`
-  });
+  const execute = await callMcp(client, "smartflow_execute", {});
   const scope = {
     projectId: asString(execute.projectId, "smartflow_execute projectId"),
     jobId: asString(execute.jobId, "smartflow_execute jobId")
@@ -132,9 +145,6 @@ try {
   if (Object.hasOwn(execute, "revision")) {
     throw new Error("smartflow_execute leaked removed revision state");
   }
-
-  stage = "secondary-run";
-  const secondary = await executeAndCancelSecondary(client, scope);
 
   stage = "review-turn-loop";
   const hostTurnId = `host-turn-${randomUUID()}`;
@@ -168,8 +178,13 @@ try {
     throw new Error(`Installed MCP workflow failed closed: ${JSON.stringify(result)}`);
   }
 
+  stage = "secondary-run";
+  const secondary = await executeAndCancelSecondary(client, scope, sessionTasksPath);
+
   process.stdout.write(`${JSON.stringify({
     publicToolNames,
+    executeInputPropertyNames,
+    sessionTasksPath,
     scope,
     secondExecute: secondary.secondExecute,
     secondCanceled: secondary.secondCanceled,

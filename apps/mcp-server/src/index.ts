@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { realpath } from "node:fs/promises";
+
 import {
   connectOrLaunchDaemon,
   daemonEndpoint,
@@ -11,13 +14,14 @@ import {
 
 import { LocalDaemonGateway } from "./local-daemon-gateway.js";
 import { connectSmartFlowStdioServer } from "./server.js";
+import type { SmartFlowMcpSession } from "./tools/index.js";
 
 export type { DaemonGateway } from "./daemon-gateway.js";
 export {
-  SMARTFLOW_EXECUTE_DESCRIPTION,
-  SMARTFLOW_MCP_INSTRUCTIONS
+  createSmartFlowExecuteDescription,
+  createSmartFlowMcpInstructions
 } from "./server.js";
-export { createToolHandlers } from "./tools/index.js";
+export { createToolHandlers, type SmartFlowMcpSession } from "./tools/index.js";
 
 export interface SmartFlowMcpGatewayOptions {
   executablePath: string;
@@ -27,6 +31,13 @@ export interface SmartFlowMcpGatewayOptions {
 }
 
 export async function runSmartFlowMcpGateway(options: SmartFlowMcpGatewayOptions): Promise<void> {
+  const projectRoot = await realpath(process.cwd());
+  const sessionId = randomUUID();
+  const session: SmartFlowMcpSession = {
+    sessionId,
+    projectRoot,
+    tasksPath: `.smartflow/tasks/${sessionId}/tasks.md`
+  };
   const dataDirectory = options.dataDirectory ?? `${resolveInstallationDataDirectory()}/daemon`;
   const config = resolveSmartFlowConfig();
   if (config.review.strategy !== undefined) {
@@ -40,7 +51,7 @@ export async function runSmartFlowMcpGateway(options: SmartFlowMcpGatewayOptions
     {
       command: options.executablePath,
       argv: [options.entryPath, "daemon", "--data-dir", dataDirectory],
-      cwd: process.cwd(),
+      cwd: projectRoot,
       env: workerLaunchEnvironment(process.env, workerLaunchConfiguration)
     },
     10_000,
@@ -48,7 +59,7 @@ export async function runSmartFlowMcpGateway(options: SmartFlowMcpGatewayOptions
     workerEnvironment
   );
   const gateway = new LocalDaemonGateway(client);
-  const server = await connectSmartFlowStdioServer(gateway);
+  const server = await connectSmartFlowStdioServer(gateway, session);
   await new Promise<void>((settle) => {
     let settled = false;
     const finish = (): void => {

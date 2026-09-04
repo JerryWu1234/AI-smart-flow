@@ -319,7 +319,7 @@ previous repair result → latest repair result
 
 - 从 MCP protocol 删除 `approve_new_manifest_revision`；
 - 从 resume action schema 和 public action projection 删除该动作；
-- 仅从 resume input 删除 revision approval payload：`tasksPath`、`approvedSourceHash`、`approval.parentRevision` 等字段；`execute` 创建新 Job 所需的 `tasksPath` 和 `approvedSourceHash` 继续保留；
+- 仅从 resume input 删除 revision approval payload：`tasksPath`、`approvedSourceHash`、`approval.parentRevision` 等字段；Daemon/internal execute 创建新 Job 所需的 `tasksPath` 和 `approvedSourceHash` 继续保留，但 public MCP `smartflow_execute` 不再暴露这些字段；
 - 删除 `ProjectRuntime.resume()` 中创建新 Revision 的分支；
 - 删除 `apps/daemon/src/approved-revision.ts`；
 - 删除所有 `createApprovedRevision()` 调用。

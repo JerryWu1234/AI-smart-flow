@@ -2,6 +2,6 @@
 "@jerrywu1234/smartflow": major
 ---
 
-Remove `expectedStateVersion` from the public MCP execute, resume, and cancel inputs. The Daemon now owns state-version concurrency checks internally, while callers use `requestId` for idempotent retries and operation-specific guards for validity.
+Remove `expectedStateVersion` from the public MCP resume and cancel inputs, and make public `smartflow_execute` a strict zero-argument, session-bound call. The MCP adapter now owns the canonical project root and task path, computes the source hash, and generates the execute idempotency request ID before calling the Daemon's internal four-field execute interface. Resume and cancel callers still use their own `requestId` values for idempotent retries and operation-specific guards.
 
-Clients must stop sending `expectedStateVersion` because the strict input schemas reject unknown fields.
+Clients must call `smartflow_execute` with `{}` and stop sending `projectRoot`, `tasksPath`, `approvedSourceHash`, execute `requestId`, or `expectedStateVersion`; strict public input schemas reject those fields.

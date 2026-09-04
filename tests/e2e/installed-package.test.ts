@@ -315,6 +315,14 @@ describe("installed SmartFlow package", () => {
         lifecycle.publicToolNames,
         "installed public MCP tool names"
       );
+      const sessionTasksPath = lifecycle.sessionTasksPath;
+      if (typeof sessionTasksPath !== "string") {
+        throw new Error("Installed lifecycle omitted its session task path");
+      }
+      const executeInputPropertyNames = asStringArray(
+        lifecycle.executeInputPropertyNames,
+        "installed execute input property names"
+      );
       const scope = asRecord(lifecycle.scope, "installed lifecycle scope");
       const secondExecute = asRecord(lifecycle.secondExecute, "installed second execute result");
       const secondCanceled = asRecord(lifecycle.secondCanceled, "installed second canceled result");
@@ -346,6 +354,10 @@ describe("installed SmartFlow package", () => {
         "smartflow_review_turn",
         "smartflow_status"
       ]);
+      expect(executeInputPropertyNames).toEqual([]);
+      expect(sessionTasksPath).toMatch(
+        /^\.smartflow\/tasks\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/tasks\.md$/u
+      );
       expect(scope.jobId).toBe(result.jobId);
       expect(secondExecute.jobId).not.toBe(result.jobId);
       expect(secondCanceled).toMatchObject({ phase: "CANCELED" });

@@ -1,16 +1,12 @@
 # Host 任务文件生成与用户确认实现计划
 
-> **状态：已实施。**
+> **状态：历史计划；public execute 部分已由 session-bound 零参数方案取代。**
 >
-> **实际落点：** `apps/mcp-server/src/server.ts` 与 `README.md` 定义 Host 准备、完整展示和明确确认策略；`packages/workspace/src/git-snapshot.ts`、`git-capability.ts`、`candidate-builder.ts` 实现 control-plane snapshot 隔离与 Candidate 防线；`apps/daemon/src/worker-runner.ts`、`git-publish-source.ts` 实现 immutable source 恢复与 Publish 防线。相关 contract、Host workflow、TaskManifest、Workspace、Worker/Review 和 Publish 测试均已补充。
+> **后续决策：** 每个 stdio MCP session 绑定 canonical project root，并生成固定的 `.smartflow/tasks/<sessionId>/tasks.md`。Host 在前一个 Job 完成后覆盖该路径准备下一批任务，用户确认后只调用 `smartflow_execute({})`。`projectRoot`、`tasksPath`、`approvedSourceHash` 和 execute `requestId` 仍存在于 MCP adapter 到 Daemon 的内部边界，不再由 Host 提供。
 >
-> **验证结果：** 定向 Vitest 回归共 22 个测试文件、85 个测试通过；`pnpm run typecheck` 与 `pnpm run build` 均通过。
+> **仍然有效：** Host 的实现意图门、磁盘重读、完整展示与明确确认策略，以及 `.smartflow/tasks/**` 的 control-plane snapshot/Candidate/Publish 隔离、immutable task artifact 和恢复防线。
 >
-> 本计划建立 `smartflow_execute` 之前的 Host 准备流程：无论任务来自聊天上下文、一个已有文件或多个已有文件，Host 都先在项目内生成一份符合 SmartFlow 语法的 canonical `tasks.md`，向用户展示磁盘中的完整内容，并只在用户明确确认后计算文件 SHA-256、调用 `smartflow_execute`。
->
-> `.smartflow/tasks/**` 被定义为 SmartFlow control-plane 路径：它可以在用户项目中保留供查看和追溯，但不得进入 Git Run baseline、RUN_RESULT、Candidate 或 Publish。Worker workspace 只注入当前 Job 的 immutable task source，Reviewer 读取的 canonical 文件也必须恢复为该确认版本。
->
-> 本计划建立在业务 Revision 已移除、一个 Job 只绑定一份不可变 Task source 和 TaskManifest 的模型上，不恢复 `revision`、`revisionId`、`expectedRevision` 或同一 Job 内替换任务定义的能力。
+> 下文保留原始 per-request 目录方案作为历史实施记录；当前行为以 `README.md`、`apps/mcp-server/src/server.ts` 和 protocol schema 为准。
 
 ## 1. 问题与核心决策
 
@@ -327,9 +323,17 @@ materialize 不含 .smartflow/tasks/** 的 input snapshot
 
 Repair attempt 继续复用同一 Job 的 result snapshot 和 PI session；由于 result snapshot 不包含任务控制文件，每次准备 workspace 时仍由 `syncCanonicalTask()` 注入同一份 immutable source。
 
-## 6. 协议保持不变
+## 6. 当前协议边界（后续变更）
 
-`packages/protocol/src/schema/mcp-tools.ts` 中的 execute 输入继续保持：
+Public MCP execute 输入现在严格为：
+
+```ts
+{}
+```
+
+Host 从 MCP instructions 获取当前 session 的 `.smartflow/tasks/<sessionId>/tasks.md`，完成磁盘重读、完整展示与用户确认后调用 `smartflow_execute({})`。Host 不再传 `projectRoot`、`tasksPath`、`approvedSourceHash` 或 execute `requestId`。
+
+MCP adapter 读取 session 绑定的文件、计算 hash 并生成内部幂等 ID，然后向 Daemon 发送：
 
 ```ts
 {
@@ -340,12 +344,7 @@ Repair attempt 继续复用同一 Job 的 result snapshot 和 PI session；由�
 }
 ```
 
-字段职责：
-
-- `projectRoot`：用户项目根目录；
-- `tasksPath`：当前请求唯一 canonical 文件的项目相对路径；
-- `approvedSourceHash`：用户已确认文件精确字节的 SHA-256；
-- `requestId`：当前新 execute 请求的唯一幂等身份，同时用于隔离任务目录；
+因此 Daemon 的安全读取、source hash 比对、immutable artifact 与 request replay 机制保持不变。`approvedSourceHash` 证明内部请求绑定到 adapter 实际读取的字节，但仍不能单独证明用户确认；完整展示和明确确认继续属于 Host policy。
 
 不新增：
 

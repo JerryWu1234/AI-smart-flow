@@ -42,51 +42,45 @@ class LifecycleGateway implements HostGateway {
   public phase: RunPhase = "PREPARING";
   public stateVersion = 0;
   public executeCalls = 0;
-  private readonly receipts = new Map<string, unknown>();
+  private executeReceipt: unknown;
 
-  public async call(toolName: string, input: unknown): Promise<unknown> {
-    const request = input as Record<string, unknown>;
-    if (toolName !== "smartflow_execute") this.assertRun(request);
-    if (toolName === "smartflow_execute") return this.execute(request);
-    if (toolName === "smartflow_resume") {
-      this.phase = "RUNNING";
-      this.stateVersion += 1;
-      return this.mutationResult();
+  public call(toolName: string, input: unknown): Promise<unknown> {
+    try {
+      const request = input as Record<string, unknown>;
+      if (toolName !== "smartflow_execute") this.assertRun(request);
+      if (toolName === "smartflow_execute") return Promise.resolve(this.execute());
+      if (toolName === "smartflow_resume") {
+        this.phase = "RUNNING";
+        this.stateVersion += 1;
+        return Promise.resolve(this.mutationResult());
+      }
+      if (toolName === "smartflow_cancel") {
+        this.phase = "CANCELING";
+        this.stateVersion += 1;
+        return Promise.resolve(this.mutationResult());
+      }
+      if (toolName === "smartflow_result") {
+        return Promise.resolve({
+          projectId: "project-1",
+          jobId: "job-1",
+          phase: this.phase,
+          status: this.phase === "PAUSED" ? "PAUSED" : "RUNNING",
+          artifacts: [],
+          nextActions: this.phase === "PAUSED" ? ["cancel"] : []
+        });
+      }
+      return Promise.reject(new LifecycleError("UNKNOWN_TOOL", toolName));
+    } catch (error: unknown) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
     }
-    if (toolName === "smartflow_cancel") {
-      this.phase = "CANCELING";
-      this.stateVersion += 1;
-      return this.mutationResult();
-    }
-    if (toolName === "smartflow_result") {
-      return {
-        projectId: "project-1",
-        jobId: "job-1",
-        phase: this.phase,
-        status: this.phase === "PAUSED" ? "PAUSED" : "RUNNING",
-        artifacts: [],
-        nextActions: this.phase === "PAUSED" ? ["cancel"] : []
-      };
-    }
-    throw new LifecycleError("UNKNOWN_TOOL", toolName);
   }
 
-  private async execute(request: Record<string, unknown>): Promise<unknown> {
-    const requestId = String(request.requestId);
-    const existing = this.receipts.get(requestId);
-    if (existing !== undefined) return existing;
-    const projectRoot = String(request.projectRoot);
-    const tasksPath = String(request.tasksPath);
-    const bytes = await readFile(resolve(projectRoot, tasksPath));
-    const observedHash = createHash("sha256").update(bytes).digest("hex");
-    if (observedHash !== request.approvedSourceHash) {
-      throw new LifecycleError("APPROVED_SOURCE_DRIFT", "Daemon observed a different tasks.md");
-    }
+  private execute(): unknown {
+    if (this.executeReceipt !== undefined) return this.executeReceipt;
     this.executeCalls += 1;
     this.stateVersion = 1;
-    const response = this.mutationResult();
-    this.receipts.set(requestId, response);
-    return response;
+    this.executeReceipt = this.mutationResult();
+    return this.executeReceipt;
   }
 
   private assertRun(request: Record<string, unknown>): void {
@@ -132,7 +126,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
 
     await writeFile(tasksPath, `${finalDraft.source}drift`, "utf8");
     await expect(
-      executeApprovedTasks(gateway, harness.projectDir, approval, "execute-1")
+      executeApprovedTasks(gateway, harness.projectDir, approval)
     ).rejects.toMatchObject({ code: "APPROVED_SOURCE_DRIFT" });
     expect(gateway.executeCalls).toBe(0);
 
@@ -140,12 +134,11 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     const execute = await executeApprovedTasks(
       gateway,
       harness.projectDir,
-      approval,
-      "execute-1"
+      approval
     );
     expect(execute).toMatchObject({ phase: "PREPARING", stateVersion: 1 });
     expect(
-      await executeApprovedTasks(gateway, harness.projectDir, approval, "execute-1")
+      await executeApprovedTasks(gateway, harness.projectDir, approval)
     ).toEqual(execute);
     expect(gateway.executeCalls).toBe(1);
 

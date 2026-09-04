@@ -8,4 +8,4 @@ Retire the `[P]` parallel Task tag. It was parsed into `ParsedTask.parallel`, st
 
 Breaking for persisted state. `manifestTaskSchema` is strict, and a manifest Artifact written by an earlier release still carries `parallel`, so re-parsing it throws on the unrecognized key. That happens on the recovery, review, repair, and worker read paths. Manifest Artifacts are not migrated or dual-read: clear local daemon data with `pnpm clean:daemon-data` before using this release, and let in-flight runs finish on the old version first.
 
-Removing the field also changes `tasksHash` and the manifest hash for identical task sources. `sourceHash` is unaffected because it digests the raw approved bytes, so Host-side `approvedSourceHash` checks keep working.
+Removing the field also changes `tasksHash` and the manifest hash for identical task sources. `sourceHash` is unaffected because it digests the raw approved bytes, so the MCP adapter's internal `approvedSourceHash` check keeps working.

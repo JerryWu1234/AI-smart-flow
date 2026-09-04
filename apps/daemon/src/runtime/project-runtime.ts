@@ -10,7 +10,7 @@ import { redactPiValue } from "@smartflow/provider-pi";
 import {
   cancelInputSchema,
   durableReviewDecisionSchema,
-  executeInputSchema,
+  daemonExecuteInputSchema,
   hostActionSchema,
   resultOutputSchema,
   resultInputSchema,
@@ -20,7 +20,7 @@ import {
   statusInputSchema,
   type ArtifactRef,
   type CancelInput,
-  type ExecuteInput,
+  type DaemonExecuteInput,
   type HostAction,
   type ResumeInput,
   type ResultOutput,
@@ -407,7 +407,7 @@ export class ProjectRuntime {
     switch (request.method) {
       case "smartflow_execute":
         {
-          const parsed = executeInputSchema.safeParse(request.payload);
+          const parsed = daemonExecuteInputSchema.safeParse(request.payload);
           if (!parsed.success) {
             if (hasUnsafeTasksPathIssue(parsed.error)) {
               throw new ProjectRuntimeError("TASKS_PATH_UNSAFE", "tasksPath must be Project-relative without parent traversal");
@@ -509,7 +509,7 @@ export class ProjectRuntime {
   }
 
   public async execute(
-    input: ExecuteInput,
+    input: DaemonExecuteInput,
     providerRuntimeConfigHash?: string,
     clientName?: string
   ): Promise<unknown> {

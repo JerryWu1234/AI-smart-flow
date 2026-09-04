@@ -1,10 +1,12 @@
 import type { DaemonGateway, ValidatedHandler } from "../daemon-gateway.js";
 import { createCancelHandler } from "./cancel.js";
-import { createExecuteHandler } from "./execute.js";
+import { createExecuteHandler, type SmartFlowMcpSession } from "./execute.js";
 import { createResultHandler } from "./result.js";
 import { createResumeHandler } from "./resume.js";
 import { createReviewTurnHandler } from "./review-turn.js";
 import { createStatusHandler } from "./status.js";
+
+export type { SmartFlowMcpSession } from "./execute.js";
 
 export type SmartFlowToolName =
   | "smartflow_execute"
@@ -15,10 +17,11 @@ export type SmartFlowToolName =
   | "smartflow_result";
 
 export function createToolHandlers(
-  gateway: DaemonGateway
+  gateway: DaemonGateway,
+  session: SmartFlowMcpSession
 ): Readonly<Record<SmartFlowToolName, ValidatedHandler>> {
   return {
-    smartflow_execute: createExecuteHandler(gateway),
+    smartflow_execute: createExecuteHandler(gateway, session),
     smartflow_review_turn: createReviewTurnHandler(gateway),
     smartflow_status: createStatusHandler(gateway),
     smartflow_resume: createResumeHandler(gateway),
