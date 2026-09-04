@@ -29,7 +29,6 @@ export interface CompileTaskManifestOptions {
 
 export interface CompiledTaskManifest {
   manifest: TaskManifest;
-  manifestHash: string;
   artifactBytes: Uint8Array;
 }
 
@@ -89,9 +88,5 @@ export function compileTaskManifest(
   });
   const serialized = canonicalStringify(manifest);
   const artifactBytes = Buffer.from(serialized, "utf8");
-  return {
-    manifest,
-    manifestHash: sha256Bytes(artifactBytes),
-    artifactBytes
-  };
+  return { manifest, artifactBytes };
 }

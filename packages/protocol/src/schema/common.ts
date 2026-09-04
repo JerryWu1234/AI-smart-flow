@@ -52,7 +52,6 @@ export const idempotentReceiptSchema = z
     requestId: identifierSchema,
     requestHash: sha256Schema,
     response: canonicalValueSchema,
-    responseHash: sha256Schema,
     committedAtStateVersion: nonNegativeIntegerSchema
   })
   .strict();
