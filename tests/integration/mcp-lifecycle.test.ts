@@ -42,51 +42,45 @@ class LifecycleGateway implements HostGateway {
   public phase: RunPhase = "PREPARING";
   public stateVersion = 0;
   public executeCalls = 0;
-  private readonly receipts = new Map<string, unknown>();
+  private executeReceipt: unknown;
 
-  public async call(toolName: string, input: unknown): Promise<unknown> {
-    const request = input as Record<string, unknown>;
-    if (toolName !== "smartflow_execute") this.assertRun(request);
-    if (toolName === "smartflow_execute") return this.execute(request);
-    if (toolName === "smartflow_resume") {
-      this.phase = "RUNNING";
-      this.stateVersion += 1;
-      return this.mutationResult();
+  public call(toolName: string, input: unknown): Promise<unknown> {
+    try {
+      const request = input as Record<string, unknown>;
+      if (toolName !== "smartflow_execute") this.assertRun(request);
+      if (toolName === "smartflow_execute") return Promise.resolve(this.execute());
+      if (toolName === "smartflow_resume") {
+        this.phase = "RUNNING";
+        this.stateVersion += 1;
+        return Promise.resolve(this.mutationResult());
+      }
+      if (toolName === "smartflow_cancel") {
+        this.phase = "CANCELING";
+        this.stateVersion += 1;
+        return Promise.resolve(this.mutationResult());
+      }
+      if (toolName === "smartflow_result") {
+        return Promise.resolve({
+          projectId: "project-1",
+          jobId: "job-1",
+          phase: this.phase,
+          status: this.phase === "PAUSED" ? "PAUSED" : "RUNNING",
+          artifacts: [],
+          nextActions: this.phase === "PAUSED" ? ["cancel"] : []
+        });
+      }
+      return Promise.reject(new LifecycleError("UNKNOWN_TOOL", toolName));
+    } catch (error: unknown) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
     }
-    if (toolName === "smartflow_cancel") {
-      this.phase = "CANCELING";
-      this.stateVersion += 1;
-      return this.mutationResult();
-    }
-    if (toolName === "smartflow_result") {
-      return {
-        projectId: "project-1",
-        jobId: "job-1",
-        phase: this.phase,
-        status: this.phase === "PAUSED" ? "PAUSED" : "RUNNING",
-        artifacts: [],
-        nextActions: this.phase === "PAUSED" ? ["cancel"] : []
-      };
-    }
-    throw new LifecycleError("UNKNOWN_TOOL", toolName);
   }
 
-  private async execute(request: Record<string, unknown>): Promise<unknown> {
-    const requestId = String(request.requestId);
-    const existing = this.receipts.get(requestId);
-    if (existing !== undefined) return existing;
-    const projectRoot = String(request.projectRoot);
-    const tasksPath = String(request.tasksPath);
-    const bytes = await readFile(resolve(projectRoot, tasksPath));
-    const observedHash = createHash("sha256").update(bytes).digest("hex");
-    if (observedHash !== request.approvedSourceHash) {
-      throw new LifecycleError("APPROVED_SOURCE_DRIFT", "Daemon observed a different tasks.md");
-    }
+  private execute(): unknown {
+    if (this.executeReceipt !== undefined) return this.executeReceipt;
     this.executeCalls += 1;
     this.stateVersion = 1;
-    const response = this.mutationResult();
-    this.receipts.set(requestId, response);
-    return response;
+    this.executeReceipt = this.mutationResult();
+    return this.executeReceipt;
   }
 
   private assertRun(request: Record<string, unknown>): void {
@@ -132,7 +126,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
 
     await writeFile(tasksPath, `${finalDraft.source}drift`, "utf8");
     await expect(
-      executeApprovedTasks(gateway, harness.projectDir, approval, "execute-1")
+      executeApprovedTasks(gateway, harness.projectDir, approval)
     ).rejects.toMatchObject({ code: "APPROVED_SOURCE_DRIFT" });
     expect(gateway.executeCalls).toBe(0);
 
@@ -140,12 +134,11 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     const execute = await executeApprovedTasks(
       gateway,
       harness.projectDir,
-      approval,
-      "execute-1"
+      approval
     );
     expect(execute).toMatchObject({ phase: "PREPARING", stateVersion: 1 });
     expect(
-      await executeApprovedTasks(gateway, harness.projectDir, approval, "execute-1")
+      await executeApprovedTasks(gateway, harness.projectDir, approval)
     ).toEqual(execute);
     expect(gateway.executeCalls).toBe(1);
 
@@ -221,7 +214,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       const request = {
         projectRoot: harness.projectDir,
         tasksPath: "tasks.md",
-        approvedSourceHash: createHash("sha256").update(tasksSource).digest("hex"),
         requestId: "real-execute-1"
       };
       const execute = await firstClient.call("smartflow_execute", request) as {
@@ -231,6 +223,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         phase: RunPhase;
       };
       expect(execute).toMatchObject({ stateVersion: 1, phase: "PREPARING" });
+      await rm(resolve(harness.projectDir, "tasks.md"));
       expect(await firstClient.call("smartflow_execute", request)).toEqual(execute);
       const deadline = Date.now() + 2_000;
       let status: unknown;
@@ -254,6 +247,7 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       try {
         const restartedClient = await LocalIpcClient.connect(restartedServer.endpoint);
         try {
+          expect(await restartedClient.call("smartflow_execute", request)).toEqual(execute);
           expect(await restartedClient.call("smartflow_result", {
             projectId: execute.projectId,
             jobId: execute.jobId
@@ -301,7 +295,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     const firstRequest = {
       projectRoot: harness.projectDir,
       tasksPath: "tasks.md",
-      approvedSourceHash: createHash("sha256").update(tasksSource).digest("hex"),
       requestId: "active-project-first"
     };
     try {
@@ -357,13 +350,11 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       const first = await client.call("smartflow_execute", {
         projectRoot: harness.projectDir,
         tasksPath: "tasks-a.md",
-        approvedSourceHash: createHash("sha256").update(firstSource).digest("hex"),
         requestId: "multi-active-first"
       }) as { projectId: string; jobId: string };
       const second = await client.call("smartflow_execute", {
         projectRoot: harness.projectDir,
         tasksPath: "tasks-b.md",
-        approvedSourceHash: createHash("sha256").update(secondSource).digest("hex"),
         requestId: "multi-active-second"
       }) as { projectId: string; jobId: string };
       await bothStarted;
@@ -403,7 +394,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const tasksSource = createTasksSource();
-    const approvedSourceHash = createHash("sha256").update(tasksSource).digest("hex");
     await writeFile(resolve(harness.projectDir, "tasks.md"), tasksSource, "utf8");
     await mkdir(resolve(harness.projectDir, "task-directory"));
     const outsideTasks = resolve(harness.dataDir, "outside-tasks.md");
@@ -440,7 +430,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       payload: {
         projectRoot: harness.projectDir,
         tasksPath,
-        approvedSourceHash,
         requestId
       }
     });
@@ -499,7 +488,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         jobId: "job-1",
         resumeAction: "approve_new_manifest_revision",
         tasksPath: "tasks.md",
-        approvedSourceHash: "0".repeat(64),
         approval: { kind: "USER", parentRevision: null, authorizedCriterionIds: [] }
       }
     })).rejects.toMatchObject({ name: "ZodError" });
@@ -530,7 +518,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
       payload: {
         projectRoot: harness.projectDir,
         tasksPath: "tasks.md",
-        approvedSourceHash: createHash("sha256").update(tasksSource).digest("hex"),
         requestId: "execute-late-failure"
       }
     }) as { projectId: string; jobId: string };
@@ -1212,7 +1199,6 @@ describe("Host planning, approval, and MCP lifecycle", () => {
         jobId: "job-1",
         resumeAction: "retry_cancel",
         tasksPath: "tasks.md",
-        approvedSourceHash: "0".repeat(64),
         approval: { kind: "USER", parentRevision: null, authorizedCriterionIds: [] }
       }
     })).rejects.toMatchObject({ name: "ZodError" });

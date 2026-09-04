@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { writeFile } from "node:fs/promises";
@@ -63,8 +62,7 @@ describe("runtime absolute-path non-disclosure", () => {
       payload: {
         requestId: "execute-path-canary",
         projectRoot: harness.projectDir,
-        tasksPath: "tasks.md",
-        approvedSourceHash: createHash("sha256").update(tasksSource).digest("hex")
+        tasksPath: "tasks.md"
       }
     }) as { projectId: string; jobId: string };
 

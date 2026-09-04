@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
@@ -37,10 +36,6 @@ const activeHarnesses: RuntimeHarness[] = [];
 afterEach(async () => {
   await Promise.all(activeHarnesses.splice(0).map((harness) => harness.cleanup()));
 });
-
-function sha256(value: string | Uint8Array): string {
-  return createHash("sha256").update(value).digest("hex");
-}
 
 class RepairLoopProvider implements WorkerProvider {
   public readonly id = "pi" as const;
@@ -387,8 +382,7 @@ describe("production daemon Review repair loop", () => {
       payload: {
         requestId: "execute-r1",
         projectRoot: harness.projectDir,
-        tasksPath: "tasks.md",
-        approvedSourceHash: sha256(tasksSource)
+        tasksPath: "tasks.md"
       }
     }) as { projectId: string; jobId: string };
     const store = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
@@ -523,8 +517,7 @@ describe("production daemon Review repair loop", () => {
       payload: {
         requestId: "execute-no-progress",
         projectRoot: harness.projectDir,
-        tasksPath: "tasks.md",
-        approvedSourceHash: sha256(tasksSource)
+        tasksPath: "tasks.md"
       }
     }) as { projectId: string; jobId: string };
     const jobId = execute.jobId;
@@ -613,8 +606,7 @@ describe("production daemon Review repair loop", () => {
     const execute = await call("smartflow_execute", {
       requestId: "review-turn-execute",
       projectRoot: harness.projectDir,
-      tasksPath: "tasks.md",
-      approvedSourceHash: sha256(tasksSource)
+      tasksPath: "tasks.md"
     }) as { projectId: string; jobId: string };
     const jobId = execute.jobId;
     const store = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));
@@ -780,8 +772,7 @@ describe("production daemon Review repair loop", () => {
       payload: {
         requestId: "execute-cancel-review",
         projectRoot: harness.projectDir,
-        tasksPath: "tasks.md",
-        approvedSourceHash: sha256(tasksSource)
+        tasksPath: "tasks.md"
       }
     }) as { projectId: string; jobId: string };
     const store = new StateStore(resolve(harness.dataDir, "projects", execute.projectId));

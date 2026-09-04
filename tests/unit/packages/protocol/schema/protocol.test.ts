@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  daemonExecuteInputSchema,
   durableLeaderDecisionSchema,
   durableReviewDecisionSchema,
   executeInputSchema,
@@ -159,7 +160,7 @@ describe("SmartFlow protocol schemas", () => {
     const removedManifestApprovalAnswer = {
       action: "approve_new_manifest_revision" as const,
       tasksPath: "tasks.md",
-      approvedSourceHash: digest
+      expectedStateVersion: 0
     };
     expect(reviewTurnOutputSchema.safeParse({
       ...repairPause,
@@ -418,20 +419,39 @@ describe("SmartFlow protocol schemas", () => {
     }).success).toBe(false);
   });
 
-  it("requires execute approval to bind the source hash", () => {
-    expect(() =>
-      executeInputSchema.parse({
-        projectRoot: "/tmp/project",
-        tasksPath: "tasks.md",
-        requestId: "req-1"
-      })
-    ).toThrow();
+  it("exposes execute as a strict zero-argument public input", () => {
+    expect(executeInputSchema.parse({})).toEqual({});
+    for (const extra of [
+      { projectRoot: "/tmp/project" },
+      { tasksPath: "tasks.md" },
+      { unexpected: true },
+      { requestId: "req-1" },
+      { expectedStateVersion: 0 }
+    ]) {
+      expect(executeInputSchema.safeParse(extra).success).toBe(false);
+    }
   });
 
-  it("requires tasksPath to be relative and free of parent traversal", () => {
+  it("requires internal execute routing and idempotency fields", () => {
+    const request = {
+      projectRoot: "/tmp/project",
+      tasksPath: "tasks.md",
+      requestId: "req-1"
+    };
+    expect(daemonExecuteInputSchema.parse(request)).toEqual(request);
+    expect(daemonExecuteInputSchema.safeParse({
+      projectRoot: request.projectRoot,
+      tasksPath: request.tasksPath
+    }).success).toBe(false);
+    expect(daemonExecuteInputSchema.safeParse({
+      ...request,
+      unexpected: true
+    }).success).toBe(false);
+  });
+
+  it("requires internal tasksPath to be relative and free of parent traversal", () => {
     const base = {
       projectRoot: "/tmp/project",
-      approvedSourceHash: digest,
       requestId: "req-path"
     };
     for (const tasksPath of [
@@ -441,9 +461,12 @@ describe("SmartFlow protocol schemas", () => {
       "sub/../tasks.md",
       "sub\\..\\tasks.md"
     ]) {
-      expect(executeInputSchema.safeParse({ ...base, tasksPath }).success).toBe(false);
+      expect(daemonExecuteInputSchema.safeParse({ ...base, tasksPath }).success).toBe(false);
     }
-    expect(executeInputSchema.safeParse({ ...base, tasksPath: "approved/tasks.md" }).success).toBe(true);
+    expect(daemonExecuteInputSchema.safeParse({
+      ...base,
+      tasksPath: "approved/tasks.md"
+    }).success).toBe(true);
   });
 
   it("strictly models durable Review, Leader, and Publish evidence", () => {

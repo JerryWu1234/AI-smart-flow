@@ -29,55 +29,38 @@ describe("Host task approval", () => {
   it("never calls execute without an explicit approval snapshot", async () => {
     const gateway = new RecordingGateway();
 
-    await expect(executeApprovedTasks(gateway, process.cwd(), undefined, "request-missing"))
+    await expect(executeApprovedTasks(gateway, process.cwd(), undefined))
       .rejects.toMatchObject({ code: "APPROVAL_REQUIRED" });
     expect(gateway.calls).toEqual([]);
   });
 
-  it("binds sequential request directories to their own exact bytes and execute payloads", async () => {
+  it("binds sequential approvals to exact bytes and sends empty execute inputs", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "smartflow-host-approval-"));
     const gateway = new RecordingGateway();
-    const requests = [
-      { id: "request-a", source: "# Tasks\n\nrequest A\n" },
-      { id: "request-b", source: "# Tasks\n\nrequest B\n" }
-    ];
+    const tasksPath = ".smartflow/tasks/session-test/tasks.md";
+    const absolutePath = resolve(projectRoot, tasksPath);
+    const sources = ["# Tasks\n\nrequest A\n", "# Tasks\n\nrequest B\n"];
 
     try {
-      for (const request of requests) {
-        const tasksPath = `.smartflow/tasks/${request.id}/tasks.md`;
-        const absolutePath = resolve(projectRoot, tasksPath);
-        await mkdir(dirname(absolutePath), { recursive: true });
-        await writeFile(absolutePath, request.source, "utf8");
+      await mkdir(dirname(absolutePath), { recursive: true });
+      for (const source of sources) {
+        await writeFile(absolutePath, source, "utf8");
         const displayedBytes = await readFile(absolutePath);
         const approval = approveTasksSource(tasksPath, displayedBytes);
 
-        await executeApprovedTasks(gateway, projectRoot, approval, request.id);
+        await executeApprovedTasks(gateway, projectRoot, approval);
 
         expect(approval.sourceHash).toBe(
           createHash("sha256").update(displayedBytes).digest("hex")
         );
-        expect(tasksPath.split("/").at(-2)).toBe(request.id);
       }
 
-      expect(await readFile(
-        resolve(projectRoot, ".smartflow/tasks/request-a/tasks.md"),
-        "utf8"
-      )).toBe(requests[0]?.source);
-      expect(gateway.calls).toHaveLength(2);
+      expect(await readFile(absolutePath, "utf8")).toBe(sources[1]);
       expect(gateway.calls.map((call) => call.toolName)).toEqual([
         "smartflow_execute",
         "smartflow_execute"
       ]);
-      expect(gateway.calls.map((call) => call.input)).toEqual(requests.map((request) => ({
-        projectRoot,
-        tasksPath: `.smartflow/tasks/${request.id}/tasks.md`,
-        approvedSourceHash: createHash("sha256").update(request.source).digest("hex"),
-        requestId: request.id
-      })));
-      for (const call of gateway.calls) {
-        expect(call.input).not.toHaveProperty("revision");
-        expect(call.input).not.toHaveProperty("expectedRevision");
-      }
+      expect(gateway.calls.map((call) => call.input)).toEqual([{}, {}]);
     } finally {
       await rm(projectRoot, { recursive: true, force: true });
     }

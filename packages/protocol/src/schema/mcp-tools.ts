@@ -44,11 +44,12 @@ export const tasksPathSchema = z
   .min(1)
   .refine(isProjectRelativePath, { message: "TASKS_PATH_UNSAFE" });
 
-export const executeInputSchema = z
+export const executeInputSchema = z.object({}).strict();
+
+export const daemonExecuteInputSchema = z
   .object({
     projectRoot: z.string().min(1),
     tasksPath: tasksPathSchema,
-    approvedSourceHash: sha256Schema,
     requestId: identifierSchema
   })
   .strict();
@@ -233,6 +234,7 @@ export const reviewTurnOutputSchema = z.discriminatedUnion("kind", [
 });
 
 export type ExecuteInput = z.infer<typeof executeInputSchema>;
+export type DaemonExecuteInput = z.infer<typeof daemonExecuteInputSchema>;
 export type ExecuteOutput = z.infer<typeof executeOutputSchema>;
 export type ResumeInput = z.infer<typeof resumeInputSchema>;
 export type CancelInput = z.infer<typeof cancelInputSchema>;
