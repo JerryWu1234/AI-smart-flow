@@ -1125,11 +1125,11 @@ export class WorkerRunner {
       new TextDecoder().decode(await this.store.readArtifact(prepared.run.taskManifest))
     ));
     const reviewEnabled = resolveReviewEnabled();
-    const reviewTaskSourceHash = reviewEnabled
-      ? createHash("sha256")
-          .update(await this.store.readArtifact(prepared.run.taskSource))
-          .digest("hex")
-      : undefined;
+    let reviewTaskSourceHash: string | undefined;
+    if (reviewEnabled) {
+      await this.store.readArtifact(prepared.run.taskSource);
+      reviewTaskSourceHash = prepared.run.taskSource.sha256.replace(/^sha256:/u, "");
+    }
     const candidateIncomplete = candidate.operations.length === 0 && !manifest.allowNoChange;
 
     await this.mutations.mutate(

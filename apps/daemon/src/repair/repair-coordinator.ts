@@ -273,8 +273,6 @@ export class RepairCoordinator {
               expectedPiSessionId,
               sessionArtifact,
               providerRuntimeConfigHash: activeAttempt.providerRuntimeConfigHash,
-              taskSourceHash: active.taskSource.sha256.replace(/^sha256:/u, ""),
-              taskManifestHash: active.taskManifest.sha256.replace(/^sha256:/u, ""),
               prompt,
               workspaceSeedSnapshot
             }

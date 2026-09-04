@@ -13,10 +13,6 @@ export interface ResolvedRepairContinuation {
   sessionArtifact: ArtifactRef;
 }
 
-function digest(value: string): string {
-  return value.replace(/^sha256:/u, "");
-}
-
 export function resolveRepairContinuation(
   run: RunRecord
 ): ResolvedRepairContinuation | undefined {
@@ -40,10 +36,6 @@ export function resolveRepairContinuation(
     continuation.prompt.length === 0 ||
     typeof continuation.expectedPiSessionId !== "string" ||
     continuation.expectedPiSessionId.length === 0 ||
-    typeof continuation.taskSourceHash !== "string" ||
-    continuation.taskSourceHash !== digest(run.taskSource.sha256) ||
-    typeof continuation.taskManifestHash !== "string" ||
-    continuation.taskManifestHash !== digest(run.taskManifest.sha256) ||
     typeof continuation.providerRuntimeConfigHash !== "string" ||
     continuation.providerRuntimeConfigHash.length === 0 ||
     !workspaceSeedSnapshot.success ||
