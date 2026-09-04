@@ -85,7 +85,7 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { DatabaseSync } from "node:sqlite";
-const [databasePath, requestId, requestHash, responseHash] = process.argv.slice(1);
+const [databasePath, requestId, requestHash] = process.argv.slice(1);
 const database = new DatabaseSync(databasePath);
 const ownerToken = randomUUID();
 const startedAt = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(process.pid)], {
@@ -126,7 +126,6 @@ process.stdin.once("data", () => {
     requestId,
     requestHash,
     response: { accepted: true },
-    responseHash,
     committedAtStateVersion: nextStateVersion
   };
   database.prepare(\`
@@ -360,8 +359,7 @@ describe("atomic state replacement crash points", () => {
       SQLITE_RECEIPT_WINNER_SCRIPT,
       store.databasePath,
       request.requestId,
-      canonicalHash(request.payload),
-      canonicalHash(response)
+      canonicalHash(request.payload)
     ], { stdio: ["pipe", "pipe", "pipe"] });
     try {
       await waitForLine(child.stdout, "LEASED");

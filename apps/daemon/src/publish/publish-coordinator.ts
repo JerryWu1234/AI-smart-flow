@@ -627,7 +627,6 @@ export class PublishCoordinator {
             ...marker,
             status: "MISMATCH",
             operationId,
-            confirmationRequestHash,
             checkedAt: new Date().toISOString(),
             conflicts: observation.conflicts
           };

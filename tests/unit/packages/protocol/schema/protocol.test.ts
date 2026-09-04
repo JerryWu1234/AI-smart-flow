@@ -132,9 +132,6 @@ describe("SmartFlow protocol schemas", () => {
         sha256: digest,
         size: 10
       },
-      sourceHash: digest,
-      baseTaskSourceHash: "b".repeat(64),
-      baseTaskManifestHash: "c".repeat(64),
       suggestedTasksPath: "tasks.md",
       appendText: "repair task",
       addedTaskLines: ["- [ ] T002 repair"],

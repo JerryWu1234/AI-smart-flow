@@ -357,7 +357,6 @@ export class ReviewRunner {
           const paused = this.coordinator.pauseForApprovedSourceDrift(
             current,
             request.jobId,
-            observation,
             startedAt
           );
           return { nextState: paused.nextState, response: { kind: "DRIFT" as const } };
@@ -493,8 +492,7 @@ export class ReviewRunner {
         if (!observation.matches) {
           const paused = this.coordinator.pauseForApprovedSourceDrift(
             current,
-            context.jobId,
-            observation
+            context.jobId
           );
           return {
             nextState: paused.nextState,

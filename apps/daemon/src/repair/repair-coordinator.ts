@@ -176,9 +176,6 @@ export class RepairCoordinator {
         {
           repairDraft: {
             sourceArtifact,
-            sourceHash: draftHash,
-            baseTaskSourceHash: parentManifest.sourceHash,
-            baseTaskManifestHash: run.taskManifest.sha256.replace(/^sha256:/u, ""),
             suggestedTasksPath: projectRelativePath,
             appendText,
             addedTaskLines,

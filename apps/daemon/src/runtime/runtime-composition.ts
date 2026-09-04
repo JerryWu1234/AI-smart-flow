@@ -398,8 +398,7 @@ export class ProductionRuntimeComposition {
         ]).has(active.phase)) {
           const paused = new ReviewCoordinator(context.store).pauseForApprovedSourceDrift(
             current,
-            run.jobId,
-            { approvedHash, observedHash: observed }
+            run.jobId
           );
           return {
             nextState: paused.nextState,

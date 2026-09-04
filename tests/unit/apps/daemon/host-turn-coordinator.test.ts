@@ -395,9 +395,6 @@ describe("HostTurnCoordinator daemon-owned Review boundary", () => {
         sha256: digestA,
         size: 10
       },
-      sourceHash: digestA,
-      baseTaskSourceHash: digestA,
-      baseTaskManifestHash: digestB,
       suggestedTasksPath: "tasks.md",
       appendText: "\n- [ ] T002 repair",
       addedTaskLines: ["- [ ] T002 repair"],
