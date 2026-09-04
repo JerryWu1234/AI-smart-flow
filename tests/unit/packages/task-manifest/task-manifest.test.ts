@@ -16,6 +16,10 @@ const baseOptions = {
   }
 };
 
+function artifactText(compiled: ReturnType<typeof compileTaskManifest>): string {
+  return new TextDecoder().decode(compiled.artifactBytes);
+}
+
 describe("TaskManifest compiler", () => {
   it("compiles pure Markdown into deterministic hashes and canonical artifact bytes", () => {
     const first = compileTaskManifest(createTasksSource(), baseOptions);
@@ -29,9 +33,8 @@ describe("TaskManifest compiler", () => {
     });
     expect(first.manifest.canonicalTaskPath).toBe("tasks.md");
     expect(first.manifest.providerRuntimeConfigHash).toMatch(/^[a-f0-9]{64}$/u);
-    expect(first.manifestHash).toMatch(/^[a-f0-9]{64}$/u);
     expect(first.manifest.enabledTaskIds).toEqual(["T001"]);
-    expect(JSON.parse(new TextDecoder().decode(first.artifactBytes))).toEqual(first.manifest);
+    expect(JSON.parse(artifactText(first))).toEqual(first.manifest);
   });
 
   it("binds the canonical task path into the Manifest identity", () => {
@@ -41,42 +44,42 @@ describe("TaskManifest compiler", () => {
       canonicalTaskPath: "other-tasks.md"
     });
     expect(second.manifest.sourceHash).toBe(first.manifest.sourceHash);
-    expect(second.manifestHash).not.toBe(first.manifestHash);
+    expect(artifactText(second)).not.toBe(artifactText(first));
   });
 
-  it("changes manifest hash for task, acceptance, and no-change changes", () => {
-    const base = compileTaskManifest(createTasksSource(), baseOptions).manifestHash;
-    const changedTask = compileTaskManifest(
+  it("changes manifest artifact bytes for task, acceptance, and no-change changes", () => {
+    const base = artifactText(compileTaskManifest(createTasksSource(), baseOptions));
+    const changedTask = artifactText(compileTaskManifest(
       createTasksSource({
         tasks:
           "## M01 · Core\n\n- [ ] T001 Edit `packages/core/src/other.ts` — 验收：core review passes"
       }),
       baseOptions
-    ).manifestHash;
-    const changedAcceptance = compileTaskManifest(
+    ));
+    const changedAcceptance = artifactText(compileTaskManifest(
       createTasksSource({
         tasks:
           "## M01 · Core\n\n- [ ] T001 Edit `packages/core/src/index.ts` — 验收：a stronger criterion"
       }),
       baseOptions
-    ).manifestHash;
-    const allowNoChange = compileTaskManifest(
+    ));
+    const allowNoChange = artifactText(compileTaskManifest(
       createTasksSource().replace(
         "core review passes",
         "core review passes no-change-allowed=true"
       ),
       { ...baseOptions, allowNoChange: true }
-    ).manifestHash;
+    ));
     expect(new Set([base, changedTask, changedAcceptance, allowNoChange]).size).toBe(4);
   });
 
-  it("changes manifest hash for provider runtime changes", () => {
+  it("changes manifest artifact bytes for provider runtime changes", () => {
     const base = compileTaskManifest(createTasksSource(), baseOptions);
     const providerRuntimeChanged = compileTaskManifest(createTasksSource(), {
       ...baseOptions,
       providerRuntimeConfig: { endpoint: "https://provider.invalid", model: "other-model" }
     });
-    expect(providerRuntimeChanged.manifestHash).not.toBe(base.manifestHash);
+    expect(artifactText(providerRuntimeChanged)).not.toBe(artifactText(base));
   });
 
   it("rejects removed permission-policy fields", () => {

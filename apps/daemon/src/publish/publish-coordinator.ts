@@ -594,8 +594,7 @@ export class PublishCoordinator {
         requestId: `manual-publish-confirm:${run.jobId}:${operationId}:${confirmationRequestHash}`,
         payload: {
           operationId,
-          operationsHash: operationHash,
-          confirmationRequestHash
+          operationsHash: operationHash
         },
         expectedJobId: run.jobId,
         ...identityGuards(identity),
@@ -627,7 +626,6 @@ export class PublishCoordinator {
             ...marker,
             status: "MISMATCH",
             operationId,
-            confirmationRequestHash,
             checkedAt: new Date().toISOString(),
             conflicts: observation.conflicts
           };

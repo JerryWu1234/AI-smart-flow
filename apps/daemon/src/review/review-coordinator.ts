@@ -461,7 +461,7 @@ export class ReviewCoordinator {
   public pauseForApprovedSourceDrift(
     state: ProjectState,
     jobId: string,
-    observation: { approvedHash: string | undefined; observedHash: string },
+    _observation: { approvedHash: string | undefined; observedHash: string },
     now = new Date()
   ): ReviewMutation<{ approvedSourceDrift: true; phase: "PAUSED"; stateVersion: number }> {
     const run = state.runs[jobId];
@@ -496,8 +496,6 @@ export class ReviewCoordinator {
         approvedSourceDrift: {
           detectedFromPhase: run.phase,
           resumePhase,
-          observedHash: observation.observedHash,
-          ...(observation.approvedHash === undefined ? {} : { approvedHash: observation.approvedHash }),
           detectedAt: now.toISOString()
         }
       },

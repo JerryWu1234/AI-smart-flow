@@ -296,8 +296,6 @@ export async function verifyRunArtifacts(
         !artifactRefsEqual(seedRef.data, run.gitWorkspace.current.inputSnapshot) ||
         continuation.kind !== "PI_SESSION_REPAIR" ||
         continuation.jobId !== run.jobId ||
-        continuation.taskSourceHash !== digest(run.taskSource.sha256) ||
-        continuation.taskManifestHash !== digest(run.taskManifest.sha256) ||
         sourceAttempt === undefined ||
         sourceAttempt.status !== "COMPLETED" ||
         sourceAttempt.generation !== continuation.sourceGeneration ||
