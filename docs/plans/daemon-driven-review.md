@@ -549,7 +549,7 @@ apps/daemon/src/review/review-runner.ts                 编排（唯一碰 State
 **协议 breaking。** `reviewTurnInputSchema` / `reviewTurnOutputSchema` 都是 `.strict()`：
 删掉 `review` 后仍然传的调用方会被直接拒，`REVIEW_REQUIRED` 也已从 output union 删除。
 本地 IPC 只支持当前 Client/Daemon wire shape，不携带协议版本，也不提供旧版协商或 fallback；
-持久状态同样只支持当前无版本 shape。SQLite 物理 schema 为 5，旧 Data Directory 不迁移，升级前需清理本地数据。
+持久状态同样只支持当前无版本 shape。SQLite 直接使用当前建表定义，不维护布局版本或迁移；表结构变更后可用 `pnpm clean:daemon-data` 清理本地开发数据。
 
 **`HOST_REVIEW_UNAVAILABLE` 语义改变。** 从「host 的 reviewer 不可用」变成
 「daemon 的 reviewer 失败」。pause code 和 `retry_host_review` 这个 resume action

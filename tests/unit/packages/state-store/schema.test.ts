@@ -233,10 +233,6 @@ describe("ProjectState schema and recovery source", () => {
 
     const database = new DatabaseSync(store.databasePath);
     try {
-      const version = database.prepare("PRAGMA user_version").get() as {
-        user_version?: unknown;
-      } | undefined;
-      expect(version?.user_version).toBe(6);
       const projectStateColumns = database.prepare("PRAGMA table_info(project_state)").all() as {
         name?: unknown;
       }[];
@@ -258,32 +254,6 @@ describe("ProjectState schema and recovery source", () => {
       ]);
     } finally {
       database.close();
-    }
-  });
-
-  it.each([4, 5])("rejects SQLite layout %i without migration", async (layout) => {
-    const harness = await createRuntimeHarness();
-    activeHarnesses.push(harness);
-    const store = new StateStore(harness.dataDir);
-    const database = new DatabaseSync(store.databasePath);
-    try {
-      database.exec(`PRAGMA user_version = ${String(layout)}`);
-    } finally {
-      database.close();
-    }
-
-    await expect(store.readState()).rejects.toMatchObject({
-      code: "STATE_MIGRATION_UNSUPPORTED"
-    });
-
-    const observed = new DatabaseSync(store.databasePath);
-    try {
-      const version = observed.prepare("PRAGMA user_version").get() as {
-        user_version?: unknown;
-      } | undefined;
-      expect(version?.user_version).toBe(layout);
-    } finally {
-      observed.close();
     }
   });
 });

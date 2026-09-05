@@ -13,7 +13,6 @@ import { canonicalJson } from "./canonical-json.js";
 import { StateStoreError } from "./errors.js";
 import { projectStateSchema, type ProjectState } from "./schema.js";
 
-const DATABASE_SCHEMA_VERSION = 6;
 const SQLITE_BUSY_TIMEOUT_MS = 500;
 const MUTATION_LEASE_WAIT_MS = 5_000;
 const MUTATION_LEASE_TTL_MS = 30_000;
@@ -681,23 +680,7 @@ export class StateStore {
         PRAGMA journal_mode = WAL;
         PRAGMA synchronous = FULL;
       `);
-      const versionRow = database.prepare("PRAGMA user_version").get() as {
-        user_version?: unknown;
-      } | undefined;
-      const version = versionRow?.user_version;
-      if (
-        typeof version !== "number" ||
-        (version !== 0 && version !== DATABASE_SCHEMA_VERSION)
-      ) {
-        throw new StateStoreError(
-          "STATE_MIGRATION_UNSUPPORTED",
-          `Unsupported SQLite state schema version: ${String(version)}`
-        );
-      }
       database.exec(DATABASE_SCHEMA);
-      if (version === 0) {
-        database.exec(`PRAGMA user_version = ${String(DATABASE_SCHEMA_VERSION)}`);
-      }
       return operation(database);
     } catch (error) {
       return mapSqliteError(error, this.databasePath);

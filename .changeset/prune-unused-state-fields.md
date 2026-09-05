@@ -4,4 +4,4 @@
 
 Remove unused mutation-owner identifiers, duplicate idempotency receipt metadata and unused recovery bookkeeping.
 
-Use SQLite layout 6 only, with no migration or compatibility reads. Clear local development data with `pnpm clean:daemon-data` before using the new layout.
+Remove SQLite layout version tracking and checks; use the current table definitions directly. No migration is provided. Local development data can be reset with `pnpm clean:daemon-data` when table definitions change.
