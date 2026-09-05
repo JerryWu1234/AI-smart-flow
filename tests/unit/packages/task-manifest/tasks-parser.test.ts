@@ -54,13 +54,13 @@ describe("tasks.md parser", () => {
 
   it("rejects missing and duplicate task IDs", () => {
     const missing = createTasksSource({
-      tasks: "## M01 · Core\n\n- [ ] Edit `packages/a.ts` — 验收：pass"
+      tasks: "## M01 · Core\n\n- [ ] Edit `packages/a.ts` — Acceptance: pass"
     });
     expectErrorCode(() => parseTasksDocument(missing), "TASK_ID_MISSING");
 
     const duplicate = createTasksSource({
       tasks:
-        "## M01 · Core\n\n- [ ] T001 Edit `packages/a.ts` — 验收：pass\n- [ ] T001 Edit `packages/b.ts` — 验收：pass"
+        "## M01 · Core\n\n- [ ] T001 Edit `packages/a.ts` — Acceptance: pass\n- [ ] T001 Edit `packages/b.ts` — Acceptance: pass"
     });
     expectErrorCode(() => parseTasksDocument(duplicate), "TASK_ID_DUPLICATE");
   });
@@ -70,15 +70,15 @@ describe("tasks.md parser", () => {
       tasks: [
         "## Phase 14: Convergence",
         "",
-        "- [ ] T101 [M01] Edit `packages/a.ts` — 验收：pass",
+        "- [ ] T101 [M01] Edit `packages/a.ts` — Acceptance: pass",
         "",
         "## Phase 15: Convergence",
         "",
-        "- [ ] T102 [M12] Edit `packages/b.ts` — 验收：pass",
+        "- [ ] T102 [M12] Edit `packages/b.ts` — Acceptance: pass",
         "",
         "## Review Repair Tasks",
         "",
-        "- [ ] T900 [M01] Edit `packages/a.ts` — 验收：repair"
+        "- [ ] T900 [M01] Edit `packages/a.ts` — Acceptance: repair"
       ].join("\n")
     });
     expect(parseTasksDocument(source).tasks.map(({ id, module }) => ({ id, module }))).toEqual([
@@ -90,24 +90,24 @@ describe("tasks.md parser", () => {
 
   it("keeps explicit module ownership strict", () => {
     const mismatch = createTasksSource({
-      tasks: "## M01 · Core\n\n- [ ] T001 [M12] Edit `packages/a.ts` — 验收：pass"
+      tasks: "## M01 · Core\n\n- [ ] T001 [M12] Edit `packages/a.ts` — Acceptance: pass"
     });
     expectErrorCode(() => parseTasksDocument(mismatch), "TASK_MODULE_MISMATCH");
 
     const ambiguous = createTasksSource({
-      tasks: "## Phase 14: Convergence\n\n- [ ] T101 [M01] [M12] Edit `packages/a.ts` — 验收：pass"
+      tasks: "## Phase 14: Convergence\n\n- [ ] T101 [M01] [M12] Edit `packages/a.ts` — Acceptance: pass"
     });
     expectErrorCode(() => parseTasksDocument(ambiguous), "TASK_TAG_INVALID");
   });
 
   it("rejects the retired [P] parallel tag instead of accepting it as a no-op", () => {
     const parallelTag = createTasksSource({
-      tasks: "## M01 · Core\n\n- [ ] T001 [P] Edit `packages/a.ts` — 验收：pass"
+      tasks: "## M01 · Core\n\n- [ ] T001 [P] Edit `packages/a.ts` — Acceptance: pass"
     });
     expectErrorCode(() => parseTasksDocument(parallelTag), "TASK_TAG_INVALID");
 
     const withModuleTag = createTasksSource({
-      tasks: "## M01 · Core\n\n- [ ] T001 [P] [M01] Edit `packages/a.ts` — 验收：pass"
+      tasks: "## M01 · Core\n\n- [ ] T001 [P] [M01] Edit `packages/a.ts` — Acceptance: pass"
     });
     expectErrorCode(() => parseTasksDocument(withModuleTag), "TASK_TAG_INVALID");
   });

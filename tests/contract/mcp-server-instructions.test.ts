@@ -41,7 +41,7 @@ describe("SmartFlow MCP Host policy", () => {
     expect(indexes.every((index) => index >= 0)).toBe(true);
     expect(indexes).toEqual([...indexes].sort((left, right) => left - right));
     expect(instructions).toContain("The user's initial implementation request");
-    expect(instructions).toContain("exact separator ' — 验收：'");
+    expect(instructions).toContain("exact separator ' — Acceptance:'");
     expect(instructions).toContain(
       "Do not pass projectRoot, tasksPath, requestId"
     );

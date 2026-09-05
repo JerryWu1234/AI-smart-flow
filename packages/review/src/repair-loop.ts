@@ -61,8 +61,8 @@ function repairTaskLine(
   const suggestedFix = issue.suggestedFix;
   const guidance = suggestedFix === null
     ? safeInline(issue.message)
-    : `${safeInline(issue.message)}；建议：${safeInline(suggestedFix)}`;
-  return `- [ ] T${String(taskNumber).padStart(3, "0")} [${module}] Repair \`${safeInline(issue.path)}\` — 验收：${guidance}; criterionId=${task.id}`;
+    : `${safeInline(issue.message)}; suggestion:${safeInline(suggestedFix)}`;
+  return `- [ ] T${String(taskNumber).padStart(3, "0")} [${module}] Repair \`${safeInline(issue.path)}\` — Acceptance: ${guidance}; criterionId=${task.id}`;
 }
 
 export function assessRepairScope(

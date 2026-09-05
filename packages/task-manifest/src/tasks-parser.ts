@@ -86,11 +86,11 @@ function parseTaskLine(
       `Task ${id} declares ${moduleId} under ${headingModule}`
     );
   }
-  const parts = remaining.split(/\s+—\s*验收：/u);
+  const parts = remaining.split(/\s+—\s*Acceptance:\s*/u);
   if (parts.length !== 2 || (parts[1]?.trim().length ?? 0) === 0) {
     throw new TaskManifestError(
       "TASK_ACCEPTANCE_MISSING",
-      `Task ${id} must contain an explicit 验收 criterion`
+      `Task ${id} must contain an explicit Acceptance criterion`
     );
   }
   const description = parts[0]?.trim() ?? "";

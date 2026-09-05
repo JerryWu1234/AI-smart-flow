@@ -337,7 +337,7 @@ describe("production daemon Review repair loop", () => {
     activeHarnesses.push(harness);
     const tasksPath = resolve(harness.projectDir, "tasks.md");
     const tasksSource = createTasksSource({
-      tasks: "## M01 · Core\n\n- [ ] T001 Edit `sum.js` — 验收：Reviewer confirms the requested behavior"
+      tasks: "## M01 · Core\n\n- [ ] T001 Edit `sum.js` — Acceptance: Reviewer confirms the requested behavior"
     });
     await writeFile(tasksPath, tasksSource, "utf8");
 
@@ -492,7 +492,7 @@ describe("production daemon Review repair loop", () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const tasksSource = createTasksSource({
-      tasks: "## M01 · Core\n\n- [ ] T001 Edit `sum.js` — 验收：Reviewer confirms the requested behavior"
+      tasks: "## M01 · Core\n\n- [ ] T001 Edit `sum.js` — Acceptance: Reviewer confirms the requested behavior"
     });
     await writeFile(resolve(harness.projectDir, "tasks.md"), tasksSource, "utf8");
     const provider = new RepairLoopProvider(() => "stable");
@@ -572,7 +572,7 @@ describe("production daemon Review repair loop", () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const tasksSource = createTasksSource({
-      tasks: "## M01 · Core\n\n- [ ] T001 Edit `sum.js` — 验收：Reviewer confirms the requested behavior"
+      tasks: "## M01 · Core\n\n- [ ] T001 Edit `sum.js` — Acceptance: Reviewer confirms the requested behavior"
     });
     await writeFile(resolve(harness.projectDir, "tasks.md"), tasksSource, "utf8");
     const provider = new RepairLoopProvider((generation) => generation === 0 ? "1" : "stable");
@@ -745,7 +745,7 @@ describe("production daemon Review repair loop", () => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const tasksSource = createTasksSource({
-      tasks: "## M01 · Core\n\n- [ ] T001 Edit `sum.js` — 验收：Reviewer confirms the requested behavior"
+      tasks: "## M01 · Core\n\n- [ ] T001 Edit `sum.js` — Acceptance: Reviewer confirms the requested behavior"
     });
     await writeFile(resolve(harness.projectDir, "tasks.md"), tasksSource, "utf8");
     const provider = new RepairLoopProvider();

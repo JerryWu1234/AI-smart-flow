@@ -52,14 +52,14 @@ describe("TaskManifest compiler", () => {
     const changedTask = artifactText(compileTaskManifest(
       createTasksSource({
         tasks:
-          "## M01 · Core\n\n- [ ] T001 Edit `packages/core/src/other.ts` — 验收：core review passes"
+          "## M01 · Core\n\n- [ ] T001 Edit `packages/core/src/other.ts` — Acceptance: core review passes"
       }),
       baseOptions
     ));
     const changedAcceptance = artifactText(compileTaskManifest(
       createTasksSource({
         tasks:
-          "## M01 · Core\n\n- [ ] T001 Edit `packages/core/src/index.ts` — 验收：a stronger criterion"
+          "## M01 · Core\n\n- [ ] T001 Edit `packages/core/src/index.ts` — Acceptance: a stronger criterion"
       }),
       baseOptions
     ));
