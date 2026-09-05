@@ -1,75 +1,189 @@
 # SmartFlow
 
+[Chinese documentation](README.zh-CN.md)
+
+SmartFlow is an MCP-based coding workflow that turns an approved task file into an isolated, reviewable implementation run. It starts the Pi coding agent in a per-run Git workspace, persists state in SQLite, runs an optional reviewer, performs in-scope repair rounds, and publishes changes only after the workflow has produced a validated result.
+
+> SmartFlow is currently an early-stage project. The public package is `@jerrywu1234/smartflow`.
+
+## What it does
+
+- Accepts one canonical Markdown task file per MCP session.
+- Requires the Host to show the complete task file and obtain explicit confirmation before execution.
+- Creates an immutable Job with a TaskManifest and exact task source.
+- Runs Pi in an isolated Git workspace with a rolling attempt deadline.
+- Keeps execution, review, repair, cancellation, recovery, and publish transitions inside the Daemon.
+- Supports Codex and Claude Code reviewer adapters.
+- Uses structured JSON logging through `@smartflow/observability`.
+- Stores durable state in SQLite and protects writes with leases, fences, and atomic updates.
+
+The original project is changed only by the Publish stage. The Worker can read, search, edit, write, and run shell commands inside its isolated workspace; the source project and the MCP session task directory are excluded from that workspace.
+
+## Requirements
+
+- Node.js 22.19.0 or newer
+- pnpm 10.14.0 or newer for development
+- A model endpoint and credential for the Pi Worker
+- A local `codex` or `claude` executable when Review is enabled
+
+## Install
+
+When the package is available from npm:
+
 ```sh
 npm install --global @jerrywu1234/smartflow
 smartflow doctor --json
 ```
 
-SmartFlow runs `@earendil-works/pi-coding-agent` in an isolated per-Run Git workspace. Pi uses its official read, search, edit, write and Shell tools directly; SmartFlow does not provide a custom file Broker or pass its MCP/Host Skills into Pi.
+To run from a checkout:
 
-Shell commands and network access are allowed inside the sandbox. Project and user data are readable and writable only through the isolated workspace; Node, system and Pi SDK bootstrap paths are read-only. The original project is changed only by the Publish stage.
+```sh
+git clone https://github.com/JerryWu1234/AI-smart-flow.git
+cd AI-smart-flow
+pnpm install
+pnpm build
+node dist/smartflow.mjs doctor --json
+```
 
-Each `smartflow_execute` call creates an immutable Job bound to one canonical task path, exact task source and TaskManifest, and Provider configuration. In-scope automatic Review repair starts a new fenced Worker Attempt in the same workspace and restores the same logical Pi session from its completed bundle; process restarts and Daemon crashes restore that session after containment reconciliation too. To change the task or configuration, or to act on an out-of-scope repair draft, cancel the current Job and execute the new task source as a new Job. Each Attempt starts with its configured rolling deadline, five minutes by default, which the Pi child renews with independent heartbeats; expiry pauses without automatic replacement, and cancellation must prove the full process tree is gone.
+Use `pnpm clean:daemon-data` to remove local development Daemon data when you intentionally reset a project run directory.
 
-Every Worker setting lives in the `WORK_` environment namespace, and the same names carry from the MCP server to the Worker without translation. Each MCP server instance binds one model directly from `WORK_BASE_URL`, `WORK_MODEL` and `WORK_API_KEY`. The optional `WORK_API` setting defaults to `openai-responses`; explicit supported values are `openai-completions`, `openai-responses`, `anthropic-messages` and `google-generative-ai`. SmartFlow does not probe endpoints or switch formats after a request fails. Optional variables `WORK_CONTEXT_WINDOW`, `WORK_MAX_TOKENS`, `WORK_EFFORT` and `WORK_ATTEMPT_DEADLINE_MS` configure context, output, reasoning effort and the rolling Attempt deadline, defaulting to `1000000`, `384000`, `high` and `300000ms`; `WORK_EFFORT` accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`, and deadline overrides must be at least `60000ms`. SmartFlow registers the model in memory through a bundled Pi Extension and does not use `models.json`.
+## Configuration
 
-Reviewer configuration uses the MCP server environment variables `REVIEW_ENABLED`, `REVIEW_ADAPTER`, `REVIEW_MODEL` and `REVIEW_EFFORT`. Review is enabled unless `REVIEW_ENABLED` is exactly `false`; when disabled, SmartFlow skips Reviewer executable checks and publishes the Worker Candidate directly. `REVIEW_ADAPTER` accepts `codex`, `codex-desktop`, `claude-code` or `claude-code-desktop`, while model and effort are passed through to the selected Reviewer. When Review is enabled, SmartFlow checks the explicitly selected local Agent before the MCP server or Daemon becomes ready: both Codex strategies require `codex` on `PATH`, and both Claude strategies require `claude`. Reviewer configuration is read when the Daemon starts, so restart the Daemon after changing any `REVIEW_*` value.
+The Worker reads its configuration from environment variables. `WORK_BASE_URL`, `WORK_MODEL`, and `WORK_API_KEY` are required.
 
-Run `smartflow doctor --json` to verify Node, Pi, sandbox, model registration, signing and publish capabilities.
+| Variable | Default | Description |
+| --- | --- | --- |
+| `WORK_API` | `openai-responses` | API format: `openai-completions`, `openai-responses`, `anthropic-messages`, or `google-generative-ai` |
+| `WORK_BASE_URL` | — | Model endpoint base URL |
+| `WORK_MODEL` | — | Model identifier |
+| `WORK_API_KEY` | — | Model credential |
+| `WORK_CONTEXT_WINDOW` | `1000000` | Context window size |
+| `WORK_MAX_TOKENS` | `384000` | Maximum output tokens; cannot exceed the context window |
+| `WORK_EFFORT` | `high` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
+| `WORK_ATTEMPT_DEADLINE_MS` | `300000` | Rolling Worker deadline; minimum `60000` |
 
-## MCP workflow
+Review is enabled unless `REVIEW_ENABLED=false`.
 
-### Review Agent selection
+| Variable | Default | Description |
+| --- | --- | --- |
+| `REVIEW_ENABLED` | enabled | Set to `false` to publish the Worker Candidate directly |
+| `REVIEW_ADAPTER` | `codex` | `codex`, `codex-desktop`, `claude-code`, or `claude-code-desktop` |
+| `REVIEW_MODEL` | adapter default | Model passed to the selected reviewer |
+| `REVIEW_EFFORT` | adapter default | Reasoning effort passed to the selected reviewer |
 
-When `REVIEW_ADAPTER` is omitted, the Daemon uses the MCP Host's unauthenticated
-`clientInfo.name` only as a coarse default. An exact registered strategy name selects itself;
-missing or unrecognized names fall back to `codex`. An explicit `REVIEW_ADAPTER` always wins.
-Host identity never grants permissions.
+The Daemon reads Review settings at startup. Restart it after changing any `REVIEW_*` variable. The selected reviewer CLI must be installed and authenticated in the Daemon environment.
 
-`claude-code` and `claude-code-desktop` are separate durable strategy identities, but both
-start a standalone local `claude -p` process. The Desktop strategy is a compatibility module
-for Desktop-host configuration; Claude Desktop exposes no headless reviewer transport, so
-SmartFlow does not attach to, resume, or control the Desktop conversation, embedded CLI, or
-GUI. The standalone Claude Code CLI must be installed and authenticated in the Daemon
-environment for either strategy.
+## CLI commands
 
-### Host task preparation and approval
+```text
+smartflow doctor [--json] [--project PATH]
+smartflow daemon [--data-dir PATH]
+smartflow mcp [--data-dir PATH]
+smartflow health [--data-dir PATH]
+smartflow version
+```
 
-Before `smartflow_execute`, the MCP Host must distinguish implementation intent from ordinary conversation. It must not create task files or execute SmartFlow for casual chat, explanations, evaluations, discussions, or planning-only requests. If an implementation request is missing a critical goal, scope, target, or acceptance criterion, the Host asks the user for that information instead of inventing it.
+`doctor` checks configuration, the data directory, the execution sandbox, the Pi provider, and the optional publish adapter. `daemon` starts the local service. `mcp` starts the stdio MCP server and launches or connects to the Daemon. `health` reads the Daemon health response.
 
-Each stdio MCP session serves one project. At startup, SmartFlow canonicalizes the process working directory, generates a session ID, and exposes one project-relative task path in its MCP instructions and execute-tool description:
+## MCP setup
+
+SmartFlow uses a stdio MCP server. Add an entry like this to your MCP Host configuration:
+
+```json
+{
+  "mcpServers": {
+    "smartflow": {
+      "command": "smartflow",
+      "args": ["mcp"],
+      "env": {
+        "WORK_BASE_URL": "https://api.example.com/v1",
+        "WORK_MODEL": "your-model",
+        "WORK_API_KEY": "your-api-key",
+        "REVIEW_ADAPTER": "codex"
+      }
+    }
+  }
+}
+```
+
+For a checkout, replace `command` and `args` with an absolute Node.js entry point, for example:
+
+```json
+{
+  "command": "node",
+  "args": ["/absolute/path/AI-smart-flow/dist/smartflow.mjs", "mcp"]
+}
+```
+
+Keep credentials in the Host environment or a secret manager. Do not commit them to task files or repository configuration.
+
+## Task file format
+
+Each MCP session exposes one canonical path:
 
 ```text
 <projectRoot>/.smartflow/tasks/<sessionId>/tasks.md
 ```
 
-Chat context, one existing task file, or multiple existing task/spec files are preparation inputs; the Host always normalizes them into that one canonical session file. For a later batch in the same session, the Host waits until the previous Job is done, then replaces the same file with the new canonical tasks.
-
-Canonical task syntax follows the SmartFlow parser contract:
+A task document uses Markdown module headings, unique task IDs, an optional module tag, at least one backtick-wrapped target path, and an explicit `Acceptance:` criterion:
 
 ```md
+# Tasks
+
 ## M01 User authentication
 
-- [ ] T001 [M01] Implement login validation in `src/auth/login.ts` — 验收：valid users can log in and invalid passwords return an explicit error
-- [ ] T002 [M01] Add login coverage in `src/auth/login.test.ts` — 验收：success and failure cases pass
+- [ ] T001 [M01] Implement login validation in `src/auth/login.ts` — Acceptance: valid users can log in and invalid passwords return an explicit error
+- [ ] T002 [M01] Add login coverage in `src/auth/login.test.ts` — Acceptance: success and failure cases pass
 ```
 
-After writing the file, the Host re-reads it from disk, presents its project-relative path and complete contents, and explicitly asks the user whether to execute it. The initial request to implement something authorizes draft preparation, not execution. Only after explicit confirmation does the Host call `smartflow_execute({})`; public callers pass no project, path, or execute identity fields.
+The Host should re-read the file from disk, show its complete contents, and ask for confirmation. The initial request to implement something authorizes task preparation; only an explicit confirmation authorizes `smartflow_execute({})`.
 
-The MCP adapter obtains the project root and path from its session, observes the task file's metadata version, and generates the internal idempotency request ID sent to the Daemon. Retries for the unchanged file version in the same running MCP session reuse the in-flight call or receipt; replacing the file creates a new internal request identity. This in-memory replay state does not survive an MCP process restart.
+## MCP workflow
 
-The task file is created by the Host's native filesystem capabilities at request time; it is not stored in the npm package or `node_modules`. `.smartflow/tasks/**` is SmartFlow control-plane data: tracked, untracked, and ignored files under that prefix are excluded from Run baselines, RUN_RESULT snapshots, Candidates, and Publish. When creating a Job, the Daemon reads the session task file once and immediately stores immutable `task-source.md` and `task-manifest.json` artifacts. The Worker workspace receives only that immutable source; the session control-plane path is not materialized from the project snapshot. Daemon artifacts remain under `projects/<projectId>/runs/<jobId>/` in the configured SmartFlow data directory.
+1. Prepare or normalize the requested work into the session task file.
+2. Show the path and complete contents to the user and receive confirmation.
+3. Call `smartflow_execute({})` once.
+4. Poll `smartflow_review_turn` with a new request ID until it returns `DONE`.
+5. On `NOT_READY`, wait for `retryAfterMs` and poll again.
+6. On `USER_INPUT_REQUIRED`, present the pause message and submit one listed answer with the unchanged `turnToken`.
+7. Use `smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result` for explicit inspection, recovery, cancellation, and result retrieval.
 
-This approval flow remains a trusted Host policy. After Job creation, the immutable Daemon artifacts—not the live session file—are authoritative.
+The public MCP surface exposes six tools:
 
-### Execution and Review loop
+- `smartflow_execute`
+- `smartflow_review_turn`
+- `smartflow_status`
+- `smartflow_resume`
+- `smartflow_cancel`
+- `smartflow_result`
 
-The public MCP surface contains exactly six tools. For each newly confirmed batch, call `smartflow_execute({})` once, then call `smartflow_review_turn` until it returns `DONE`. Review runs inside the Daemon; the Host only polls and answers explicit user-input checkpoints. The turn API returns one of three states:
+The Daemon owns durable state transitions, review decisions, repair scheduling, deadlines, and publish scheduling. A Job is immutable: changing the task source or Worker configuration requires a new Job.
 
-- `NOT_READY`: wait for `retryAfterMs` and call it again. This includes Daemon-owned Review and repair work.
-- `USER_INPUT_REQUIRED`: present the message and available actions to the user, then return the selected action with the unchanged `turnToken`.
-- `DONE`: the run reached a terminal result; the latest validated Review is available in `result.review` when one was recorded.
+## Logging and data
 
-`smartflow_status`, `smartflow_resume`, `smartflow_cancel`, and `smartflow_result` are separate APIs for Run inspection, paused-Run recovery, cancellation, and result management; they are not Review continuations or a second Review orchestration path. While an active `hostTurn` owns `USER_INPUT_REQUIRED`, the owning Host must submit the answer through `smartflow_review_turn` with the same `turnToken`; the public `smartflow_resume` API cannot answer or bypass that checkpoint.
+All application logs use `StructuredLogger` and are emitted as redacted JSON records to stderr. SmartFlow does not create a separate daemon log file. Daemon state and run artifacts live below the configured SmartFlow data directory, outside the source project.
 
-Waiting, atomic Review begin/finalize, automatic decisions, and repair/publish progression are Daemon-owned mechanics. The public MCP surface has no Host-owned claim/renew bridge or manual Review-submission path.
+The `.smartflow/tasks/**` directory is control-plane data. It is excluded from run baselines, candidates, and publish operations. Each run keeps immutable task and manifest artifacts under `projects/<projectId>/runs/<jobId>/`.
+
+## Development
+
+```sh
+pnpm install --frozen-lockfile
+pnpm lint
+pnpm typecheck
+pnpm build
+pnpm test
+pnpm test:contract
+pnpm test:integration
+pnpm test:security
+pnpm test:crash
+pnpm test:e2e
+pnpm test:provider:pi
+pnpm test:installed
+```
+
+Workspace packages are private and bundled into the root CLI package. Published CLI changes use Changesets; see `RELEASING.md` for the release flow.
+
+## License
+
+MIT

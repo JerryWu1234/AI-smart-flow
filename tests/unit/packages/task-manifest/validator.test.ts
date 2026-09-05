@@ -36,11 +36,11 @@ describe("TaskManifest validator", () => {
   it("returns stable codes for empty tasks and missing target paths", () => {
     const completed = createTasksSource({
       tasks:
-        "## M01 · Core\n\n- [X] T001 Edit `packages/core/src/index.ts` — 验收：pass"
+        "## M01 · Core\n\n- [X] T001 Edit `packages/core/src/index.ts` — Acceptance: pass"
     });
     expect(compileErrorCode(completed)).toBe("TASKS_EMPTY");
     const noPath = createTasksSource({
-      tasks: "## M01 · Core\n\n- [ ] T001 Improve the implementation — 验收：pass"
+      tasks: "## M01 · Core\n\n- [ ] T001 Improve the implementation — Acceptance: pass"
     });
     expect(compileErrorCode(noPath)).toBe("TARGET_PATH_MISSING");
   });

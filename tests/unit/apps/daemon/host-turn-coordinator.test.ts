@@ -89,7 +89,7 @@ async function createStore(run: RunRecord): Promise<StateStore> {
   temporaryDirectories.push(directory);
   const store = new StateStore(join(directory, "data", projectId));
   const tasksSource = createTasksSource({
-    tasks: "## M01 · Core\n\n- [ ] T001 Edit `src/a.ts` — 验收：review passes"
+    tasks: "## M01 · Core\n\n- [ ] T001 Edit `src/a.ts` — Acceptance: review passes"
   });
   const logicalTaskPath = "tasks.md";
   const canonicalTaskPath = join(directory, logicalTaskPath);

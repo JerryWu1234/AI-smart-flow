@@ -95,7 +95,7 @@ function installedTasksSource(): string {
 
 ## M13 · Installed runtime
 
-- [ ] T057 Replace \`sum.js\` with exactly two exported functions: \`sum(a, b)\` returns \`a + b\`, and \`subtract(a, b)\` returns \`a - b\`. If the Reviewer requests a dynamic repair marker during review, add that exact comment to \`sum.js\`. — 验收：Reviewer confirms both functions, any exact marker it requested, and no unrelated file changes
+- [ ] T057 Replace \`sum.js\` with exactly two exported functions: \`sum(a, b)\` returns \`a + b\`, and \`subtract(a, b)\` returns \`a - b\`. If the Reviewer requests a dynamic repair marker during review, add that exact comment to \`sum.js\`. — Acceptance: Reviewer confirms both functions, any exact marker it requested, and no unrelated file changes
 `;
 }
 
@@ -272,7 +272,7 @@ describe("installed SmartFlow package", () => {
         writeFile(resolve(projectRoot, "tasks.md"), tasksSource, "utf8"),
         writeFile(
           resolve(projectRoot, "tasks-b.md"),
-          "# Secondary task\n\n## M14 · Concurrent run\n\n- [ ] T058 Update `other.js` — 验收：secondary run can be canceled independently\n",
+          "# Secondary task\n\n## M14 · Concurrent run\n\n- [ ] T058 Update `other.js` — Acceptance: secondary run can be canceled independently\n",
           "utf8"
         ),
         writeFile(
