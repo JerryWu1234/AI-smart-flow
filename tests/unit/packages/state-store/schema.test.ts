@@ -261,13 +261,13 @@ describe("ProjectState schema and recovery source", () => {
     }
   });
 
-  it("rejects SQLite layout 4 without migration", async () => {
+  it.each([4, 5])("rejects SQLite layout %i without migration", async (layout) => {
     const harness = await createRuntimeHarness();
     activeHarnesses.push(harness);
     const store = new StateStore(harness.dataDir);
     const database = new DatabaseSync(store.databasePath);
     try {
-      database.exec("PRAGMA user_version = 4");
+      database.exec(`PRAGMA user_version = ${String(layout)}`);
     } finally {
       database.close();
     }
@@ -281,7 +281,7 @@ describe("ProjectState schema and recovery source", () => {
       const version = observed.prepare("PRAGMA user_version").get() as {
         user_version?: unknown;
       } | undefined;
-      expect(version?.user_version).toBe(4);
+      expect(version?.user_version).toBe(layout);
     } finally {
       observed.close();
     }

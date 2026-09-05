@@ -198,48 +198,6 @@ function commit(database: DatabaseSync): void {
   database.exec("COMMIT");
 }
 
-function migrateDatabaseV5(database: DatabaseSync, databasePath: string): void {
-  beginImmediate(database);
-  try {
-    // Another opener may have completed the migration while we waited for the lock.
-    const version = database.prepare("PRAGMA user_version").get()?.user_version;
-    if (version === 5) {
-      const row = stateRow(database);
-      if (row !== undefined) {
-        const document = parseJson(row.state_json, databasePath) as {
-          processedRequests?: unknown;
-        } | null;
-        const receipts = document?.processedRequests;
-        if (typeof receipts === "object" && receipts !== null && !Array.isArray(receipts)) {
-          for (const receipt of Object.values(receipts) as unknown[]) {
-            if (typeof receipt === "object" && receipt !== null) {
-              Reflect.deleteProperty(receipt, "requestId");
-              Reflect.deleteProperty(receipt, "committedAtStateVersion");
-            }
-          }
-        }
-        // Validate the remaining document and its SQL metadata before changing storage.
-        const state = parseStateRow({ ...row, state_json: JSON.stringify(document) }, databasePath);
-        database.prepare("UPDATE project_state SET state_json = ? WHERE singleton = 1")
-          .run(canonicalJson(state));
-      }
-      database.exec(`
-        ALTER TABLE mutation_lease DROP COLUMN owner_id;
-        PRAGMA user_version = ${String(DATABASE_SCHEMA_VERSION)};
-      `);
-    } else if (version !== DATABASE_SCHEMA_VERSION) {
-      throw new StateStoreError(
-        "STATE_MIGRATION_UNSUPPORTED",
-        `Unsupported SQLite state schema version: ${String(version)}`
-      );
-    }
-    commit(database);
-  } catch (error) {
-    rollback(database);
-    throw error;
-  }
-}
-
 async function chmodIfPresent(path: string): Promise<void> {
   try {
     await chmod(path, 0o600);
@@ -729,14 +687,13 @@ export class StateStore {
       const version = versionRow?.user_version;
       if (
         typeof version !== "number" ||
-        (version !== 0 && version !== 5 && version !== DATABASE_SCHEMA_VERSION)
+        (version !== 0 && version !== DATABASE_SCHEMA_VERSION)
       ) {
         throw new StateStoreError(
           "STATE_MIGRATION_UNSUPPORTED",
           `Unsupported SQLite state schema version: ${String(version)}`
         );
       }
-      if (version === 5) migrateDatabaseV5(database, this.databasePath);
       database.exec(DATABASE_SCHEMA);
       if (version === 0) {
         database.exec(`PRAGMA user_version = ${String(DATABASE_SCHEMA_VERSION)}`);
