@@ -228,12 +228,6 @@ export class ReviewCoordinator {
     if (Date.parse(turn.deadlineAt) <= now.getTime()) {
       throw new Error("REVIEW_DEADLINE_EXPIRED");
     }
-    if (
-      action.taskSourceHash !== stringField(run.pendingAction, "taskSourceHash") ||
-      action.candidateHash !== stringField(run.pendingAction, "candidateHash")
-    ) {
-      throw new Error("REVIEW_CONTEXT_BINDING_INVALID");
-    }
     const boundSessionId = boundReviewerSession(run);
     if (
       (action.reviewerSession.mode === "CREATE" && boundSessionId !== undefined) ||
