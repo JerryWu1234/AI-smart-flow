@@ -41,7 +41,6 @@ function manifest(): TaskManifest {
   return {
     projectId: "project-1",
     jobId: "job-1",
-    runId: "job-1",
     canonicalTaskPath: "docs/tasks.md",
     taskSourceArtifact: {
       relativePath: "runs/job-1/task-source.md",
@@ -49,15 +48,12 @@ function manifest(): TaskManifest {
       size: 100
     },
     sourceHash,
-    tasksSha256: sourceHash,
-    tasksHash: sourceHash,
     allowNoChange: false,
     providerRuntimeConfigHash: "b".repeat(64),
     enabledTaskIds: ["T001"],
     tasks: [{
       id: "T001",
       module: "M01",
-      parallel: false,
       description: "Implement deterministic review output",
       filePaths: ["packages/review/src/review-prompt.ts"],
       acceptanceCriteria: [

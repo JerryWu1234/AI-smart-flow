@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import {
   StateStore,
   StateStoreError,
@@ -26,7 +24,6 @@ export interface ProjectMutationRequest {
 export interface ProjectMutationContext {
   fence: number;
   nextStateVersion: number;
-  run: RunRecord | undefined;
 }
 
 export interface ProjectMutationDraft<T> {
@@ -118,9 +115,7 @@ export class ProjectMutationExecutor {
     ) => Promise<() => Promise<TEffect>>
   ): Promise<ProjectMutationResult<T> | ProjectMutationEffectResult<T, TEffect>> {
     return enqueue(this.store.dataDirectory, async () => {
-      const lease = await this.store.acquireMutationLease(
-        `mutation:${request.requestId}:${randomUUID()}`
-      );
+      const lease = await this.store.acquireMutationLease();
       try {
         const state = await this.store.readState();
         const requestHash = canonicalHash(request.payload);
@@ -199,8 +194,7 @@ export class ProjectMutationExecutor {
         const fence = request.advanceFence === true
           ? nextProjectFence
           : (run?.fence ?? nextProjectFence);
-        const draft = await build(state, { fence, nextStateVersion, run });
-        const responseHash = canonicalHash(draft.response);
+        const draft = await build(state, { fence, nextStateVersion });
         let nextState = draft.nextState;
         if (request.advanceFence === true && request.expectedJobId !== undefined) {
           const nextRun = nextState.runs[request.expectedJobId];
@@ -223,11 +217,8 @@ export class ProjectMutationExecutor {
             processedRequests: {
               ...state.processedRequests,
               [request.requestId]: {
-                requestId: request.requestId,
                 requestHash,
-                response: draft.response,
-                responseHash,
-                committedAtStateVersion: nextStateVersion
+                response: draft.response
               }
             },
             updatedAt: new Date().toISOString()

@@ -97,8 +97,6 @@ importers:
         specifier: workspace:*
         version: link:../../packages/workspace
 
-  apps/flow-visualizer: {}
-
   apps/mcp-server:
     dependencies:
       '@modelcontextprotocol/sdk':

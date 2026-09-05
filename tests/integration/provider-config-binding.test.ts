@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -61,7 +60,6 @@ describe("Provider configuration binding", () => {
         hash
       ): Readonly<Record<string, unknown>> | undefined => configurations.get(hash)
     });
-    const approvedSourceHash = createHash("sha256").update(tasksSource).digest("hex");
 
     const execute = async (
       harness: RuntimeHarness,
@@ -74,9 +72,7 @@ describe("Provider configuration binding", () => {
       payload: {
         projectRoot: harness.projectDir,
         tasksPath: "tasks.md",
-        approvedSourceHash,
-        requestId,
-        expectedStateVersion: 0
+        requestId
       }
     }) as Promise<{ projectId: string; jobId: string }>;
 

@@ -33,6 +33,7 @@ import {
   type GitWorkspaceSnapshot
 } from "@smartflow/workspace";
 
+import { resolveReviewEnabled } from "../config/config.js";
 import { gitPublishOperations } from "../publish/git-publish-source.js";
 import { ProjectMutationExecutor } from "../runtime/project-mutation-executor.js";
 
@@ -51,14 +52,14 @@ export type RecoveryAction =
   | "BLOCKED";
 
 export interface PublishRecoveryObservation {
-  status: "COMMITTED" | "CONFLICT" | "PENDING" | "UNKNOWN" | "MISMATCH";
+  status: "COMMITTED" | "CONFLICT" | "UNKNOWN";
   result?: unknown;
 }
 
 export interface RecoveryRuntime {
   inspectWorker(attempt: WorkerAttempt | undefined): Promise<"STOPPED" | "UNKNOWN">;
   reconcilePublish(operationId: string, operationsHash: string): Promise<PublishRecoveryObservation>;
-  continueCancellation(jobId: string): Promise<"CANCELED" | "BLOCKED">;
+  continueCancellation(): Promise<"CANCELED" | "BLOCKED">;
 }
 
 export interface RecoveryResult {
@@ -67,15 +68,6 @@ export interface RecoveryResult {
   action: RecoveryAction;
   stateVersion: number;
   reason?: string;
-  recoveryEpoch?: WorkerRecoveryEpoch;
-}
-
-export interface WorkerRecoveryEpoch {
-  fence: number;
-  sourceGeneration: number;
-  sourceAttemptId: string | null;
-  resetGeneration: number;
-  resetAttemptId: string | null;
 }
 
 function currentAttempt(run: RunRecord): WorkerAttempt | undefined {
@@ -114,6 +106,7 @@ function semanticHashMatches(value: object, hashKey: string): boolean {
 }
 
 function requiresPublishApproval(run: RunRecord): boolean {
+  if (!resolveReviewEnabled()) return false;
   if (new Set<RunPhase>(["READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase)) {
     return true;
   }
@@ -294,8 +287,6 @@ export async function verifyRunArtifacts(
         !artifactRefsEqual(seedRef.data, run.gitWorkspace.current.inputSnapshot) ||
         continuation.kind !== "PI_SESSION_REPAIR" ||
         continuation.jobId !== run.jobId ||
-        continuation.taskSourceHash !== digest(run.taskSource.sha256) ||
-        continuation.taskManifestHash !== digest(run.taskManifest.sha256) ||
         sourceAttempt === undefined ||
         sourceAttempt.status !== "COMPLETED" ||
         sourceAttempt.generation !== continuation.sourceGeneration ||
@@ -382,7 +373,11 @@ export async function verifyRunArtifacts(
     }
 
     if (run.publish !== undefined) {
-      if (candidate === undefined || resultSnapshot === undefined || reviewHash === undefined) {
+      if (
+        candidate === undefined ||
+        resultSnapshot === undefined ||
+        (resolveReviewEnabled() && reviewHash === undefined)
+      ) {
         return "ARTIFACT_SEMANTIC_MISMATCH:publish";
       }
       const operations = gitPublishOperations(candidate, resultSnapshot);
@@ -393,7 +388,7 @@ export async function verifyRunArtifacts(
           projectId: state.projectId,
           jobId: run.jobId,
           candidateHash: getCandidateHash(candidate),
-          reviewHash,
+          ...(reviewHash === undefined ? {} : { reviewHash }),
           operationsHash: expectedOperationsHash
         }) ||
         (run.publish.result !== undefined &&
@@ -467,20 +462,12 @@ export class RecoveryManager {
       return this.pause(state, run, "PAUSED_PROCESS_RECONCILIATION:WORKER_OUTCOME_UNKNOWN");
     }
 
-    const sourceGeneration = attempt?.generation ?? -1;
-    const recoveryEpoch: WorkerRecoveryEpoch = {
-      fence: run.fence,
-      sourceGeneration,
-      sourceAttemptId: attempt?.attemptId ?? null,
-      resetGeneration: sourceGeneration + 1,
-      resetAttemptId: null
-    };
     const endedAt = new Date().toISOString();
     const committed = await this.commit(
       state,
       run,
       "worker:START_NEW_WORKER_ATTEMPT",
-      { observed, recoveryEpoch },
+      { observed },
       (current) => ({
         ...current,
         phase: "PREPARING",
@@ -494,21 +481,13 @@ export class RecoveryManager {
               }
             : item),
         workspace: undefined,
-        pause: undefined,
-        recovery: {
-          ...current.recovery,
-          phase: "RUNNING",
-          action: "START_NEW_WORKER_ATTEMPT",
-          workerEpoch: recoveryEpoch
-        }
+        pause: undefined
       })
     );
     return this.result(
       committed,
       committed.runs[run.jobId] ?? run,
-      "START_NEW_WORKER_ATTEMPT",
-      undefined,
-      recoveryEpoch
+      "START_NEW_WORKER_ATTEMPT"
     );
   }
 
@@ -563,7 +542,7 @@ export class RecoveryManager {
   }
 
   private async recoverCancellation(run: RunRecord): Promise<RecoveryResult> {
-    const observed = await this.runtime.continueCancellation(run.jobId);
+    const observed = await this.runtime.continueCancellation();
     const current = await this.store.readState();
     const recovered = current.runs[run.jobId] ?? run;
     return observed === "CANCELED" && recovered.phase === "CANCELED"
@@ -637,16 +616,14 @@ export class RecoveryManager {
     state: ProjectState,
     run: RunRecord,
     action: RecoveryAction,
-    reason?: string,
-    recoveryEpoch?: WorkerRecoveryEpoch
+    reason?: string
   ): RecoveryResult {
     return {
       jobId: run.jobId,
       phase: run.phase,
       action,
       stateVersion: state.stateVersion,
-      ...(reason === undefined ? {} : { reason }),
-      ...(recoveryEpoch === undefined ? {} : { recoveryEpoch })
+      ...(reason === undefined ? {} : { reason })
     };
   }
 }

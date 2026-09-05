@@ -15,18 +15,21 @@ export interface ResolvedWorkerLaunchConfiguration {
   daemonConfigFingerprint: string;
 }
 
-export const WORKER_CONFIGURATION_ENVIRONMENT_KEYS = [
-  "API",
-  "BASE_URL",
-  "MODEL",
-  "API_KEY",
-  "SMARTFLOW_PI_CONTEXT_WINDOW",
-  "SMARTFLOW_PI_MAX_TOKENS",
-  "SMARTFLOW_PI_THINKING",
-  "SMARTFLOW_PI_ATTEMPT_DEADLINE_MS"
+// The single Worker configuration namespace. These names are both the MCP-facing
+// surface and the daemon-to-Worker transport, so no key needs translating.
+export const WORK_ENVIRONMENT_KEYS = [
+  "WORK_API",
+  "WORK_BASE_URL",
+  "WORK_MODEL",
+  "WORK_API_KEY",
+  "WORK_CONTEXT_WINDOW",
+  "WORK_MAX_TOKENS",
+  "WORK_EFFORT",
+  "WORK_ATTEMPT_DEADLINE_MS"
 ] as const;
 
-const MCP_WORKER_EFFORT_ENVIRONMENT_KEY = "EFFORT";
+export type WorkEnvironmentKey = typeof WORK_ENVIRONMENT_KEYS[number];
+export type WorkEnvironment = Readonly<Record<WorkEnvironmentKey, string>>;
 
 const unsupportedModelFlags = [
   "--model",
@@ -36,7 +39,7 @@ const unsupportedModelFlags = [
   "--model-api-key"
 ] as const;
 
-function required(environment: NodeJS.ProcessEnv, key: string): string {
+function required(environment: NodeJS.ProcessEnv, key: WorkEnvironmentKey): string {
   const value = environment[key]?.trim();
   if (value === undefined || value.length === 0) {
     throw new Error(`WORKER_CONFIGURATION_INVALID: ${key} is required`);
@@ -44,16 +47,9 @@ function required(environment: NodeJS.ProcessEnv, key: string): string {
   return value;
 }
 
-function isWorkerConfigurationKey(key: string): boolean {
-  return key === MCP_WORKER_EFFORT_ENVIRONMENT_KEY ||
-    WORKER_CONFIGURATION_ENVIRONMENT_KEYS.includes(
-      key as typeof WORKER_CONFIGURATION_ENVIRONMENT_KEYS[number]
-    ) || key.startsWith("SMARTFLOW_PI_") || /^SMARTFLOW_(?:MODEL(?:_|$)|WORKER$)/u.test(key);
-}
-
 function optionalPositiveInteger(
   environment: NodeJS.ProcessEnv,
-  key: string,
+  key: WorkEnvironmentKey,
   fallback: number
 ): number {
   const raw = environment[key]?.trim();
@@ -80,22 +76,6 @@ export function daemonConfigFingerprint(
     .digest("hex");
 }
 
-export function resolveMcpWorkerLaunchConfiguration(
-  argv: readonly string[],
-  environment: NodeJS.ProcessEnv = process.env
-): ResolvedWorkerLaunchConfiguration {
-  if (environment.SMARTFLOW_PI_THINKING !== undefined) {
-    throw new Error(
-      "WORKER_CONFIGURATION_INVALID: SMARTFLOW_PI_THINKING is internal; MCP configuration must use EFFORT"
-    );
-  }
-  const canonicalEnvironment = { ...environment };
-  const effort = canonicalEnvironment[MCP_WORKER_EFFORT_ENVIRONMENT_KEY];
-  Reflect.deleteProperty(canonicalEnvironment, MCP_WORKER_EFFORT_ENVIRONMENT_KEY);
-  if (effort !== undefined) canonicalEnvironment.SMARTFLOW_PI_THINKING = effort;
-  return resolveWorkerLaunchConfiguration(argv, canonicalEnvironment);
-}
-
 export function resolveWorkerLaunchConfiguration(
   argv: readonly string[],
   environment: NodeJS.ProcessEnv = process.env
@@ -104,52 +84,42 @@ export function resolveWorkerLaunchConfiguration(
     value === flag || value.startsWith(`${flag}=`)
   ))) {
     throw new Error(
-      "WORKER_CONFIGURATION_INVALID: Pi model configuration must use BASE_URL, MODEL, and API_KEY environment variables; API is optional"
+      "WORKER_CONFIGURATION_INVALID: Pi model configuration must use WORK_BASE_URL, WORK_MODEL, and WORK_API_KEY environment variables; WORK_API is optional"
     );
   }
-  const unsupportedKey = Object.keys(environment).find((key) =>
-    isWorkerConfigurationKey(key) &&
-    !WORKER_CONFIGURATION_ENVIRONMENT_KEYS.includes(
-      key as typeof WORKER_CONFIGURATION_ENVIRONMENT_KEYS[number]
-    ) &&
-    environment[key] !== undefined
-  );
-  if (unsupportedKey !== undefined) {
-    throw new Error(`WORKER_CONFIGURATION_INVALID: ${unsupportedKey} is unsupported`);
-  }
-  const api = environment.API?.trim() ?? "openai-responses";
+  const api = environment.WORK_API?.trim() ?? "openai-responses";
   if (!PI_MODEL_APIS.includes(api as PiModelApi)) {
-    throw new Error("WORKER_CONFIGURATION_INVALID: API is unsupported");
+    throw new Error("WORKER_CONFIGURATION_INVALID: WORK_API is unsupported");
   }
   const contextWindow = optionalPositiveInteger(
     environment,
-    "SMARTFLOW_PI_CONTEXT_WINDOW",
+    "WORK_CONTEXT_WINDOW",
     1_000_000
   );
-  const maxTokens = optionalPositiveInteger(environment, "SMARTFLOW_PI_MAX_TOKENS", 384_000);
+  const maxTokens = optionalPositiveInteger(environment, "WORK_MAX_TOKENS", 384_000);
   if (maxTokens > contextWindow) {
     throw new Error(
-      "WORKER_CONFIGURATION_INVALID: SMARTFLOW_PI_MAX_TOKENS must not exceed SMARTFLOW_PI_CONTEXT_WINDOW"
+      "WORKER_CONFIGURATION_INVALID: WORK_MAX_TOKENS must not exceed WORK_CONTEXT_WINDOW"
     );
   }
   const attemptDeadlineMs = optionalPositiveInteger(
     environment,
-    "SMARTFLOW_PI_ATTEMPT_DEADLINE_MS",
+    "WORK_ATTEMPT_DEADLINE_MS",
     300_000
   );
   if (attemptDeadlineMs < PI_MINIMUM_ATTEMPT_DEADLINE_MS) {
     throw new Error(
-      `WORKER_CONFIGURATION_INVALID: SMARTFLOW_PI_ATTEMPT_DEADLINE_MS must be at least ${String(PI_MINIMUM_ATTEMPT_DEADLINE_MS)}`
+      `WORKER_CONFIGURATION_INVALID: WORK_ATTEMPT_DEADLINE_MS must be at least ${String(PI_MINIMUM_ATTEMPT_DEADLINE_MS)}`
     );
   }
-  const credential = required(environment, "API_KEY");
+  const credential = required(environment, "WORK_API_KEY");
   const runtimeConfig = parsePiRuntimeConfiguration({
     api,
-    baseUrl: required(environment, "BASE_URL"),
-    modelId: required(environment, "MODEL"),
+    baseUrl: required(environment, "WORK_BASE_URL"),
+    modelId: required(environment, "WORK_MODEL"),
     contextWindow,
     maxTokens,
-    thinkingLevel: (environment.SMARTFLOW_PI_THINKING?.trim() || "high") as PiThinkingLevel,
+    thinkingLevel: (environment.WORK_EFFORT?.trim() || "high") as PiThinkingLevel,
     attemptDeadlineMs,
     resourcePolicy: "workspace-project-resources"
   });
@@ -163,20 +133,18 @@ export function resolveWorkerLaunchConfiguration(
 export function workerLaunchEnvironment(
   baseEnvironment: NodeJS.ProcessEnv,
   configuration: ResolvedWorkerLaunchConfiguration
-): NodeJS.ProcessEnv {
-  const environment = { ...baseEnvironment };
-  for (const key of Object.keys(environment)) {
-    if (isWorkerConfigurationKey(key)) Reflect.deleteProperty(environment, key);
-  }
-  environment.API = configuration.runtimeConfig.api;
-  environment.BASE_URL = configuration.runtimeConfig.baseUrl;
-  environment.MODEL = configuration.runtimeConfig.modelId;
-  environment.SMARTFLOW_PI_CONTEXT_WINDOW = String(configuration.runtimeConfig.contextWindow);
-  environment.SMARTFLOW_PI_MAX_TOKENS = String(configuration.runtimeConfig.maxTokens);
-  environment.SMARTFLOW_PI_THINKING = configuration.runtimeConfig.thinkingLevel;
-  environment.SMARTFLOW_PI_ATTEMPT_DEADLINE_MS = String(configuration.runtimeConfig.attemptDeadlineMs);
-  environment.API_KEY = configuration.credential;
-  return environment;
+): NodeJS.ProcessEnv & WorkEnvironment {
+  return {
+    ...baseEnvironment,
+    WORK_API: configuration.runtimeConfig.api,
+    WORK_BASE_URL: configuration.runtimeConfig.baseUrl,
+    WORK_MODEL: configuration.runtimeConfig.modelId,
+    WORK_API_KEY: configuration.credential,
+    WORK_CONTEXT_WINDOW: String(configuration.runtimeConfig.contextWindow),
+    WORK_MAX_TOKENS: String(configuration.runtimeConfig.maxTokens),
+    WORK_EFFORT: configuration.runtimeConfig.thinkingLevel,
+    WORK_ATTEMPT_DEADLINE_MS: String(configuration.runtimeConfig.attemptDeadlineMs)
+  };
 }
 
 export function resolveWorkerRegistration(value: unknown): ResolvedWorkerLaunchConfiguration {
@@ -184,7 +152,7 @@ export function resolveWorkerRegistration(value: unknown): ResolvedWorkerLaunchC
     throw new Error("WORKER_CONFIGURATION_INVALID: registration must be an environment object");
   }
   const record = value as Record<string, unknown>;
-  const allowed = new Set<string>(WORKER_CONFIGURATION_ENVIRONMENT_KEYS);
+  const allowed = new Set<string>(WORK_ENVIRONMENT_KEYS);
   if (Object.keys(record).some((key) => !allowed.has(key))) {
     throw new Error("WORKER_CONFIGURATION_INVALID: registration contains an unknown field");
   }

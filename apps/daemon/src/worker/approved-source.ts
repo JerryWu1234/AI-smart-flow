@@ -4,23 +4,17 @@ import { open } from "node:fs/promises";
 import type { ProjectState } from "@smartflow/state-store";
 import { sha256Bytes } from "@smartflow/task-manifest";
 
-export interface ApprovedSourceObservation {
-  approvedHash: string | undefined;
-  observedHash: string;
-  matches: boolean;
-}
-
-export async function observeApprovedSource(
+export async function approvedSourceMatches(
   state: ProjectState,
   jobId: string
-): Promise<ApprovedSourceObservation> {
+): Promise<boolean> {
   const run = state.runs[jobId];
   const path = typeof run?.approvedTasks?.path === "string" ? run.approvedTasks.path : undefined;
   const approvedHash = typeof run?.approvedTasks?.sourceHash === "string"
     ? run.approvedTasks.sourceHash
     : undefined;
   if (path === undefined || approvedHash === undefined) {
-    return { approvedHash, observedHash: "UNAVAILABLE", matches: false };
+    return false;
   }
   try {
     const bytes = await open(path, constants.O_RDONLY | constants.O_NONBLOCK).then(
@@ -34,9 +28,8 @@ export async function observeApprovedSource(
         }
       }
     );
-    const observedHash = sha256Bytes(bytes);
-    return { approvedHash, observedHash, matches: observedHash === approvedHash };
+    return sha256Bytes(bytes) === approvedHash;
   } catch {
-    return { approvedHash, observedHash: "UNAVAILABLE", matches: false };
+    return false;
   }
 }

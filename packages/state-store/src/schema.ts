@@ -4,6 +4,7 @@ import {
   artifactRefSchema,
   artifactRefsEqual,
   canonicalValueSchema,
+  identifierSchema,
   idempotentReceiptSchema,
   piWorkerAttemptSchema,
   publishResultSchema,
@@ -173,7 +174,11 @@ export const projectStateSchema = z.object({
       acquiredAt: z.iso.datetime({ offset: true })
     }).strict().nullable(),
     runs: z.record(z.string(), runRecordSchema),
-    processedRequests: z.record(z.string(), idempotentReceiptSchema),
+    processedRequests: z.record(
+      // Validate the identifier at its map key without rewriting the replay key.
+      z.string().refine((value) => identifierSchema.safeParse(value).success, "expected request identifier"),
+      idempotentReceiptSchema
+    ),
     updatedAt: z.iso.datetime({ offset: true })
   })
   .strict()
@@ -302,8 +307,8 @@ export function runArtifactInventory(run: RunRecord): RunArtifactInventory {
   const repairPaused = run.phase === "PAUSED" && (run.pause?.code.startsWith("REPAIR_") ?? false);
   const candidate = add("candidate", run.candidate, "CANDIDATE", requiresCandidate || publishPaused || reviewPaused || repairPaused);
   add("baseline", run.baseline, "BASELINE", requiresBaseline || publishPaused || reviewPaused || repairPaused);
-  add("review", run.review, "REVIEW", new Set(["READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase) || publishPaused);
-  add("leaderDecision", run.leaderDecision, "LEADER_DECISION", new Set(["READY_TO_PUBLISH", "PUBLISHING", "COMPLETED"]).has(run.phase) || publishPaused);
+  add("review", run.review, "REVIEW", false);
+  add("leaderDecision", run.leaderDecision, "LEADER_DECISION", false);
 
   const recovery = record(run.recovery);
   const repairDraft = record(recovery?.repairDraft);

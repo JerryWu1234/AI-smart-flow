@@ -10,7 +10,7 @@ import { redactPiValue } from "@smartflow/provider-pi";
 import {
   cancelInputSchema,
   durableReviewDecisionSchema,
-  executeInputSchema,
+  daemonExecuteInputSchema,
   hostActionSchema,
   resultOutputSchema,
   resultInputSchema,
@@ -20,7 +20,7 @@ import {
   statusInputSchema,
   type ArtifactRef,
   type CancelInput,
-  type ExecuteInput,
+  type DaemonExecuteInput,
   type HostAction,
   type ResumeInput,
   type ResultOutput,
@@ -33,13 +33,10 @@ import {
   type ProjectState,
   type RunRecord
 } from "@smartflow/state-store";
-import {
-  compileTaskManifest,
-  sha256Bytes
-} from "@smartflow/task-manifest";
+import { compileTaskManifest } from "@smartflow/task-manifest";
 import { cleanupGitRunTemporaryState } from "@smartflow/workspace";
 
-import { observeApprovedSource } from "../worker/approved-source.js";
+import { approvedSourceMatches } from "../worker/approved-source.js";
 import { type IpcRequest, type IpcRequestHandler } from "../transport/local-ipc-server.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
 import { HostTurnCoordinator } from "../review/host-turn-coordinator.js";
@@ -407,7 +404,7 @@ export class ProjectRuntime {
     switch (request.method) {
       case "smartflow_execute":
         {
-          const parsed = executeInputSchema.safeParse(request.payload);
+          const parsed = daemonExecuteInputSchema.safeParse(request.payload);
           if (!parsed.success) {
             if (hasUnsafeTasksPathIssue(parsed.error)) {
               throw new ProjectRuntimeError("TASKS_PATH_UNSAFE", "tasksPath must be Project-relative without parent traversal");
@@ -509,22 +506,22 @@ export class ProjectRuntime {
   }
 
   public async execute(
-    input: ExecuteInput,
+    input: DaemonExecuteInput,
     providerRuntimeConfigHash?: string,
     clientName?: string
   ): Promise<unknown> {
     const providerRuntimeConfig = this.resolveProviderRuntimeConfig(providerRuntimeConfigHash);
     const reviewAdapterId = this.options.resolveReviewAdapterId?.(clientName) ?? "codex";
     const canonicalRoot = await realpath(input.projectRoot);
-    const { canonicalPath: canonicalTasksPath, sourceBytes } = await readProjectTasksFile(
-      canonicalRoot,
-      input.tasksPath
-    );
-    if (sha256Bytes(sourceBytes) !== input.approvedSourceHash.replace(/^sha256:/u, "")) {
-      throw new ProjectRuntimeError("APPROVED_SOURCE_DRIFT", "tasks source differs from the approved hash");
-    }
     const projectId = projectIdForRoot(canonicalRoot);
     const store = this.store(projectId);
+    let initialTaskSource: Awaited<ReturnType<typeof readProjectTasksFile>> | undefined;
+    try {
+      const stateDatabase = await open(store.databasePath, constants.O_RDONLY);
+      await stateDatabase.close();
+    } catch {
+      initialTaskSource = await readProjectTasksFile(canonicalRoot, input.tasksPath);
+    }
     await store.initialize({
       projectId,
       canonicalProjectRoot: canonicalRoot,
@@ -544,8 +541,9 @@ export class ProjectRuntime {
         ...(providerRuntimeConfigHash === undefined ? {} : { providerRuntimeConfigHash }),
         reviewAdapterId
       },
-      input.expectedStateVersion,
       async (state, nextStateVersion, fence) => {
+        const { canonicalPath: canonicalTasksPath, sourceBytes } = initialTaskSource ??
+          await readProjectTasksFile(canonicalRoot, input.tasksPath);
         const activeJobId = state.activeRunsByTaskPath[canonicalTasksPath];
         if (activeJobId !== undefined) {
           throw new ProjectRuntimeError("TASK_ALREADY_ACTIVE", `Task file already has active run ${activeJobId}`);
@@ -664,7 +662,6 @@ export class ProjectRuntime {
       store,
       input.requestId,
       mutationPayload,
-      input.expectedStateVersion,
       async (state, nextStateVersion) => {
         const run = state.runs[input.jobId];
         if (run === undefined) {
@@ -681,8 +678,7 @@ export class ProjectRuntime {
           await this.assertRunArtifacts(store, state, input.jobId);
         }
         if (input.resumeAction === "restore_approved_tasks") {
-          const observation = await observeApprovedSource(state, input.jobId);
-          if (!observation.matches) {
+          if (!(await approvedSourceMatches(state, input.jobId))) {
             throw new ProjectRuntimeError(
               "APPROVED_SOURCE_DRIFT",
               "Approved tasks source has not been restored"
@@ -817,7 +813,6 @@ export class ProjectRuntime {
       store,
       input.requestId,
       input,
-      input.expectedStateVersion,
       (state, nextStateVersion) => {
         const run = state.runs[input.jobId];
         if (run === undefined) throw new ProjectRuntimeError("RUN_NOT_FOUND", input.jobId);
@@ -1099,7 +1094,6 @@ export class ProjectRuntime {
     store: StateStore,
     requestId: string,
     payload: unknown,
-    expectedStateVersion: number | undefined,
     build: (
       state: ProjectState,
       nextStateVersion: number,
@@ -1114,7 +1108,6 @@ export class ProjectRuntime {
       {
         requestId,
         payload,
-        ...(expectedStateVersion === undefined ? {} : { expectedStateVersion }),
         ...(jobId === undefined ? {} : { expectedJobId: jobId })
       },
       async (state, context) => build(state, context.nextStateVersion, context.fence)

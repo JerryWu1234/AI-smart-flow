@@ -1,8 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { MetricsRegistry, StructuredLogger } from "@smartflow/observability";
-import type { WorkspaceApplyAdapter } from "@smartflow/publish";
+import { StructuredLogger } from "@smartflow/observability";
 import {
   ClaudeCodeAdapter,
   ClaudeCodeDesktopAdapter,
@@ -12,10 +11,10 @@ import {
 } from "@smartflow/review";
 
 import {
+  resolveReviewEnabled,
   resolveReviewStrategy,
   resolveSmartFlowConfig,
-  type ReviewStrategy,
-  type SmartFlowConfig
+  type ReviewStrategy
 } from "./config/config.js";
 import { resolveInstallationDataDirectory } from "./config/data-dir.js";
 import { LocalIpcServer, type IpcRequestHandler } from "./transport/local-ipc-server.js";
@@ -25,7 +24,7 @@ import { ProductionRuntimeComposition } from "./runtime/runtime-composition.js";
 import { resolveReviewerExecutable } from "./review/reviewer-executable.js";
 import {
   resolveWorkerLaunchConfiguration,
-  WORKER_CONFIGURATION_ENVIRONMENT_KEYS,
+  WORK_ENVIRONMENT_KEYS,
   type ResolvedWorkerLaunchConfiguration
 } from "./config/worker-config.js";
 
@@ -44,16 +43,12 @@ export interface SmartFlowDaemonOptions {
   dataDirectory?: string;
   handler?: IpcRequestHandler;
   logger?: StructuredLogger;
-  metrics?: MetricsRegistry;
-  workspaceApplyAdapter?: WorkspaceApplyAdapter;
   workerLaunchConfiguration?: ResolvedWorkerLaunchConfiguration;
   reviewAdapter?: AgentAdapter;
 }
 
 export interface SmartFlowDaemonController {
   server: LocalIpcServer;
-  config: SmartFlowConfig;
-  dataDirectory: string;
   close(): Promise<void>;
 }
 
@@ -61,17 +56,18 @@ export async function startSmartFlowDaemon(
   options: SmartFlowDaemonOptions = {}
 ): Promise<SmartFlowDaemonController> {
   const logger = options.logger ?? new StructuredLogger("smartflow-daemon");
-  const metrics = options.metrics ?? new MetricsRegistry();
   const timer = performance.now();
   const config = resolveSmartFlowConfig();
   const injectedReviewAdapter = options.reviewAdapter;
   const configuredReviewExecutable =
-    injectedReviewAdapter === undefined && config.review.strategy !== undefined
+    resolveReviewEnabled() &&
+    injectedReviewAdapter === undefined &&
+    config.review.strategy !== undefined
       ? await resolveReviewerExecutable(config.review.strategy)
       : undefined;
   const workerLaunchConfiguration = options.workerLaunchConfiguration ??
     resolveWorkerLaunchConfiguration([]);
-  for (const key of WORKER_CONFIGURATION_ENVIRONMENT_KEYS) {
+  for (const key of WORK_ENVIRONMENT_KEYS) {
     Reflect.deleteProperty(process.env, key);
   }
   const providers = new ProviderRegistry();
@@ -96,7 +92,6 @@ export async function startSmartFlowDaemon(
   const composition = new ProductionRuntimeComposition(
     resolveReviewAdapter,
     logger,
-    options.workspaceApplyAdapter,
     initialProviderRuntime.provider,
     providerRuntimeConfig,
     providers.resolve.bind(providers),
@@ -138,7 +133,6 @@ export async function startSmartFlowDaemon(
     await projectRuntime.recover();
     await server.start();
     const durationMs = performance.now() - timer;
-    metrics.recordStage("daemon.start", durationMs, true);
     logger.log({
       level: "info",
       event: "daemon.ready",
@@ -152,14 +146,11 @@ export async function startSmartFlowDaemon(
   } catch (error) {
     await server.close().catch(() => undefined);
     const durationMs = performance.now() - timer;
-    metrics.recordStage("daemon.start", durationMs, false);
     logger.log({ level: "error", event: "daemon.start_failed", stage: "daemon.start", durationMs, error });
     throw error;
   }
   return {
     server,
-    config,
-    dataDirectory,
     async close(): Promise<void> {
       await server.close();
       logger.log({ level: "info", event: "daemon.stopped" });

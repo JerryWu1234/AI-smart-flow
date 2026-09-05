@@ -49,17 +49,12 @@ export const canonicalValueSchema: z.ZodType = z.lazy(() =>
 
 export const idempotentReceiptSchema = z
   .object({
-    requestId: identifierSchema,
     requestHash: sha256Schema,
-    response: canonicalValueSchema,
-    responseHash: sha256Schema,
-    committedAtStateVersion: nonNegativeIntegerSchema
+    response: canonicalValueSchema
   })
   .strict();
 
 export type ArtifactRef = z.infer<typeof artifactRefSchema>;
-export type StructuredError = z.infer<typeof structuredErrorSchema>;
-export type IdempotentReceipt = z.infer<typeof idempotentReceiptSchema>;
 
 export function artifactRefsEqual(left: ArtifactRef, right: ArtifactRef): boolean {
   return left.relativePath === right.relativePath &&

@@ -1,12 +1,17 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { probeGitRepository } from "../../../../packages/workspace/src/git-capability.js";
+import { canonicalHash } from "@smartflow/state-store";
+
+import {
+  GIT_INCLUSION_POLICY,
+  probeGitRepository
+} from "../../../../packages/workspace/src/git-capability.js";
 
 const execute = promisify(execFile);
 const roots: string[] = [];
@@ -27,12 +32,13 @@ async function repository(): Promise<string> {
 describe("Git repository capability probe", () => {
   it("reports a normal repository as ready", async () => {
     const root = await repository();
-    await expect(probeGitRepository(root)).resolves.toMatchObject({
+    const capabilities = await probeGitRepository(root);
+    expect(capabilities).toMatchObject({
       status: "READY",
-      repositoryRoot: await realpath(root),
       worktreeSupported: true,
-      inclusionPolicy: { tracked: true, dirty: true, untrackedNonIgnored: true, ignored: false }
+      inclusionPolicyHash: canonicalHash(GIT_INCLUSION_POLICY)
     });
+    expect(capabilities.repositoryId).toMatch(/^[a-f0-9]{64}$/u);
   });
 
   it("does not block repositories that configure LFS or custom filters", async () => {
@@ -47,7 +53,6 @@ describe("Git repository capability probe", () => {
 
     await expect(probeGitRepository(root)).resolves.toMatchObject({
       status: "READY",
-      repositoryRoot: await realpath(root),
       worktreeSupported: true
     });
   });

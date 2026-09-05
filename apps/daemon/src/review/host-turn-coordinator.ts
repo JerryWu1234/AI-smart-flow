@@ -267,7 +267,6 @@ export class HostTurnCoordinator {
       requestId: childRequestId(turn.turnToken, `answer-${answer}`),
       projectId: input.projectId,
       jobId: input.jobId,
-      expectedStateVersion: state.stateVersion,
       resumeAction: answer
     }, {
       clearHostTurn: true,

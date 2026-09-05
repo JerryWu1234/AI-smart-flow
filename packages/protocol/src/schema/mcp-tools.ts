@@ -17,8 +17,7 @@ const stateMutationSchema = z
   .object({
     requestId: identifierSchema,
     projectId: identifierSchema,
-    jobId: identifierSchema,
-    expectedStateVersion: nonNegativeIntegerSchema
+    jobId: identifierSchema
   })
   .strict();
 
@@ -45,13 +44,13 @@ export const tasksPathSchema = z
   .min(1)
   .refine(isProjectRelativePath, { message: "TASKS_PATH_UNSAFE" });
 
-export const executeInputSchema = z
+export const executeInputSchema = z.object({}).strict();
+
+export const daemonExecuteInputSchema = z
   .object({
     projectRoot: z.string().min(1),
     tasksPath: tasksPathSchema,
-    approvedSourceHash: sha256Schema,
-    requestId: identifierSchema,
-    expectedStateVersion: nonNegativeIntegerSchema.optional()
+    requestId: identifierSchema
   })
   .strict();
 export const executeOutputSchema = mutationResultSchema;
@@ -90,9 +89,6 @@ export const resultInputSchema = statusInputSchema;
 export const repairDraftSchema = z
   .object({
     sourceArtifact: artifactRefSchema,
-    sourceHash: sha256Schema,
-    baseTaskSourceHash: sha256Schema,
-    baseTaskManifestHash: sha256Schema,
     suggestedTasksPath: z.string().min(1),
     appendText: z.string().min(1),
     addedTaskLines: z.array(z.string().min(1)).min(1),
@@ -234,24 +230,10 @@ export const reviewTurnOutputSchema = z.discriminatedUnion("kind", [
   }
 });
 
-export const mcpToolSchemas = {
-  smartflow_execute: { input: executeInputSchema, output: executeOutputSchema },
-  smartflow_review_turn: { input: reviewTurnInputSchema, output: reviewTurnOutputSchema },
-  smartflow_status: { input: statusInputSchema, output: statusOutputSchema },
-  smartflow_resume: { input: resumeInputSchema, output: resumeOutputSchema },
-  smartflow_cancel: { input: cancelInputSchema, output: cancelOutputSchema },
-  smartflow_result: { input: resultInputSchema, output: resultOutputSchema }
-} as const;
-
-export type ExecuteInput = z.infer<typeof executeInputSchema>;
+export type DaemonExecuteInput = z.infer<typeof daemonExecuteInputSchema>;
 export type ExecuteOutput = z.infer<typeof executeOutputSchema>;
-export type StatusInput = z.infer<typeof statusInputSchema>;
-export type StatusOutput = z.infer<typeof statusOutputSchema>;
 export type ResumeInput = z.infer<typeof resumeInputSchema>;
-export type ResumeOutput = z.infer<typeof resumeOutputSchema>;
 export type CancelInput = z.infer<typeof cancelInputSchema>;
-export type CancelOutput = z.infer<typeof cancelOutputSchema>;
-export type ResultInput = z.infer<typeof resultInputSchema>;
 export type ResultOutput = z.infer<typeof resultOutputSchema>;
 export type ReviewTurnInput = z.infer<typeof reviewTurnInputSchema>;
 export type ReviewTurnOutput = z.infer<typeof reviewTurnOutputSchema>;

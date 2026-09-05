@@ -1,16 +1,12 @@
 # Host 任务文件生成与用户确认实现计划
 
-> **状态：已实施。**
+> **状态：历史计划；public execute 部分已由 session-bound 零参数方案取代。**
 >
-> **实际落点：** `apps/mcp-server/src/server.ts` 与 `README.md` 定义 Host 准备、完整展示和明确确认策略；`packages/workspace/src/git-snapshot.ts`、`git-capability.ts`、`candidate-builder.ts` 实现 control-plane snapshot 隔离与 Candidate 防线；`apps/daemon/src/worker-runner.ts`、`git-publish-source.ts` 实现 immutable source 恢复与 Publish 防线。相关 contract、Host workflow、TaskManifest、Workspace、Worker/Review 和 Publish 测试均已补充。
+> **后续决策：** 每个 stdio MCP session 绑定 canonical project root，并生成固定的 `.smartflow/tasks/<sessionId>/tasks.md`。Host 在前一个 Job 完成后覆盖该路径准备下一批任务，用户确认后只调用 `smartflow_execute({})`。MCP adapter 只传内部 `projectRoot`、`tasksPath` 和自动生成的 execute `requestId`；Daemon 单次读取 task 内容并立即固化 immutable artifacts。
 >
-> **验证结果：** 定向 Vitest 回归共 22 个测试文件、85 个测试通过；`pnpm run typecheck` 与 `pnpm run build` 均通过。
+> **仍然有效：** Host 的实现意图门、磁盘重读、完整展示与明确确认策略，以及 `.smartflow/tasks/**` 的 control-plane snapshot/Candidate/Publish 隔离、immutable task artifact 和恢复防线。
 >
-> 本计划建立 `smartflow_execute` 之前的 Host 准备流程：无论任务来自聊天上下文、一个已有文件或多个已有文件，Host 都先在项目内生成一份符合 SmartFlow 语法的 canonical `tasks.md`，向用户展示磁盘中的完整内容，并只在用户明确确认后计算文件 SHA-256、调用 `smartflow_execute`。
->
-> `.smartflow/tasks/**` 被定义为 SmartFlow control-plane 路径：它可以在用户项目中保留供查看和追溯，但不得进入 Git Run baseline、RUN_RESULT、Candidate 或 Publish。Worker workspace 只注入当前 Job 的 immutable task source，Reviewer 读取的 canonical 文件也必须恢复为该确认版本。
->
-> 本计划建立在业务 Revision 已移除、一个 Job 只绑定一份不可变 Task source 和 TaskManifest 的模型上，不恢复 `revision`、`revisionId`、`expectedRevision` 或同一 Job 内替换任务定义的能力。
+> 下文保留原始 per-request 目录方案作为历史实施记录；当前行为以 `README.md`、`apps/mcp-server/src/server.ts` 和 protocol schema 为准。
 
 ## 1. 问题与核心决策
 
@@ -101,15 +97,9 @@ Host 判断用户发起一批新的实现任务后，必须：
 
 ### 3.2 单次执行只绑定一份文件
 
-一次 `smartflow_execute` 继续只接收：
+历史方案通过路径、内容摘要和幂等 ID 将一次 execute 绑定到一份文件。当前方案改为 session-bound：public `smartflow_execute({})` 不接收参数，MCP adapter 仅把 session 的 `projectRoot`、`tasksPath` 和自动生成的 `requestId` 传给 Daemon。
 
-```text
-一个 tasksPath
-一个 approvedSourceHash
-一个 requestId
-```
-
-如果输入资料包含多个任务文件，多个文件只属于 Host 的准备输入。Host 必须先将其整理成当前请求的一份 canonical 文件，再调用 execute。Daemon 不负责多文件排序、合并、Task ID 冲突处理或多 hash 组合。
+如果输入资料包含多个任务文件，多个文件只属于 Host 的准备输入。Host 必须先将其整理成当前请求的一份 canonical 文件，再调用 execute。Daemon 不负责多文件排序、合并、Task ID 冲突处理或多份任务源组合。
 
 ### 3.3 Job 创建后任务合同不可变
 
@@ -199,7 +189,7 @@ Host 生成的文件必须符合 `packages/task-manifest/src/tasks-parser.ts` �
 
 - 模块标题使用 `## M01 ...`；
 - 任务使用 `- [ ] T001 ...`；
-- 标签只使用 `[P]` 和 `[M01]` 形式的模块标签；
+- 标签只使用 `[M01]` 形式的模块标签；
 - 每个任务描述中包含至少一个反引号包裹的目标路径；
 - 描述与验收标准之间使用精确分隔符 ` — 验收：`；
 - Task ID 在当前 canonical 文件内全局唯一；
@@ -211,7 +201,7 @@ Host 生成的文件必须符合 `packages/task-manifest/src/tasks-parser.ts` �
 ## M01 用户认证
 
 - [ ] T001 [M01] 在 `src/auth/login.ts` 实现登录校验 — 验收：有效账号可以登录，错误密码返回明确错误
-- [ ] T002 [P] [M01] 在 `src/auth/login.test.ts` 补充登录场景测试 — 验收：成功和失败场景均有覆盖
+- [ ] T002 [M01] 在 `src/auth/login.test.ts` 补充登录场景测试 — 验收：成功和失败场景均有覆盖
 ```
 
 外部 `task.md`、`tasks.md` 或 Spec 文件不是因为扩展名正确就一定能被 SmartFlow parser 接受。Host 的职责是将来源内容转换成以上 canonical 格式，而不是直接把任意 Markdown 文件交给 Daemon。
@@ -229,31 +219,27 @@ Host 生成的文件必须符合 `packages/task-manifest/src/tasks-parser.ts` �
 
 用户必须针对当前展示内容作出明确确认。没有明确确认时，Host 不得调用 `smartflow_execute`。
 
-### 4.6 计算 hash 并执行
+### 4.6 确认后执行（当前方案）
 
-确认后，Host 对已确认文件的精确字节计算 SHA-256，并调用：
+确认后，Host 只调用：
 
 ```ts
-smartflow_execute({
-  projectRoot,
-  tasksPath: ".smartflow/tasks/<requestId>/tasks.md",
-  approvedSourceHash,
-  requestId
-});
+smartflow_execute({});
 ```
 
-`tasksPath` 中的 `<requestId>` 必须与 execute 输入的 `requestId` 相同。Host 不生成或传递任何 Revision 字段。
+Host 不读取或传递任何内部 execute 字段。MCP adapter 只检查 session 文件的元数据版本，用它复用重试身份或识别下一批任务，然后向 Daemon 发送 session 绑定的 `projectRoot`、`tasksPath` 和自动生成的 `requestId`。
 
-Daemon 继续执行：
+Daemon 执行：
 
 ```text
-安全读取 projectRoot 内的普通文件
-→ 校验 sha256(sourceBytes) === approvedSourceHash
-→ compileTaskManifest(sourceBytes, ...)
+安全读取 projectRoot 内的普通文件一次
+→ 计算 source hash 并 compileTaskManifest(sourceBytes, ...)
 → 保存 runs/<jobId>/task-source.md
 → 保存 runs/<jobId>/task-manifest.json
 → 创建不可变 Job
 ```
+
+文件内容进入 immutable artifacts 后，Worker、Review、Repair 和 Recovery 不再读取项目里的 live session 文件。
 
 ### 4.7 同一 Host 的下一批任务
 
@@ -327,27 +313,27 @@ materialize 不含 .smartflow/tasks/** 的 input snapshot
 
 Repair attempt 继续复用同一 Job 的 result snapshot 和 PI session；由于 result snapshot 不包含任务控制文件，每次准备 workspace 时仍由 `syncCanonicalTask()` 注入同一份 immutable source。
 
-## 6. 协议保持不变
+## 6. 当前协议边界（后续变更）
 
-`packages/protocol/src/schema/mcp-tools.ts` 中的 execute 输入继续保持：
+Public MCP execute 输入现在严格为：
+
+```ts
+{}
+```
+
+Host 从 MCP instructions 获取当前 session 的 `.smartflow/tasks/<sessionId>/tasks.md`，完成磁盘重读、完整展示与用户确认后调用 `smartflow_execute({})`。Host 不传任何 execute 参数。
+
+MCP adapter 观察 session 文件的元数据版本并生成内部幂等 ID，然后向 Daemon 发送：
 
 ```ts
 {
   projectRoot,
   tasksPath,
-  approvedSourceHash,
-  requestId,
-  expectedStateVersion?
+  requestId
 }
 ```
 
-字段职责：
-
-- `projectRoot`：用户项目根目录；
-- `tasksPath`：当前请求唯一 canonical 文件的项目相对路径；
-- `approvedSourceHash`：用户已确认文件精确字节的 SHA-256；
-- `requestId`：当前新 execute 请求的唯一幂等身份，同时用于隔离任务目录；
-- `expectedStateVersion`：现有项目状态 CAS，与 Revision 无关。
+Daemon 安全读取 task 文件一次，随即编译 TaskManifest，并保存 immutable source/manifest artifacts。后续 Worker、Review、Repair 和 Recovery 都使用这些 artifacts，不再读取项目里的 live session 文件；完整展示和明确确认继续属于 Host policy。
 
 不新增：
 
@@ -357,11 +343,8 @@ revisionId
 expectedRevision
 parentRevision
 taskPaths[]
-approvedSourceHashes[]
 confirmation: true
 ```
-
-`approvedSourceHash` 可以保证 Daemon 执行的是 Host 提交的那份精确文件，但服务端无法仅凭 hash 证明用户确实表达过确认。最小实现将“完整展示并等待明确确认”定义为 Host policy，不增加确认 token 或新工具。
 
 ## 7. 文件级实施计划
 
@@ -373,21 +356,20 @@ instructions 必须按顺序告诉 Host：
 
 1. 先执行实现意图门，闲聊、解释、评估和纯规划不得 execute；
 2. 信息不足时向用户提问，不编造关键目标、范围或验收标准；
-3. 每批新的实现任务生成新的唯一 `requestId`，包括同一 Host 会话中的后续任务；
+3. 使用 instructions 给出的固定 `.smartflow/tasks/<sessionId>/tasks.md`；
 4. 将聊天、单文件或多文件输入统一转换成一份 canonical SmartFlow 文件；
-5. 写入 `.smartflow/tasks/<requestId>/tasks.md`，不得覆盖旧 request 目录；
+5. 仅在前一个 Job 进入终态后，才覆盖该 session 文件准备下一批任务；
 6. 重新读取并展示磁盘文件的完整内容；
 7. 等待用户针对当前内容明确确认；
-8. 确认后对精确文件字节计算 SHA-256；
-9. 使用同一个 `requestId`、对应 `tasksPath` 和 hash 调用 `smartflow_execute`；
-10. 不创建、跟踪或传递业务 Revision。
+8. 确认后调用 `smartflow_execute({})`；
+9. 不创建、跟踪或传递内部 execute 字段或业务 Revision。
 
 同时更新 `smartflow_execute` 的工具描述，明确：
 
 - 该工具不负责规划或生成任务；
-- 只能执行已经写入项目、完整展示并由用户确认的 canonical 文件；
-- 每批新任务使用新的 `requestId`；
-- `approvedSourceHash` 由 Host 根据确认文件计算，不能伪造 Daemon 内部 hash。
+- 只能执行已经写入 session 固定路径、完整展示并由用户确认的 canonical 文件；
+- 前一个 Job 进入终态后，Host 才能覆盖该路径准备下一批任务；
+- Host 只传空对象；MCP adapter 管理内部路由和幂等身份。
 
 现有六个 MCP 工具保持不变：
 
@@ -549,12 +531,12 @@ tests/unit/helpers/host-workflow/workflow.test.ts
 并按职责增加 planner/approval 测试，覆盖：
 
 1. 没有确认快照时不调用 execute；
-2. 确认文件的 hash 被传为 `approvedSourceHash`；
-3. execute 使用项目相对路径；
-4. 请求 A 写入 `.smartflow/tasks/<requestId-A>/tasks.md`；
-5. 同一 Host 的新请求 B 写入 `.smartflow/tasks/<requestId-B>/tasks.md`；
-6. A、B 的完整路径不同，A 的内容未被 B 覆盖；
-7. A、B 调用 execute 时分别使用对应的 requestId、tasksPath 和 hash；
+2. public execute 只接收空对象；
+3. Host 使用 session 绑定的项目相对路径；
+4. 请求 A 写入 `.smartflow/tasks/<sessionId>/tasks.md`；
+5. Job A 进入终态后，请求 B 覆盖同一路径；
+6. A、B 的文件元数据版本不同，adapter 为 B 生成新的内部幂等 ID；
+7. Daemon 分别保存 A、B 的 immutable source/manifest artifacts；
 8. `PlanningSession` 使用 `draftNumber`，不再出现业务含义不清的 `revision`。
 
 ### 8.3 TaskManifest parser fixture
@@ -563,7 +545,7 @@ tests/unit/helpers/host-workflow/workflow.test.ts
 
 - 模块标题可解析；
 - Task ID 唯一；
-- `[P]` 和模块标签可解析；
+- 模块标签可解析，`[P]` 等其他标签一律拒绝；
 - 反引号目标路径可提取；
 - ` — 验收：` 可提取 acceptance criteria；
 - 至少一个 enabled task。
@@ -663,14 +645,14 @@ pnpm run build
 
 1. Host 仅在明确的实现或执行意图下准备任务。
 2. 信息不足时 Host 请求用户补充，不编造关键需求。
-3. 每批新的实现任务都生成新的唯一 `requestId`。
-4. 同一个 Host 会话可以依次生成多份 `tasks.md`，但完整路径均不同。
-5. 新任务文件不会覆盖之前执行使用的任务文件。
-6. 每次 execute 只绑定当前请求的一份 canonical `tasks.md`。
+3. 每个 stdio MCP session 都绑定 canonical project root 和唯一 session ID。
+4. 同一个 session 固定使用 `.smartflow/tasks/<sessionId>/tasks.md`。
+5. 仅在前一个 Job 进入终态后，Host 才覆盖该路径准备下一批任务。
+6. 每次 execute 只绑定当前 session 路径的一份 canonical `tasks.md`。
 7. 用户能在执行前看到磁盘文件的完整内容。
 8. 没有明确确认时不调用 `smartflow_execute`。
-9. execute 的 `tasksPath`、`approvedSourceHash` 和 `requestId` 对应同一份当前请求文件。
-10. Daemon 校验 hash、编译 TaskManifest，并为每个 Job 保存不可变 source/manifest artifact。
+9. public execute 严格接收 `{}`；内部请求严格包含 `projectRoot`、`tasksPath` 和自动生成的 `requestId`。
+10. Daemon 单次读取 task bytes、编译 TaskManifest，并为每个 Job 保存不可变 source/manifest artifact。
 11. `.smartflow/tasks/**` 无论 tracked、untracked 或 ignored，都不进入 RUN_BASELINE 和 RUN_RESULT。
 12. 历史 request 目录不进入后续 Job 的 Worker workspace。
 13. Worker workspace 只注入当前 Job 的 immutable canonical task source。
@@ -685,19 +667,19 @@ pnpm run build
 最终目标生命周期为：
 
 ```text
-新实现请求
-→ 新 requestId
-→ 新 .smartflow/tasks/<requestId>/tasks.md
+stdio MCP session 启动
+→ 绑定 canonical project root 和唯一 session ID
+→ 写入 .smartflow/tasks/<sessionId>/tasks.md
 → 展示完整内容
 → 用户明确确认
-→ 计算文件 SHA-256
-→ smartflow_execute
-→ Daemon 保存 immutable source/manifest
+→ smartflow_execute({})
+→ MCP adapter 观察文件元数据版本并生成内部 requestId
+→ Daemon 单次读取并保存 immutable source/manifest
 → baseline 排除所有 .smartflow/tasks/**
 → workspace 只注入当前 immutable tasks.md
 → Worker
 → 恢复当前 immutable tasks.md
 → RUN_RESULT / Candidate 排除 control-plane 路径
 → Review / Repair / Publish
-→ 下一批新任务再次从“新 requestId”开始
+→ Job 进入终态后，下一批任务覆盖同一 session 路径
 ```

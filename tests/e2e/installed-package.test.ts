@@ -231,7 +231,6 @@ describe("installed SmartFlow package", () => {
             ([key]) =>
               !key.startsWith("VITEST") &&
               !key.startsWith("TIN_POOL") &&
-              key !== "SMARTFLOW_PI_THINKING" &&
               !new Set(["NODE_CHANNEL_FD", "NODE_OPTIONS", "NODE_UNIQUE_ID", "JEST_WORKER_ID"]).has(key)
           )
         ),
@@ -241,14 +240,14 @@ describe("installed SmartFlow package", () => {
         REVIEW_EFFORT: "low",
         SMARTFLOW_DATA_HOME: dataRoot,
         XDG_DATA_HOME: resolve(dataRoot, "xdg"),
-        API: process.env.API ?? "",
-        BASE_URL: process.env.BASE_URL ?? "",
-        MODEL: process.env.MODEL ?? "",
-        API_KEY: process.env.API_KEY ?? "",
-        SMARTFLOW_PI_CONTEXT_WINDOW: process.env.SMARTFLOW_PI_CONTEXT_WINDOW ?? "1000000",
-        SMARTFLOW_PI_MAX_TOKENS: process.env.SMARTFLOW_PI_MAX_TOKENS ?? "384000",
-        EFFORT: process.env.EFFORT ?? "high",
-        SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: process.env.SMARTFLOW_PI_ATTEMPT_DEADLINE_MS ?? "300000",
+        WORK_API: process.env.WORK_API ?? "",
+        WORK_BASE_URL: process.env.WORK_BASE_URL ?? "",
+        WORK_MODEL: process.env.WORK_MODEL ?? "",
+        WORK_API_KEY: process.env.WORK_API_KEY ?? "",
+        WORK_CONTEXT_WINDOW: process.env.WORK_CONTEXT_WINDOW ?? "1000000",
+        WORK_MAX_TOKENS: process.env.WORK_MAX_TOKENS ?? "384000",
+        WORK_EFFORT: process.env.WORK_EFFORT ?? "high",
+        WORK_ATTEMPT_DEADLINE_MS: process.env.WORK_ATTEMPT_DEADLINE_MS ?? "300000",
         SMARTFLOW_TEST_REPAIR_MARKER: repairMarker,
         SMARTFLOW_TEST_CODEX_TRACE: codexTracePath,
         SMARTFLOW_TEST_TOKEN: "never-log-this-token",
@@ -316,6 +315,14 @@ describe("installed SmartFlow package", () => {
         lifecycle.publicToolNames,
         "installed public MCP tool names"
       );
+      const sessionTasksPath = lifecycle.sessionTasksPath;
+      if (typeof sessionTasksPath !== "string") {
+        throw new Error("Installed lifecycle omitted its session task path");
+      }
+      const executeInputPropertyNames = asStringArray(
+        lifecycle.executeInputPropertyNames,
+        "installed execute input property names"
+      );
       const scope = asRecord(lifecycle.scope, "installed lifecycle scope");
       const secondExecute = asRecord(lifecycle.secondExecute, "installed second execute result");
       const secondCanceled = asRecord(lifecycle.secondCanceled, "installed second canceled result");
@@ -347,6 +354,10 @@ describe("installed SmartFlow package", () => {
         "smartflow_review_turn",
         "smartflow_status"
       ]);
+      expect(executeInputPropertyNames).toEqual([]);
+      expect(sessionTasksPath).toMatch(
+        /^\.smartflow\/tasks\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/tasks\.md$/u
+      );
       expect(scope.jobId).toBe(result.jobId);
       expect(secondExecute.jobId).not.toBe(result.jobId);
       expect(secondCanceled).toMatchObject({ phase: "CANCELED" });

@@ -7,16 +7,10 @@ import type { RunRecord } from "@smartflow/state-store";
 
 export interface ResolvedRepairContinuation {
   sourceAttemptId: string;
-  sourceGeneration: number;
   prompt: string;
   workspaceSeedSnapshot: ArtifactRef;
   expectedPiSessionId: string;
   sessionArtifact: ArtifactRef;
-  providerRuntimeConfigHash: string;
-}
-
-function digest(value: string): string {
-  return value.replace(/^sha256:/u, "");
 }
 
 export function resolveRepairContinuation(
@@ -42,10 +36,6 @@ export function resolveRepairContinuation(
     continuation.prompt.length === 0 ||
     typeof continuation.expectedPiSessionId !== "string" ||
     continuation.expectedPiSessionId.length === 0 ||
-    typeof continuation.taskSourceHash !== "string" ||
-    continuation.taskSourceHash !== digest(run.taskSource.sha256) ||
-    typeof continuation.taskManifestHash !== "string" ||
-    continuation.taskManifestHash !== digest(run.taskManifest.sha256) ||
     typeof continuation.providerRuntimeConfigHash !== "string" ||
     continuation.providerRuntimeConfigHash.length === 0 ||
     !workspaceSeedSnapshot.success ||
@@ -70,12 +60,10 @@ export function resolveRepairContinuation(
   }
   return {
     sourceAttemptId: sourceAttempt.attemptId,
-    sourceGeneration: sourceAttempt.generation,
     prompt: continuation.prompt,
     workspaceSeedSnapshot: workspaceSeedSnapshot.data,
     expectedPiSessionId: sourceAttempt.piSessionId,
-    sessionArtifact: sourceAttempt.sessionArtifact,
-    providerRuntimeConfigHash: sourceAttempt.providerRuntimeConfigHash
+    sessionArtifact: sourceAttempt.sessionArtifact
   };
 }
 

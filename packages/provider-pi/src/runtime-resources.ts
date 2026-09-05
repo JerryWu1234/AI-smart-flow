@@ -10,10 +10,6 @@ import {
   type PiRuntimeConfiguration
 } from "./runtime-config.js";
 
-export interface PiRuntimeResources {
-  spawnRequest: SandboxedSpawnRequest;
-}
-
 function piWorkerEntryPath(): string {
   const extension = extname(fileURLToPath(import.meta.url)) === ".mjs" ? ".mjs" : ".js";
   return fileURLToPath(new URL(`./worker-entry${extension}`, import.meta.url));
@@ -41,22 +37,22 @@ export function piModelEnvironment(
   credential: string
 ): Record<string, string> {
   return {
-    API: configuration.api,
-    BASE_URL: configuration.baseUrl,
-    MODEL: configuration.modelId,
-    SMARTFLOW_PI_CONTEXT_WINDOW: String(configuration.contextWindow),
-    SMARTFLOW_PI_MAX_TOKENS: String(configuration.maxTokens),
-    SMARTFLOW_PI_THINKING: configuration.thinkingLevel,
-    SMARTFLOW_PI_ATTEMPT_DEADLINE_MS: String(configuration.attemptDeadlineMs),
+    WORK_API: configuration.api,
+    WORK_BASE_URL: configuration.baseUrl,
+    WORK_MODEL: configuration.modelId,
+    WORK_CONTEXT_WINDOW: String(configuration.contextWindow),
+    WORK_MAX_TOKENS: String(configuration.maxTokens),
+    WORK_EFFORT: configuration.thinkingLevel,
+    WORK_ATTEMPT_DEADLINE_MS: String(configuration.attemptDeadlineMs),
     [API_KEY_ENVIRONMENT_VARIABLE]: credential
   };
 }
 
-export function createPiRuntimeResources(
+export function createPiSpawnRequest(
   input: WorkerStartInput,
   configuration: PiRuntimeConfiguration,
   credential: string
-): PiRuntimeResources {
+): SandboxedSpawnRequest {
   const workerEntry = piWorkerEntryPath();
   const modelExtension = piMcpModelExtensionPath();
   const runtimeDirectory = resolve(input.workspaceDir, ".smartflow-runtime");
@@ -65,54 +61,52 @@ export function createPiRuntimeResources(
   const homeDirectory = resolve(runtimeDirectory, "home");
   const tempDirectory = resolve(runtimeDirectory, "tmp");
   return {
-    spawnRequest: {
-      attemptId: input.attemptId,
-      configHash: input.providerRuntimeConfigHash,
-      argv: [
-        process.execPath,
-        workerEntry,
-        "--no-extensions",
-        "--extension",
-        modelExtension,
-        "--no-skills",
-        "--no-prompt-templates",
-        "--no-themes",
-        "--no-context-files",
-        "--approve",
-        "--provider",
-        PI_INTERNAL_PROVIDER_ID,
-        "--model",
-        configuration.modelId,
-        "--thinking",
-        configuration.thinkingLevel,
-        "--tools",
-        "read,bash,edit,write,grep,find,ls",
-        "--session-dir",
-        sessionDirectory,
-        ...(input.resumeSession === undefined
-          ? []
-          : ["--session", input.resumeSession.sessionFile])
-      ],
-      cwd: input.workspaceDir,
-      workspaceRoot: input.workspaceDir,
-      homeDirectory,
-      tempDirectory,
-      runtimeReadPaths: [
-        dirname(process.execPath),
-        dirname(workerEntry),
-        dirname(modelExtension),
-        piSdkBootstrapPath(),
-        ...input.containment.runtimeReadPaths
-      ],
-      deniedReadPaths: [...input.containment.deniedReadPaths],
-      environment: {
-        PATH: process.env.PATH ?? "/usr/bin:/bin",
-        PI_CODING_AGENT_DIR: agentDirectory,
-        PI_CODING_AGENT_SESSION_DIR: sessionDirectory,
-        ...piModelEnvironment(configuration, credential)
-      },
-      networkAccess: "ALLOW",
-      deadlineAt: input.deadlineAt
-    }
+    attemptId: input.attemptId,
+    configHash: input.providerRuntimeConfigHash,
+    argv: [
+      process.execPath,
+      workerEntry,
+      "--no-extensions",
+      "--extension",
+      modelExtension,
+      "--no-skills",
+      "--no-prompt-templates",
+      "--no-themes",
+      "--no-context-files",
+      "--approve",
+      "--provider",
+      PI_INTERNAL_PROVIDER_ID,
+      "--model",
+      configuration.modelId,
+      "--thinking",
+      configuration.thinkingLevel,
+      "--tools",
+      "read,bash,edit,write,grep,find,ls",
+      "--session-dir",
+      sessionDirectory,
+      ...(input.resumeSession === undefined
+        ? []
+        : ["--session", input.resumeSession.sessionFile])
+    ],
+    cwd: input.workspaceDir,
+    workspaceRoot: input.workspaceDir,
+    homeDirectory,
+    tempDirectory,
+    runtimeReadPaths: [
+      dirname(process.execPath),
+      dirname(workerEntry),
+      dirname(modelExtension),
+      piSdkBootstrapPath(),
+      ...input.containment.runtimeReadPaths
+    ],
+    deniedReadPaths: [...input.containment.deniedReadPaths],
+    environment: {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      PI_CODING_AGENT_DIR: agentDirectory,
+      PI_CODING_AGENT_SESSION_DIR: sessionDirectory,
+      ...piModelEnvironment(configuration, credential)
+    },
+    networkAccess: "ALLOW",
+    deadlineAt: input.deadlineAt
   };
 }

@@ -6,10 +6,8 @@ export interface CodexEventFailure {
 export interface CodexEventState {
   readonly sessionId?: string;
   readonly turnCompleted: boolean;
-  readonly usage?: unknown;
   readonly agentMessage?: string;
   readonly failure?: CodexEventFailure;
-  readonly ignoredLineCount: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -47,7 +45,7 @@ function withFailure(
 }
 
 export function createCodexEventState(): CodexEventState {
-  return { turnCompleted: false, ignoredLineCount: 0 };
+  return { turnCompleted: false };
 }
 
 export function reduceCodexEventLine(
@@ -61,12 +59,10 @@ export function reduceCodexEventLine(
   try {
     value = JSON.parse(trimmed) as unknown;
   } catch {
-    return { ...state, ignoredLineCount: state.ignoredLineCount + 1 };
+    return state;
   }
 
-  if (!isRecord(value) || typeof value.type !== "string") {
-    return { ...state, ignoredLineCount: state.ignoredLineCount + 1 };
-  }
+  if (!isRecord(value) || typeof value.type !== "string") return state;
 
   switch (value.type) {
     case "thread.started": {
@@ -88,9 +84,7 @@ export function reduceCodexEventLine(
       return { ...state, sessionId };
     }
     case "turn.completed":
-      return Object.hasOwn(value, "usage")
-        ? { ...state, turnCompleted: true, usage: value.usage }
-        : { ...state, turnCompleted: true };
+      return { ...state, turnCompleted: true };
     case "turn.failed":
       return withFailure(
         state,

@@ -25,7 +25,6 @@ export default defineConfig({
       /^@modelcontextprotocol\/sdk\//u,
       "@earendil-works/pi-coding-agent",
       /^@earendil-works\/pi-coding-agent\//u,
-      "yaml",
       "zod"
     ]
   },

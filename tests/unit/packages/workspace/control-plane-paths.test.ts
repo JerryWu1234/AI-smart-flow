@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { canonicalHash } from "@smartflow/state-store";
 import {
+  GIT_INCLUSION_POLICY,
   SMARTFLOW_CONTROL_PLANE_PATH_PREFIXES,
   buildGitCandidate,
   captureGitSnapshot,
@@ -73,9 +74,9 @@ describe("SmartFlow control-plane workspace paths", () => {
     if (capabilities.status !== "READY" || capabilities.repositoryId === undefined) {
       throw new Error(`capability fixture paused: ${capabilities.pause?.code ?? "unknown"}`);
     }
-    expect(capabilities.inclusionPolicy.excludedPathPrefixes)
+    expect(GIT_INCLUSION_POLICY.excludedPathPrefixes)
       .toEqual(SMARTFLOW_CONTROL_PLANE_PATH_PREFIXES);
-    expect(capabilities.inclusionPolicyHash).toBe(canonicalHash(capabilities.inclusionPolicy));
+    expect(capabilities.inclusionPolicyHash).toBe(canonicalHash(GIT_INCLUSION_POLICY));
 
     const runDirectory = resolve(data, "run-1");
     const objectStore = await initializeGitObjectStore(runDirectory);

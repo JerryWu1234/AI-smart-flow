@@ -29,6 +29,7 @@ import {
   type GitWorkspaceSnapshot
 } from "@smartflow/workspace";
 
+import { resolveReviewEnabled } from "../config/config.js";
 import { gitPublishBlobReader, gitPublishOperations } from "./git-publish-source.js";
 import { ProjectMutationExecutor } from "../runtime/project-mutation-executor.js";
 import { verifyRunArtifacts } from "../recovery/recovery-manager.js";
@@ -351,15 +352,15 @@ export class PublishCoordinator {
   public async publish(jobId: string): Promise<PublishCoordinatorResult> {
     const state = await this.store.readState();
     const run = state.runs[jobId];
+    const reviewEnabled = resolveReviewEnabled();
     if (
       run === undefined ||
       run.phase !== "READY_TO_PUBLISH" ||
       state.activeRunsByTaskPath[run.canonicalTaskPath] !== jobId ||
       run.baseline === undefined ||
       run.candidate === undefined ||
-      run.review === undefined ||
-      run.leaderDecision === undefined ||
-      run.gitWorkspace === undefined
+      run.gitWorkspace === undefined ||
+      (reviewEnabled && (run.review === undefined || run.leaderDecision === undefined))
     ) {
       throw new Error("PUBLISH_EVIDENCE_NOT_READY");
     }
@@ -373,32 +374,45 @@ export class PublishCoordinator {
     ) as GitWorkspaceSnapshot;
     const baselineHash = baseline.snapshotHash;
     const source = await this.gitSource(run);
-    const reviewValue: unknown = JSON.parse(
-      new TextDecoder().decode(await this.store.readArtifact(run.review))
-    );
-    const leaderValue: unknown = JSON.parse(
-      new TextDecoder().decode(await this.store.readArtifact(run.leaderDecision))
-    );
-    const reviewDecision = durableReviewDecisionSchema.parse(reviewValue);
-    const leaderDecision = durableLeaderDecisionSchema.parse(leaderValue);
-    const reviewHash = reviewDecision.reviewHash;
-    const reviewHistoryEntry = [...(run.reviewHistory ?? [])].reverse().find(
-      (entry) => entry.reviewAttemptId === reviewDecision.reviewAttemptId
-    );
     const candidateHash = getCandidateHash(source.candidate);
     if (
       !verifyCandidate(source.candidate) ||
-      getCandidateBaselineHash(source.candidate) !== baselineHash ||
-      !semanticHash(reviewValue as Record<string, unknown>, "reviewHash") ||
-      reviewHistoryEntry?.taskSourceHash !== reviewDecision.taskSourceHash ||
-      reviewHistoryEntry.candidateHash !== candidateHash ||
-      reviewDecision.candidateHash !== candidateHash ||
-      !reviewDecision.gate.allowedLeaderDecisions.includes("accept") ||
-      !semanticHash(leaderValue as Record<string, unknown>, "decisionHash") ||
-      leaderDecision.reviewHash !== reviewHash ||
-      leaderDecision.decision !== "accept"
+      getCandidateBaselineHash(source.candidate) !== baselineHash
     ) {
       throw new Error("PUBLISH_EVIDENCE_BINDING_INVALID");
+    }
+
+    let reviewHash: string | undefined;
+    if (reviewEnabled) {
+      const reviewRef = run.review;
+      const leaderDecisionRef = run.leaderDecision;
+      if (reviewRef === undefined || leaderDecisionRef === undefined) {
+        throw new Error("PUBLISH_EVIDENCE_NOT_READY");
+      }
+      const reviewValue: unknown = JSON.parse(
+        new TextDecoder().decode(await this.store.readArtifact(reviewRef))
+      );
+      const leaderValue: unknown = JSON.parse(
+        new TextDecoder().decode(await this.store.readArtifact(leaderDecisionRef))
+      );
+      const reviewDecision = durableReviewDecisionSchema.parse(reviewValue);
+      const leaderDecision = durableLeaderDecisionSchema.parse(leaderValue);
+      reviewHash = reviewDecision.reviewHash;
+      const reviewHistoryEntry = [...(run.reviewHistory ?? [])].reverse().find(
+        (entry) => entry.reviewAttemptId === reviewDecision.reviewAttemptId
+      );
+      if (
+        !semanticHash(reviewValue as Record<string, unknown>, "reviewHash") ||
+        reviewHistoryEntry?.taskSourceHash !== reviewDecision.taskSourceHash ||
+        reviewHistoryEntry.candidateHash !== candidateHash ||
+        reviewDecision.candidateHash !== candidateHash ||
+        !reviewDecision.gate.allowedLeaderDecisions.includes("accept") ||
+        !semanticHash(leaderValue as Record<string, unknown>, "decisionHash") ||
+        leaderDecision.reviewHash !== reviewHash ||
+        leaderDecision.decision !== "accept"
+      ) {
+        throw new Error("PUBLISH_EVIDENCE_BINDING_INVALID");
+      }
     }
     if (manualPublishRequested(run)) {
       return this.confirmManualPublish(
@@ -429,7 +443,7 @@ export class PublishCoordinator {
         projectId: state.projectId,
         jobId,
         candidateHash,
-        reviewHash
+        ...(reviewHash === undefined ? {} : { reviewHash })
       },
       source.operations,
       this.adapter ?? new FilesystemWorkspaceApplyAdapter(
@@ -495,6 +509,7 @@ export class PublishCoordinator {
   ): Promise<PublishServiceResult> {
     const state = await this.store.readState();
     const run = state.runs[jobId];
+    const reviewEnabled = resolveReviewEnabled();
     if (
       run === undefined ||
       state.activeRunsByTaskPath[run.canonicalTaskPath] !== jobId ||
@@ -502,8 +517,8 @@ export class PublishCoordinator {
       run.publish?.operationId !== operationId ||
       run.publish.operationsHash !== expectedOperationsHash ||
       run.candidate === undefined ||
-      run.review === undefined ||
-      run.gitWorkspace === undefined
+      run.gitWorkspace === undefined ||
+      (reviewEnabled && run.review === undefined)
     ) {
       return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
     }
@@ -512,19 +527,22 @@ export class PublishCoordinator {
     }
     try {
       const source = await this.gitSource(run);
-      const reviewDecision = JSON.parse(
-        new TextDecoder().decode(await this.store.readArtifact(run.review))
-      ) as Record<string, unknown>;
-      const reviewHash = reviewDecision.reviewHash;
+      let reviewHash: string | undefined;
+      if (reviewEnabled) {
+        const reviewRef = run.review;
+        if (reviewRef === undefined) return { status: "PUBLISH_RECOVERY_BLOCKED", operationId };
+        reviewHash = durableReviewDecisionSchema.parse(JSON.parse(
+          new TextDecoder().decode(await this.store.readArtifact(reviewRef))
+        )).reviewHash;
+      }
       const operationHash = operationsHash(source.operations);
       if (
-        typeof reviewHash !== "string" ||
         operationHash !== expectedOperationsHash ||
         stableOperationId({
           projectId: state.projectId,
           jobId,
           candidateHash: getCandidateHash(source.candidate),
-          reviewHash,
+          ...(reviewHash === undefined ? {} : { reviewHash }),
           operationsHash: operationHash
         }) !== operationId
       ) {
@@ -550,7 +568,7 @@ export class PublishCoordinator {
     identity: PublishExecutionIdentity,
     operations: ApplyOperation[],
     candidateHash: string,
-    reviewHash: string
+    reviewHash: string | undefined
   ): Promise<PublishCoordinatorResult> {
     if (run.publish !== undefined) throw new Error("MANUAL_PUBLISH_ATTEMPT_ALREADY_EXISTS");
     const confirmationRequestId = (
@@ -564,7 +582,7 @@ export class PublishCoordinator {
       projectId: state.projectId,
       jobId: run.jobId,
       candidateHash,
-      reviewHash,
+      ...(reviewHash === undefined ? {} : { reviewHash }),
       operationsHash: operationHash
     });
     const confirmationRequestHash = hash(confirmationRequestId);
@@ -576,8 +594,7 @@ export class PublishCoordinator {
         requestId: `manual-publish-confirm:${run.jobId}:${operationId}:${confirmationRequestHash}`,
         payload: {
           operationId,
-          operationsHash: operationHash,
-          confirmationRequestHash
+          operationsHash: operationHash
         },
         expectedJobId: run.jobId,
         ...identityGuards(identity),
@@ -609,7 +626,6 @@ export class PublishCoordinator {
             ...marker,
             status: "MISMATCH",
             operationId,
-            confirmationRequestHash,
             checkedAt: new Date().toISOString(),
             conflicts: observation.conflicts
           };

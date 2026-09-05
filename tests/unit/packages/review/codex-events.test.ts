@@ -10,7 +10,7 @@ function reduceLines(lines: readonly string[]): ReturnType<typeof createCodexEve
 }
 
 describe("Codex JSONL events", () => {
-  it("collects session, completion, usage, and the final agent message", () => {
+  it("collects session, completion, and the final agent message", () => {
     const events = reduceLines([
       "not-json diagnostics from a wrapper",
       JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
@@ -25,9 +25,7 @@ describe("Codex JSONL events", () => {
     expect(events).toEqual({
       sessionId: "thread-1",
       turnCompleted: true,
-      usage: { input_tokens: 20, output_tokens: 5 },
-      agentMessage: "final fallback text",
-      ignoredLineCount: 1
+      agentMessage: "final fallback text"
     });
   });
 
@@ -57,8 +55,7 @@ describe("Codex JSONL events", () => {
       JSON.stringify({ type: "turn.completed" })
     ])).toMatchObject({
       sessionId: "thread-2",
-      turnCompleted: true,
-      ignoredLineCount: 1
+      turnCompleted: true
     });
   });
 

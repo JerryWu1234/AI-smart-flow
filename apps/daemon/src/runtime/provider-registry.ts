@@ -1,5 +1,6 @@
 import type { WorkerProvider } from "@smartflow/provider-core";
 import {
+  API_KEY_ENVIRONMENT_VARIABLE,
   PiProvider,
   frozenPiRuntimeConfig,
   piRuntimeConfigHash
@@ -37,7 +38,7 @@ export class ProviderRegistry {
       provider: new PiProvider({
         runtimeConfig: configuration.runtimeConfig,
         environment: {
-          API_KEY: configuration.credential
+          [API_KEY_ENVIRONMENT_VARIABLE]: configuration.credential
         }
       })
     };

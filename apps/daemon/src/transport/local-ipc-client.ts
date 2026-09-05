@@ -18,19 +18,11 @@ export class IpcResponseError extends Error {
 }
 
 export class LocalIpcClient {
-  public readonly instanceId: string;
-  public readonly providerRuntimeConfigHash: string | undefined;
   private readonly socket: Socket;
   private readonly pending = new Map<string, PendingCall>();
 
-  private constructor(
-    socket: Socket,
-    instanceId: string,
-    providerRuntimeConfigHash?: string
-  ) {
+  private constructor(socket: Socket) {
     this.socket = socket;
-    this.instanceId = instanceId;
-    this.providerRuntimeConfigHash = providerRuntimeConfigHash;
     const lines = createInterface({ input: socket, crlfDelay: Infinity });
     lines.on("line", (line) => this.receive(line));
     socket.on("error", (error) => this.rejectAll(error));
@@ -65,10 +57,9 @@ export class LocalIpcClient {
           : { daemonConfigFingerprint: expectedDaemonConfigFingerprint }),
         ...(workerEnvironment === undefined ? {} : { workerEnvironment })
       })}\n`);
-    const ready = await new Promise<{
-      instanceId: string;
-      providerRuntimeConfigHash?: string;
-    }>((settle, reject) => {
+    // The ready frame is validated but not retained: the instanceId and the
+    // registered providerRuntimeConfigHash have no caller past the handshake.
+    await new Promise<void>((settle, reject) => {
       const timer = setTimeout(() => reject(new Error("IPC ready handshake timed out")), timeoutMs);
       timer.unref();
       const lines = createInterface({ input: socket, crlfDelay: Infinity });
@@ -123,15 +114,10 @@ export class LocalIpcClient {
           ));
           return;
         }
-        settle({
-          instanceId: response.instanceId,
-          ...(typeof response.providerRuntimeConfigHash === "string"
-            ? { providerRuntimeConfigHash: response.providerRuntimeConfigHash }
-            : {})
-        });
+        settle();
       });
     });
-    return new LocalIpcClient(socket, ready.instanceId, ready.providerRuntimeConfigHash);
+    return new LocalIpcClient(socket);
   }
 
   public call(method: string, payload: unknown, clientName?: string): Promise<unknown> {

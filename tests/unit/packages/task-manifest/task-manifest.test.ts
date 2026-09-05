@@ -16,6 +16,10 @@ const baseOptions = {
   }
 };
 
+function artifactText(compiled: ReturnType<typeof compileTaskManifest>): string {
+  return new TextDecoder().decode(compiled.artifactBytes);
+}
+
 describe("TaskManifest compiler", () => {
   it("compiles pure Markdown into deterministic hashes and canonical artifact bytes", () => {
     const first = compileTaskManifest(createTasksSource(), baseOptions);
@@ -23,63 +27,59 @@ describe("TaskManifest compiler", () => {
     expect(first).toEqual(second);
     expect(first.manifest.sourceHash).toMatch(/^[a-f0-9]{64}$/u);
     expect(first.manifest).not.toHaveProperty("schemaVersion");
-    expect(first.manifest.runId).toBe("job-1");
-    expect(first.manifest.tasksSha256).toBe(first.manifest.sourceHash);
     expect(first.manifest.taskSourceArtifact).toMatchObject({
       relativePath: "runs/job-1/task-source.md",
       sha256: first.manifest.sourceHash
     });
     expect(first.manifest.canonicalTaskPath).toBe("tasks.md");
-    expect(first.manifest.tasksHash).toMatch(/^[a-f0-9]{64}$/u);
     expect(first.manifest.providerRuntimeConfigHash).toMatch(/^[a-f0-9]{64}$/u);
-    expect(first.manifestHash).toMatch(/^[a-f0-9]{64}$/u);
     expect(first.manifest.enabledTaskIds).toEqual(["T001"]);
-    expect(JSON.parse(new TextDecoder().decode(first.artifactBytes))).toEqual(first.manifest);
+    expect(JSON.parse(artifactText(first))).toEqual(first.manifest);
   });
 
-  it("binds the canonical task path into the Manifest identity", () => {
+  it("binds the canonical task path into the Manifest artifact", () => {
     const first = compileTaskManifest(createTasksSource(), baseOptions);
     const second = compileTaskManifest(createTasksSource(), {
       ...baseOptions,
       canonicalTaskPath: "other-tasks.md"
     });
     expect(second.manifest.sourceHash).toBe(first.manifest.sourceHash);
-    expect(second.manifestHash).not.toBe(first.manifestHash);
+    expect(artifactText(second)).not.toBe(artifactText(first));
   });
 
-  it("changes tasksHash for task, acceptance, and no-change changes", () => {
-    const base = compileTaskManifest(createTasksSource(), baseOptions).manifest.tasksHash;
-    const changedTask = compileTaskManifest(
+  it("changes canonical artifact bytes for task, acceptance, and no-change changes", () => {
+    const base = artifactText(compileTaskManifest(createTasksSource(), baseOptions));
+    const changedTask = artifactText(compileTaskManifest(
       createTasksSource({
         tasks:
           "## M01 · Core\n\n- [ ] T001 Edit `packages/core/src/other.ts` — 验收：core review passes"
       }),
       baseOptions
-    ).manifest.tasksHash;
-    const changedAcceptance = compileTaskManifest(
+    ));
+    const changedAcceptance = artifactText(compileTaskManifest(
       createTasksSource({
         tasks:
           "## M01 · Core\n\n- [ ] T001 Edit `packages/core/src/index.ts` — 验收：a stronger criterion"
       }),
       baseOptions
-    ).manifest.tasksHash;
-    const allowNoChange = compileTaskManifest(
+    ));
+    const allowNoChange = artifactText(compileTaskManifest(
       createTasksSource().replace(
         "core review passes",
         "core review passes no-change-allowed=true"
       ),
       { ...baseOptions, allowNoChange: true }
-    ).manifest.tasksHash;
+    ));
     expect(new Set([base, changedTask, changedAcceptance, allowNoChange]).size).toBe(4);
   });
 
-  it("changes manifest hash for provider runtime changes", () => {
+  it("changes canonical artifact bytes for provider runtime changes", () => {
     const base = compileTaskManifest(createTasksSource(), baseOptions);
     const providerRuntimeChanged = compileTaskManifest(createTasksSource(), {
       ...baseOptions,
       providerRuntimeConfig: { endpoint: "https://provider.invalid", model: "other-model" }
     });
-    expect(providerRuntimeChanged.manifestHash).not.toBe(base.manifestHash);
+    expect(artifactText(providerRuntimeChanged)).not.toBe(artifactText(base));
   });
 
   it("rejects removed permission-policy fields", () => {
@@ -92,6 +92,20 @@ describe("TaskManifest compiler", () => {
       ...manifest,
       permissionPolicyHash: "f".repeat(64)
     }).success).toBe(false);
+  });
+
+  it("rejects the removed duplicate identity and hash fields", () => {
+    const compiled = compileTaskManifest(createTasksSource(), baseOptions);
+    expect(compiled).not.toHaveProperty("manifestHash");
+    expect(compiled.manifest).not.toHaveProperty("runId");
+    expect(compiled.manifest).not.toHaveProperty("tasksSha256");
+    expect(compiled.manifest).not.toHaveProperty("tasksHash");
+    for (const removed of ["runId", "tasksSha256", "tasksHash"]) {
+      expect(taskManifestSchema.safeParse({
+        ...compiled.manifest,
+        [removed]: removed === "runId" ? "job-1" : compiled.manifest.sourceHash
+      }).success).toBe(false);
+    }
   });
 
   it("binds explicit no-change allowance to every enabled task acceptance criterion", () => {

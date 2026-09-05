@@ -22,12 +22,14 @@ function completedResult(): object {
 
 class PollingGateway implements HostGateway {
   public readonly toolNames: string[] = [];
+  public readonly executeInputs: Array<Record<string, unknown>> = [];
   public readonly reviewTurnInputs: Array<Record<string, unknown>> = [];
   private polls = 0;
 
   public call(toolName: string, input: unknown): Promise<unknown> {
     this.toolNames.push(toolName);
     if (toolName === "smartflow_execute") {
+      this.executeInputs.push(input as Record<string, unknown>);
       return Promise.resolve({
         projectId: "project-1",
         jobId: "job-1",
@@ -57,11 +59,11 @@ describe("executeApprovedWorkflow", () => {
         projectRoot,
         approval: approveTasksSource("tasks.md", "# Tasks"),
         requestId: "execute-workflow",
-        hostTurnId: "host-turn-1",
-        expectedStateVersion: 0
+        hostTurnId: "host-turn-1"
       });
 
       expect(result).toEqual(completedResult());
+      expect(gateway.executeInputs).toEqual([{}]);
       expect(gateway.reviewTurnInputs).toHaveLength(2);
       for (const input of gateway.reviewTurnInputs) {
         expect(input).not.toHaveProperty("review");
@@ -142,8 +144,7 @@ describe("executeApprovedWorkflow", () => {
         projectRoot,
         approval: approveTasksSource("tasks.md", "# Tasks"),
         requestId: "execute-workflow-limit",
-        hostTurnId: "host-turn-limit",
-        expectedStateVersion: 0
+        hostTurnId: "host-turn-limit"
       });
 
       expect(result).toEqual(completedResult());
@@ -163,9 +164,6 @@ describe("executeApprovedWorkflow", () => {
         sha256: digest,
         size: 10
       },
-      sourceHash: digest,
-      baseTaskSourceHash: digest,
-      baseTaskManifestHash: digest,
       suggestedTasksPath: "tasks.md",
       appendText: "\n- [ ] T002 repair",
       addedTaskLines: ["- [ ] T002 repair"],
@@ -224,8 +222,7 @@ describe("executeApprovedWorkflow", () => {
         projectRoot,
         approval: approveTasksSource("tasks.md", "# Tasks"),
         requestId: "execute-workflow-user-input",
-        hostTurnId: "host-turn-user-input",
-        expectedStateVersion: 0
+        hostTurnId: "host-turn-user-input"
       });
 
       expect(result).toEqual(completedResult());

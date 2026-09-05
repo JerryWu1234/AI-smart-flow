@@ -150,7 +150,6 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   private readonly killProcess: ClaudeCodeKill;
   private readonly forceKillAfterMs: number;
   private readonly activeRuns = new Map<string, ActiveRun>();
-  private readonly reservedRunIds = new Set<string>();
   private readonly runCompletions = new Map<string, Promise<void>>();
 
   public constructor(options: ClaudeCodeAdapterOptions = {}) {
@@ -198,7 +197,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         expectedSessionId
       );
     }
-    if (this.reservedRunIds.has(request.runId)) {
+    if (this.activeRuns.has(request.runId)) {
       return failedOutcome(
         "CLAUDE_RUN_ACTIVE",
         `A Claude process is already active for runId ${request.runId}`,
@@ -225,10 +224,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       if (released) return outcome;
       released = true;
       clearTimeout(deadlineTimer);
-      if (this.activeRuns.get(request.runId) === active) {
-        this.activeRuns.delete(request.runId);
-      }
-      this.reservedRunIds.delete(request.runId);
+      this.activeRuns.delete(request.runId);
       this.runCompletions.delete(request.runId);
       resolveCompletion();
       return outcome;
@@ -238,7 +234,6 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         ? undefined
         : interruptedOutcome(requestedKind, expectedSessionId);
 
-    this.reservedRunIds.add(request.runId);
     this.runCompletions.set(request.runId, completion);
     this.activeRuns.set(request.runId, active);
     const deadlineTimer = setTimeout(() => active.stop("TIMED_OUT"), request.deadlineMs);

@@ -29,7 +29,6 @@ export interface CompileTaskManifestOptions {
 
 export interface CompiledTaskManifest {
   manifest: TaskManifest;
-  manifestHash: string;
   artifactBytes: Uint8Array;
 }
 
@@ -41,7 +40,6 @@ function toManifestTask(task: ParsedTask): ManifestTask {
   return {
     id: task.id,
     module: task.module,
-    parallel: task.parallel,
     description: task.description,
     filePaths: task.filePaths,
     acceptanceCriteria: task.acceptanceCriteria
@@ -70,17 +68,11 @@ export function compileTaskManifest(
 
   const tasks = enabledTasks.map((task) => toManifestTask(task));
   const enabledTaskIds = tasks.map((task) => task.id);
-  const tasksHash = hashCanonical({
-    enabledTaskIds,
-    allowNoChange,
-    tasks
-  });
   const frozenProviderRuntimeConfigHash = providerRuntimeConfigHash(options.providerRuntimeConfig);
   const sourceHash = sha256Bytes(document.sourceBytes);
   const manifest = taskManifestSchema.parse({
     projectId: options.projectId,
     jobId: options.jobId,
-    runId: options.jobId,
     canonicalTaskPath: options.canonicalTaskPath,
     taskSourceArtifact: {
       relativePath: `runs/${options.jobId}/task-source.md`,
@@ -88,8 +80,6 @@ export function compileTaskManifest(
       size: document.sourceBytes.byteLength
     },
     sourceHash,
-    tasksSha256: sourceHash,
-    tasksHash,
     allowNoChange,
     providerRuntimeConfigHash: frozenProviderRuntimeConfigHash,
     enabledTaskIds,
@@ -98,9 +88,5 @@ export function compileTaskManifest(
   });
   const serialized = canonicalStringify(manifest);
   const artifactBytes = Buffer.from(serialized, "utf8");
-  return {
-    manifest,
-    manifestHash: sha256Bytes(artifactBytes),
-    artifactBytes
-  };
+  return { manifest, artifactBytes };
 }

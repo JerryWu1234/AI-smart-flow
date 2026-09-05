@@ -64,12 +64,11 @@ database.prepare(\`
   INSERT INTO mutation_lease (
     singleton,
     owner_token,
-    owner_id,
     owner_pid,
     owner_hostname,
     owner_process_start_token,
     expires_at_ms
-  ) VALUES (1, 'expired-live-owner', 'expired-live-owner', ?, ?, ?, ?)
+  ) VALUES (1, 'expired-live-owner', ?, ?, ?, ?)
 \`).run(
   process.pid,
   hostname(),
@@ -85,7 +84,7 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { DatabaseSync } from "node:sqlite";
-const [databasePath, requestId, requestHash, responseHash] = process.argv.slice(1);
+const [databasePath, requestId, requestHash] = process.argv.slice(1);
 const database = new DatabaseSync(databasePath);
 const ownerToken = randomUUID();
 const startedAt = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(process.pid)], {
@@ -98,12 +97,11 @@ database.prepare(\`
   INSERT INTO mutation_lease (
     singleton,
     owner_token,
-    owner_id,
     owner_pid,
     owner_hostname,
     owner_process_start_token,
     expires_at_ms
-  ) VALUES (1, ?, 'child-winner', ?, ?, ?, ?)
+  ) VALUES (1, ?, ?, ?, ?, ?)
 \`).run(
   ownerToken,
   process.pid,
@@ -123,11 +121,8 @@ process.stdin.once("data", () => {
   state.projectFence += 1;
   state.updatedAt = "2026-08-15T13:01:30.000Z";
   state.processedRequests[requestId] = {
-    requestId,
     requestHash,
-    response: { accepted: true },
-    responseHash,
-    committedAtStateVersion: nextStateVersion
+    response: { accepted: true }
   };
   database.prepare(\`
     UPDATE project_state
@@ -202,13 +197,16 @@ async function waitForLine(
 }
 
 describe("atomic state replacement crash points", () => {
-  for (const checkpoint of [
-    "AFTER_TEMP_WRITE",
-    "AFTER_FILE_FSYNC",
-    "AFTER_RENAME",
-    "AFTER_DIRECTORY_FSYNC"
+  // writeState fires AFTER_TEMP_WRITE and AFTER_FILE_FSYNC back to back before
+  // the SQLite transaction, then AFTER_RENAME and AFTER_DIRECTORY_FSYNC back to
+  // back after it. Each pair injects at the same instant, so the only boundary
+  // worth crashing at is the transaction itself. These two checkpoints bracket
+  // it; the other two are the same two scenarios under different names.
+  for (const [checkpoint, committed] of [
+    ["AFTER_FILE_FSYNC", false],
+    ["AFTER_RENAME", true]
   ] as const) {
-    it(`recovers only the complete old or new state after ${checkpoint}`, async () => {
+    it(`recovers the ${committed ? "new" : "old"} state after a crash at ${checkpoint}`, async () => {
       const harness = await createRuntimeHarness();
       activeHarnesses.push(harness);
       const store = new StateStore(resolve(harness.dataDir, checkpoint));
@@ -226,10 +224,7 @@ describe("atomic state replacement crash points", () => {
         })
       ).rejects.toThrow(/simulated crash/u);
       const recovered = await store.readState();
-      const expected = checkpoint === "AFTER_TEMP_WRITE" || checkpoint === "AFTER_FILE_FSYNC"
-        ? oldState
-        : newState;
-      expect(recovered).toEqual(expected);
+      expect(recovered).toEqual(committed ? newState : oldState);
     });
   }
 
@@ -293,7 +288,7 @@ describe("atomic state replacement crash points", () => {
     let exited = false;
     try {
       await waitForLine(child.stdout, "LEASED");
-      await expect(store.acquireMutationLease("contender", 75)).rejects.toMatchObject({
+      await expect(store.acquireMutationLease(75)).rejects.toMatchObject({
         code: "PROJECT_LOCKED"
       } satisfies Partial<StateStoreError>);
 
@@ -301,7 +296,7 @@ describe("atomic state replacement crash points", () => {
       await new Promise<void>((settle) => child.once("exit", () => settle()));
       exited = true;
 
-      const recovered = await store.acquireMutationLease("after-owner-death", 1_000);
+      const recovered = await store.acquireMutationLease(1_000);
       await recovered.assertOwned();
       await recovered.release();
     } finally {
@@ -323,12 +318,11 @@ describe("atomic state replacement crash points", () => {
         INSERT INTO mutation_lease (
           singleton,
           owner_token,
-          owner_id,
           owner_pid,
           owner_hostname,
           owner_process_start_token,
           expires_at_ms
-        ) VALUES (1, 'dead-reused-owner', 'dead-reused-owner', ?, ?, ?, ?)
+        ) VALUES (1, 'dead-reused-owner', ?, ?, ?, ?)
       `).run(
         process.pid,
         hostname(),
@@ -339,7 +333,7 @@ describe("atomic state replacement crash points", () => {
       database.close();
     }
 
-    const recovered = await store.acquireMutationLease("pid-reuse-recovery", 1_000);
+    const recovered = await store.acquireMutationLease(1_000);
     await recovered.assertOwned();
     await recovered.release();
   });
@@ -360,8 +354,7 @@ describe("atomic state replacement crash points", () => {
       SQLITE_RECEIPT_WINNER_SCRIPT,
       store.databasePath,
       request.requestId,
-      canonicalHash(request.payload),
-      canonicalHash(response)
+      canonicalHash(request.payload)
     ], { stdio: ["pipe", "pipe", "pipe"] });
     try {
       await waitForLine(child.stdout, "LEASED");

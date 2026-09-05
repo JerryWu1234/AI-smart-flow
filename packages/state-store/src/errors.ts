@@ -6,7 +6,6 @@ export type StateStoreErrorCode =
   | "PROJECT_LOCKED"
   | "STALE_FENCE"
   | "STATE_INVALID"
-  | "STATE_MIGRATION_UNSUPPORTED"
   | "STATE_NOT_FOUND"
   | "STATE_VERSION_MISMATCH";
 

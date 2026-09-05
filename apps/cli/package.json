@@ -6,19 +6,7 @@
   "engines": {
     "node": ">=22.19.0"
   },
-  "files": [
-    "dist"
-  ],
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
-  },
   "scripts": {
-    "build": "tsdown --config ../../tsdown.workspace.config.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --root ../.. --passWithNoTests tests/unit/apps/cli"
   },

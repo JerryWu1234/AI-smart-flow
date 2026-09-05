@@ -228,12 +228,6 @@ export class ReviewCoordinator {
     if (Date.parse(turn.deadlineAt) <= now.getTime()) {
       throw new Error("REVIEW_DEADLINE_EXPIRED");
     }
-    if (
-      action.taskSourceHash !== stringField(run.pendingAction, "taskSourceHash") ||
-      action.candidateHash !== stringField(run.pendingAction, "candidateHash")
-    ) {
-      throw new Error("REVIEW_CONTEXT_BINDING_INVALID");
-    }
     const boundSessionId = boundReviewerSession(run);
     if (
       (action.reviewerSession.mode === "CREATE" && boundSessionId !== undefined) ||
@@ -461,7 +455,6 @@ export class ReviewCoordinator {
   public pauseForApprovedSourceDrift(
     state: ProjectState,
     jobId: string,
-    observation: { approvedHash: string | undefined; observedHash: string },
     now = new Date()
   ): ReviewMutation<{ approvedSourceDrift: true; phase: "PAUSED"; stateVersion: number }> {
     const run = state.runs[jobId];
@@ -496,8 +489,6 @@ export class ReviewCoordinator {
         approvedSourceDrift: {
           detectedFromPhase: run.phase,
           resumePhase,
-          observedHash: observation.observedHash,
-          ...(observation.approvedHash === undefined ? {} : { approvedHash: observation.approvedHash }),
           detectedAt: now.toISOString()
         }
       },

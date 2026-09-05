@@ -91,20 +91,12 @@ async function readStableApprovedTasks(
 export async function executeApprovedTasks(
   gateway: HostGateway,
   projectRoot: string,
-  approval: ApprovedTasksSnapshot | undefined,
-  requestId: string,
-  expectedStateVersion?: number
+  approval: ApprovedTasksSnapshot | undefined
 ): Promise<ExecuteOutput> {
   if (approval === undefined) {
     throw new ApprovalError("APPROVAL_REQUIRED", "Explicit approval is required before execution");
   }
   await readStableApprovedTasks(projectRoot, approval);
-  const response = await gateway.call("smartflow_execute", {
-    projectRoot,
-    tasksPath: approval.tasksPath,
-    approvedSourceHash: approval.sourceHash,
-    requestId,
-    ...(expectedStateVersion === undefined ? {} : { expectedStateVersion })
-  });
+  const response = await gateway.call("smartflow_execute", {});
   return response as ExecuteOutput;
 }
