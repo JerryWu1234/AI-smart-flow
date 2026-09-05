@@ -4,7 +4,6 @@ import type { TaskManifestErrorCode } from "./errors.js";
 export interface ValidationIssue {
   code: TaskManifestErrorCode;
   message: string;
-  taskId?: string;
 }
 
 export function validateTaskSelection(
@@ -19,8 +18,7 @@ export function validateTaskSelection(
     if (task.filePaths.length === 0) {
       issues.push({
         code: "TARGET_PATH_MISSING",
-        message: `Task ${task.id} has no explicit target path`,
-        taskId: task.id
+        message: `Task ${task.id} has no explicit target path`
       });
     }
     if (
@@ -29,8 +27,7 @@ export function validateTaskSelection(
     ) {
       issues.push({
         code: "NO_CHANGE_ALLOWANCE_UNBOUND",
-        message: `Task ${task.id} must bind allowNoChange to an explicit no-change-allowed=true acceptance criterion`,
-        taskId: task.id
+        message: `Task ${task.id} must bind allowNoChange to an explicit no-change-allowed=true acceptance criterion`
       });
     }
   }
