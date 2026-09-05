@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import {
   StateStore,
   StateStoreError,
@@ -117,9 +115,7 @@ export class ProjectMutationExecutor {
     ) => Promise<() => Promise<TEffect>>
   ): Promise<ProjectMutationResult<T> | ProjectMutationEffectResult<T, TEffect>> {
     return enqueue(this.store.dataDirectory, async () => {
-      const lease = await this.store.acquireMutationLease(
-        `mutation:${request.requestId}:${randomUUID()}`
-      );
+      const lease = await this.store.acquireMutationLease();
       try {
         const state = await this.store.readState();
         const requestHash = canonicalHash(request.payload);
@@ -221,10 +217,8 @@ export class ProjectMutationExecutor {
             processedRequests: {
               ...state.processedRequests,
               [request.requestId]: {
-                requestId: request.requestId,
                 requestHash,
-                response: draft.response,
-                committedAtStateVersion: nextStateVersion
+                response: draft.response
               }
             },
             updatedAt: new Date().toISOString()

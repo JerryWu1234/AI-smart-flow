@@ -6,7 +6,9 @@
 >
 > **审计结论：** 当前 3 个 app、9 个 package 中，没有发现同时对生产入口、测试、脚本、配置和 package exports 都完全不可达的 TypeScript 源文件。可清理内容主要是局部未使用符号、仅测试或兼容 API、过宽的 private workspace 导出，以及旧 state / Git evidence 模型遗留字段。
 >
-> **后续格式决策：** `实现计划.md` 已进一步采用 latest-only 断代，删除 ProjectState 与 artifact 的应用层 `schemaVersion`，并将 SQLite 物理 schema 提升到 5、删除 `document_schema_version` 镜像；本计划中关于 v7/layout 4 的历史实施记录由该后续决策取代。
+> **后续格式决策：** `实现计划.md` 已进一步采用 latest-only 断代，删除 ProjectState 与 artifact 的应用层 `schemaVersion`，删除 `document_schema_version` 镜像；本计划中关于 v7/layout 4 的历史实施记录由该后续决策取代。
+>
+> **2026-09-05 补充清理：** 删除 SQLite 布局版本号及版本读写、检查，直接使用当前建表定义；删除无人消费的 `mutation_lease.owner_id`、回执中的重复 `requestId` 和未使用的 `committedAtStateVersion`；停止写入 `recovery.phase/action`，移除未被 Worker 启动使用的 `recoveryEpoch`。项目尚未发布，继续采用 latest-only：不维护布局版本，不迁移旧数据；本地开发数据可用 `pnpm clean:daemon-data` 清理后重建。
 >
 > **实施结果：** Batch A–E 已按本计划落地。`RESUMABLE` / `RESUME_WORKER` 因无生产 reattachment producer 被删除；provider SPI 身份与 containment 字段保留；无运行时消费者的 `workspace` / `publish` 配置改为拒绝解析；Publish apply 前后 fault hooks 因确定性 crash-window 覆盖而保留并注明用途。ProjectState 删除 patch / evidence 槽位与 semantic，并将 `workspace` 收敛为 `{ relativePath }`。旧数据不提供 migration、dual-read 或 fallback，开发环境升级前须执行 `pnpm clean:daemon-data`；private workspace barrel 已收窄，同时保留 Pi worker、model extension、daemon、MCP 和 Review adapter 动态入口。
 >

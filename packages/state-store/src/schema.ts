@@ -4,6 +4,7 @@ import {
   artifactRefSchema,
   artifactRefsEqual,
   canonicalValueSchema,
+  identifierSchema,
   idempotentReceiptSchema,
   piWorkerAttemptSchema,
   publishResultSchema,
@@ -173,7 +174,11 @@ export const projectStateSchema = z.object({
       acquiredAt: z.iso.datetime({ offset: true })
     }).strict().nullable(),
     runs: z.record(z.string(), runRecordSchema),
-    processedRequests: z.record(z.string(), idempotentReceiptSchema),
+    processedRequests: z.record(
+      // Validate the identifier at its map key without rewriting the replay key.
+      z.string().refine((value) => identifierSchema.safeParse(value).success, "expected request identifier"),
+      idempotentReceiptSchema
+    ),
     updatedAt: z.iso.datetime({ offset: true })
   })
   .strict()

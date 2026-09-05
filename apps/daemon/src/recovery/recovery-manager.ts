@@ -68,15 +68,6 @@ export interface RecoveryResult {
   action: RecoveryAction;
   stateVersion: number;
   reason?: string;
-  recoveryEpoch?: WorkerRecoveryEpoch;
-}
-
-export interface WorkerRecoveryEpoch {
-  fence: number;
-  sourceGeneration: number;
-  sourceAttemptId: string | null;
-  resetGeneration: number;
-  resetAttemptId: string | null;
 }
 
 function currentAttempt(run: RunRecord): WorkerAttempt | undefined {
@@ -471,20 +462,12 @@ export class RecoveryManager {
       return this.pause(state, run, "PAUSED_PROCESS_RECONCILIATION:WORKER_OUTCOME_UNKNOWN");
     }
 
-    const sourceGeneration = attempt?.generation ?? -1;
-    const recoveryEpoch: WorkerRecoveryEpoch = {
-      fence: run.fence,
-      sourceGeneration,
-      sourceAttemptId: attempt?.attemptId ?? null,
-      resetGeneration: sourceGeneration + 1,
-      resetAttemptId: null
-    };
     const endedAt = new Date().toISOString();
     const committed = await this.commit(
       state,
       run,
       "worker:START_NEW_WORKER_ATTEMPT",
-      { observed, recoveryEpoch },
+      { observed },
       (current) => ({
         ...current,
         phase: "PREPARING",
@@ -498,20 +481,13 @@ export class RecoveryManager {
               }
             : item),
         workspace: undefined,
-        pause: undefined,
-        recovery: {
-          ...current.recovery,
-          phase: "RUNNING",
-          action: "START_NEW_WORKER_ATTEMPT"
-        }
+        pause: undefined
       })
     );
     return this.result(
       committed,
       committed.runs[run.jobId] ?? run,
-      "START_NEW_WORKER_ATTEMPT",
-      undefined,
-      recoveryEpoch
+      "START_NEW_WORKER_ATTEMPT"
     );
   }
 
@@ -640,16 +616,14 @@ export class RecoveryManager {
     state: ProjectState,
     run: RunRecord,
     action: RecoveryAction,
-    reason?: string,
-    recoveryEpoch?: WorkerRecoveryEpoch
+    reason?: string
   ): RecoveryResult {
     return {
       jobId: run.jobId,
       phase: run.phase,
       action,
       stateVersion: state.stateVersion,
-      ...(reason === undefined ? {} : { reason }),
-      ...(recoveryEpoch === undefined ? {} : { recoveryEpoch })
+      ...(reason === undefined ? {} : { reason })
     };
   }
 }

@@ -46,17 +46,13 @@ describe("Pi crash recovery", () => {
     const recovered = await new RecoveryManager(store, runtime).recover("job-1");
     expect(recovered).toMatchObject({
       phase: "PREPARING",
-      action: "START_NEW_WORKER_ATTEMPT",
-      recoveryEpoch: {
-        sourceAttemptId: "attempt-old",
-        sourceGeneration: 0,
-        resetGeneration: 1,
-        resetAttemptId: null
-      }
+      action: "START_NEW_WORKER_ATTEMPT"
     });
     const state = await store.readState();
     expect(state.runs["job-1"]?.workerAttempts).toHaveLength(1);
     expect(state.runs["job-1"]?.workerAttempts[0]).toMatchObject({
+      attemptId: "attempt-old",
+      generation: 0,
       status: "FAILED",
       terminalReason: "DAEMON_RESTART_RECONCILED"
     });
