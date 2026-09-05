@@ -27,6 +27,18 @@ describe("ProjectState schema and recovery source", () => {
     ).toBe(false);
   });
 
+  it("validates replay keys while storing only the payload hash and original response", () => {
+    const receipt = { requestHash: "c".repeat(64), response: { accepted: true } };
+    expect(projectStateSchema.safeParse(createProjectState({
+      processedRequests: { "request-1": receipt }
+    })).success).toBe(true);
+    for (const requestId of ["", "   ", "x".repeat(257)]) {
+      expect(projectStateSchema.safeParse(createProjectState({
+        processedRequests: { [requestId]: receipt }
+      })).success).toBe(false);
+    }
+  });
+
   it("keeps only the active workspace path in state v7", () => {
     const run = createRunRecord({ workspace: { relativePath: "runs/job-1/workspace" } });
     const state = createProjectState({ runs: { [run.jobId]: run } });
@@ -224,7 +236,7 @@ describe("ProjectState schema and recovery source", () => {
       const version = database.prepare("PRAGMA user_version").get() as {
         user_version?: unknown;
       } | undefined;
-      expect(version?.user_version).toBe(5);
+      expect(version?.user_version).toBe(6);
       const projectStateColumns = database.prepare("PRAGMA table_info(project_state)").all() as {
         name?: unknown;
       }[];
@@ -234,6 +246,15 @@ describe("ProjectState schema and recovery source", () => {
         "project_fence",
         "state_json",
         "updated_at"
+      ]);
+      const leaseColumns = database.prepare("PRAGMA table_info(mutation_lease)").all();
+      expect(leaseColumns.map((column) => column.name)).toEqual([
+        "singleton",
+        "owner_token",
+        "owner_pid",
+        "owner_hostname",
+        "owner_process_start_token",
+        "expires_at_ms"
       ]);
     } finally {
       database.close();

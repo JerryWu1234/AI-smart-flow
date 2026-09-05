@@ -13,7 +13,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { StateStoreError } from "./errors.js";
 import { projectStateSchema, type ProjectState } from "./schema.js";
 
-const DATABASE_SCHEMA_VERSION = 5;
+const DATABASE_SCHEMA_VERSION = 6;
 const SQLITE_BUSY_TIMEOUT_MS = 500;
 const MUTATION_LEASE_WAIT_MS = 5_000;
 const MUTATION_LEASE_TTL_MS = 30_000;
@@ -31,7 +31,6 @@ CREATE TABLE IF NOT EXISTS project_state (
 CREATE TABLE IF NOT EXISTS mutation_lease (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   owner_token TEXT NOT NULL UNIQUE,
-  owner_id TEXT NOT NULL,
   owner_pid INTEGER NOT NULL CHECK (owner_pid > 0),
   owner_hostname TEXT NOT NULL,
   owner_process_start_token TEXT NOT NULL,
@@ -46,13 +45,8 @@ interface StateRow {
   updated_at: string;
 }
 
-interface ParsedStateDocument {
-  state: ProjectState;
-}
-
 interface MutationLeaseRow {
   owner_token: string;
-  owner_id: string;
   owner_pid: number;
   owner_hostname: string;
   owner_process_start_token: string;
@@ -60,7 +54,6 @@ interface MutationLeaseRow {
 }
 
 export interface StateMutationLease {
-  readonly ownerId: string;
   assertOwned(): Promise<void>;
   writeState(nextState: ProjectState, hooks?: AtomicWriteHooks): Promise<ProjectState>;
   release(): Promise<void>;
@@ -99,10 +92,10 @@ function parseJson(text: string, source: string): unknown {
   }
 }
 
-function parseStateDocument(text: string, source: string): ParsedStateDocument {
+function parseStateDocument(text: string, source: string): ProjectState {
   const value = parseJson(text, source);
   try {
-    return { state: projectStateSchema.parse(value) };
+    return projectStateSchema.parse(value);
   } catch (error) {
     if (error instanceof StateStoreError) throw error;
     throw new StateStoreError(
@@ -120,7 +113,7 @@ function stateRow(database: DatabaseSync): StateRow | undefined {
   `).get() as StateRow | undefined;
 }
 
-function parseStateRow(row: StateRow, databasePath: string): ParsedStateDocument {
+function parseStateRow(row: StateRow, databasePath: string): ProjectState {
   if (
     typeof row.state_version !== "number" ||
     typeof row.project_fence !== "number" ||
@@ -131,9 +124,9 @@ function parseStateRow(row: StateRow, databasePath: string): ParsedStateDocument
   }
   const parsed = parseStateDocument(row.state_json, databasePath);
   if (
-    parsed.state.stateVersion !== row.state_version ||
-    parsed.state.projectFence !== row.project_fence ||
-    parsed.state.updatedAt !== row.updated_at
+    parsed.stateVersion !== row.state_version ||
+    parsed.projectFence !== row.project_fence ||
+    parsed.updatedAt !== row.updated_at
   ) {
     throw new StateStoreError(
       "STATE_INVALID",
@@ -205,6 +198,48 @@ function commit(database: DatabaseSync): void {
   database.exec("COMMIT");
 }
 
+function migrateDatabaseV5(database: DatabaseSync, databasePath: string): void {
+  beginImmediate(database);
+  try {
+    // Another opener may have completed the migration while we waited for the lock.
+    const version = database.prepare("PRAGMA user_version").get()?.user_version;
+    if (version === 5) {
+      const row = stateRow(database);
+      if (row !== undefined) {
+        const document = parseJson(row.state_json, databasePath) as {
+          processedRequests?: unknown;
+        } | null;
+        const receipts = document?.processedRequests;
+        if (typeof receipts === "object" && receipts !== null && !Array.isArray(receipts)) {
+          for (const receipt of Object.values(receipts) as unknown[]) {
+            if (typeof receipt === "object" && receipt !== null) {
+              Reflect.deleteProperty(receipt, "requestId");
+              Reflect.deleteProperty(receipt, "committedAtStateVersion");
+            }
+          }
+        }
+        // Validate the remaining document and its SQL metadata before changing storage.
+        const state = parseStateRow({ ...row, state_json: JSON.stringify(document) }, databasePath);
+        database.prepare("UPDATE project_state SET state_json = ? WHERE singleton = 1")
+          .run(canonicalJson(state));
+      }
+      database.exec(`
+        ALTER TABLE mutation_lease DROP COLUMN owner_id;
+        PRAGMA user_version = ${String(DATABASE_SCHEMA_VERSION)};
+      `);
+    } else if (version !== DATABASE_SCHEMA_VERSION) {
+      throw new StateStoreError(
+        "STATE_MIGRATION_UNSUPPORTED",
+        `Unsupported SQLite state schema version: ${String(version)}`
+      );
+    }
+    commit(database);
+  } catch (error) {
+    rollback(database);
+    throw error;
+  }
+}
+
 async function chmodIfPresent(path: string): Promise<void> {
   try {
     await chmod(path, 0o600);
@@ -216,7 +251,6 @@ async function chmodIfPresent(path: string): Promise<void> {
 function mutationLeaseRow(database: DatabaseSync): MutationLeaseRow | undefined {
   const row = database.prepare(`
     SELECT owner_token,
-           owner_id,
            owner_pid,
            owner_hostname,
            owner_process_start_token,
@@ -227,7 +261,6 @@ function mutationLeaseRow(database: DatabaseSync): MutationLeaseRow | undefined 
   if (row === undefined) return undefined;
   if (
     typeof row.owner_token !== "string" ||
-    typeof row.owner_id !== "string" ||
     typeof row.owner_pid !== "number" ||
     typeof row.owner_hostname !== "string" ||
     typeof row.owner_process_start_token !== "string" ||
@@ -302,7 +335,7 @@ function removeStaleMutationLease(database: DatabaseSync, now: number): void {
 function databaseState(
   database: DatabaseSync,
   databasePath: string
-): ParsedStateDocument | undefined {
+): ProjectState | undefined {
   const row = stateRow(database);
   return row === undefined ? undefined : parseStateRow(row, databasePath);
 }
@@ -312,7 +345,6 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 class SqliteMutationLease implements StateMutationLease {
-  public readonly ownerId: string;
   private readonly renewLease: () => Promise<void>;
   private readonly writeWithLease: (
     nextState: ProjectState,
@@ -325,12 +357,10 @@ class SqliteMutationLease implements StateMutationLease {
   private released = false;
 
   public constructor(
-    ownerId: string,
     renewLease: () => Promise<void>,
     writeWithLease: (nextState: ProjectState, hooks: AtomicWriteHooks) => Promise<ProjectState>,
     releaseLease: () => Promise<void>
   ) {
-    this.ownerId = ownerId;
     this.renewLease = renewLease;
     this.writeWithLease = writeWithLease;
     this.releaseLease = releaseLease;
@@ -417,7 +447,7 @@ export class StateStore {
         const existing = databaseState(database, this.databasePath);
         if (existing !== undefined) {
           commit(database);
-          return existing.state;
+          return existing;
         }
         insertState(database, validated);
         const inserted = databaseState(database, this.databasePath);
@@ -425,7 +455,7 @@ export class StateStore {
           throw new StateStoreError("STATE_INVALID", "Initialized SQLite state row is missing");
         }
         commit(database);
-        return inserted.state;
+        return inserted;
       } catch (error) {
         rollback(database);
         throw error;
@@ -438,14 +468,13 @@ export class StateStore {
     if (existing === undefined) {
       throw new StateStoreError("STATE_NOT_FOUND", `State does not exist: ${this.databasePath}`);
     }
-    return existing.state;
+    return existing;
   }
 
   public async acquireMutationLease(
-    ownerId: string,
     waitMs = MUTATION_LEASE_WAIT_MS
   ): Promise<StateMutationLease> {
-    if (ownerId.length === 0 || !Number.isFinite(waitMs) || waitMs < 0) {
+    if (!Number.isFinite(waitMs) || waitMs < 0) {
       throw new StateStoreError("STATE_INVALID", "SQLite mutation lease options are invalid");
     }
     const ownerToken = randomUUID();
@@ -467,15 +496,13 @@ export class StateStore {
               INSERT INTO mutation_lease (
                 singleton,
                 owner_token,
-                owner_id,
                 owner_pid,
                 owner_hostname,
                 owner_process_start_token,
                 expires_at_ms
-              ) VALUES (1, ?, ?, ?, ?, ?, ?)
+              ) VALUES (1, ?, ?, ?, ?, ?)
             `).run(
               ownerToken,
-              ownerId,
               process.pid,
               hostname(),
               ownerProcessStartToken,
@@ -493,7 +520,6 @@ export class StateStore {
       }
       if (acquired) {
         return new SqliteMutationLease(
-          ownerId,
           () => this.renewMutationLease(ownerToken),
           (nextState, hooks) => this.mutationLeaseContext.run(
             ownerToken,
@@ -576,7 +602,7 @@ export class StateStore {
     return bytes;
   }
 
-  private async readDatabaseState(): Promise<ParsedStateDocument | undefined> {
+  private async readDatabaseState(): Promise<ProjectState | undefined> {
     return this.withDatabase((database) => databaseState(database, this.databasePath));
   }
 
@@ -655,7 +681,7 @@ export class StateStore {
         if (row === undefined) {
           insertState(database, validated);
         } else {
-          const current = parseStateRow(row, this.databasePath).state;
+          const current = parseStateRow(row, this.databasePath);
           if (validated.stateVersion !== current.stateVersion + 1) {
             throw new StateStoreError(
               "STATE_VERSION_MISMATCH",
@@ -669,7 +695,7 @@ export class StateStore {
         if (observed === undefined) {
           throw new StateStoreError("STATE_INVALID", "Committed SQLite state row is missing");
         }
-        return parseStateRow(observed, this.databasePath).state;
+        return parseStateRow(observed, this.databasePath);
       } catch (error) {
         rollback(database);
         throw error;
@@ -703,13 +729,14 @@ export class StateStore {
       const version = versionRow?.user_version;
       if (
         typeof version !== "number" ||
-        (version !== 0 && version !== DATABASE_SCHEMA_VERSION)
+        (version !== 0 && version !== 5 && version !== DATABASE_SCHEMA_VERSION)
       ) {
         throw new StateStoreError(
           "STATE_MIGRATION_UNSUPPORTED",
           `Unsupported SQLite state schema version: ${String(version)}`
         );
       }
+      if (version === 5) migrateDatabaseV5(database, this.databasePath);
       database.exec(DATABASE_SCHEMA);
       if (version === 0) {
         database.exec(`PRAGMA user_version = ${String(DATABASE_SCHEMA_VERSION)}`);

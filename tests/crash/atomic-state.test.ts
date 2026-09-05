@@ -64,12 +64,11 @@ database.prepare(\`
   INSERT INTO mutation_lease (
     singleton,
     owner_token,
-    owner_id,
     owner_pid,
     owner_hostname,
     owner_process_start_token,
     expires_at_ms
-  ) VALUES (1, 'expired-live-owner', 'expired-live-owner', ?, ?, ?, ?)
+  ) VALUES (1, 'expired-live-owner', ?, ?, ?, ?)
 \`).run(
   process.pid,
   hostname(),
@@ -98,12 +97,11 @@ database.prepare(\`
   INSERT INTO mutation_lease (
     singleton,
     owner_token,
-    owner_id,
     owner_pid,
     owner_hostname,
     owner_process_start_token,
     expires_at_ms
-  ) VALUES (1, ?, 'child-winner', ?, ?, ?, ?)
+  ) VALUES (1, ?, ?, ?, ?, ?)
 \`).run(
   ownerToken,
   process.pid,
@@ -123,10 +121,8 @@ process.stdin.once("data", () => {
   state.projectFence += 1;
   state.updatedAt = "2026-08-15T13:01:30.000Z";
   state.processedRequests[requestId] = {
-    requestId,
     requestHash,
-    response: { accepted: true },
-    committedAtStateVersion: nextStateVersion
+    response: { accepted: true }
   };
   database.prepare(\`
     UPDATE project_state
@@ -292,7 +288,7 @@ describe("atomic state replacement crash points", () => {
     let exited = false;
     try {
       await waitForLine(child.stdout, "LEASED");
-      await expect(store.acquireMutationLease("contender", 75)).rejects.toMatchObject({
+      await expect(store.acquireMutationLease(75)).rejects.toMatchObject({
         code: "PROJECT_LOCKED"
       } satisfies Partial<StateStoreError>);
 
@@ -300,7 +296,7 @@ describe("atomic state replacement crash points", () => {
       await new Promise<void>((settle) => child.once("exit", () => settle()));
       exited = true;
 
-      const recovered = await store.acquireMutationLease("after-owner-death", 1_000);
+      const recovered = await store.acquireMutationLease(1_000);
       await recovered.assertOwned();
       await recovered.release();
     } finally {
@@ -322,12 +318,11 @@ describe("atomic state replacement crash points", () => {
         INSERT INTO mutation_lease (
           singleton,
           owner_token,
-          owner_id,
           owner_pid,
           owner_hostname,
           owner_process_start_token,
           expires_at_ms
-        ) VALUES (1, 'dead-reused-owner', 'dead-reused-owner', ?, ?, ?, ?)
+        ) VALUES (1, 'dead-reused-owner', ?, ?, ?, ?)
       `).run(
         process.pid,
         hostname(),
@@ -338,7 +333,7 @@ describe("atomic state replacement crash points", () => {
       database.close();
     }
 
-    const recovered = await store.acquireMutationLease("pid-reuse-recovery", 1_000);
+    const recovered = await store.acquireMutationLease(1_000);
     await recovered.assertOwned();
     await recovered.release();
   });

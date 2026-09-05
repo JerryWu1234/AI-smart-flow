@@ -49,10 +49,8 @@ export const canonicalValueSchema: z.ZodType = z.lazy(() =>
 
 export const idempotentReceiptSchema = z
   .object({
-    requestId: identifierSchema,
     requestHash: sha256Schema,
-    response: canonicalValueSchema,
-    committedAtStateVersion: nonNegativeIntegerSchema
+    response: canonicalValueSchema
   })
   .strict();
 

@@ -8,6 +8,8 @@
 >
 > **后续格式决策：** `实现计划.md` 已进一步采用 latest-only 断代，删除 ProjectState 与 artifact 的应用层 `schemaVersion`，并将 SQLite 物理 schema 提升到 5、删除 `document_schema_version` 镜像；本计划中关于 v7/layout 4 的历史实施记录由该后续决策取代。
 >
+> **2026-09-05 补充清理：** SQLite 物理 schema 现为 6，删除无人消费的 `mutation_lease.owner_id`、回执中的重复 `requestId` 和未使用的 `committedAtStateVersion`。此次仅对 layout 5 提供一次性事务迁移，保留任务、请求 hash、原始响应及有效租约身份；更旧布局仍拒绝读取，artifact 契约不变。升级前须停止旧 Daemon，迁移后的数据库不支持旧二进制回读。另停止写入无人读取的 `recovery.phase/action`，移除未被 Worker 启动使用的 `recoveryEpoch`，保留实际的 fence、attemptId 和 generation 检查。下文的“不迁移”记录描述此前的格式断代。
+>
 > **实施结果：** Batch A–E 已按本计划落地。`RESUMABLE` / `RESUME_WORKER` 因无生产 reattachment producer 被删除；provider SPI 身份与 containment 字段保留；无运行时消费者的 `workspace` / `publish` 配置改为拒绝解析；Publish apply 前后 fault hooks 因确定性 crash-window 覆盖而保留并注明用途。ProjectState 删除 patch / evidence 槽位与 semantic，并将 `workspace` 收敛为 `{ relativePath }`。旧数据不提供 migration、dual-read 或 fallback，开发环境升级前须执行 `pnpm clean:daemon-data`；private workspace barrel 已收窄，同时保留 Pi worker、model extension、daemon、MCP 和 Review adapter 动态入口。
 >
 > 本计划只整理删除边界和实施顺序，不在同一变更中顺带重构仍然活跃的 Review、Publish、Pi session 或 Git workspace 主链。
