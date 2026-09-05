@@ -22,7 +22,7 @@ import {
 } from "@smartflow/state-store";
 import { taskManifestSchema, type TaskManifest } from "@smartflow/task-manifest";
 
-import { observeApprovedSource } from "../worker/approved-source.js";
+import { approvedSourceMatches } from "../worker/approved-source.js";
 import { ProjectMutationExecutor } from "../runtime/project-mutation-executor.js";
 import { verifyRunArtifacts } from "../recovery/recovery-manager.js";
 import {
@@ -352,8 +352,7 @@ export class ReviewRunner {
         if (artifactFailure !== undefined) {
           throw new Error(`ARTIFACT_INTEGRITY_BLOCKED:${artifactFailure}`);
         }
-        const observation = await observeApprovedSource(current, request.jobId);
-        if (!observation.matches) {
+        if (!(await approvedSourceMatches(current, request.jobId))) {
           const paused = this.coordinator.pauseForApprovedSourceDrift(
             current,
             request.jobId,
@@ -488,8 +487,7 @@ export class ReviewRunner {
         if (artifactFailure !== undefined) {
           throw new Error(`ARTIFACT_INTEGRITY_BLOCKED:${artifactFailure}`);
         }
-        const observation = await observeApprovedSource(current, context.jobId);
-        if (!observation.matches) {
+        if (!(await approvedSourceMatches(current, context.jobId))) {
           const paused = this.coordinator.pauseForApprovedSourceDrift(
             current,
             context.jobId

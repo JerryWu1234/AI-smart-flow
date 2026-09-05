@@ -193,11 +193,7 @@ export class RepairCoordinator {
       previousRound ?? currentRound,
       currentRound,
       previousRound === undefined ? -1 : run.noProgressCount,
-      {
-        parentManifest,
-        firstTaskNumber: nextTaskNumber(parentManifest),
-        noProgressThreshold: this.noProgressThreshold
-      }
+      this.noProgressThreshold
     );
     if (assessed.pauseRequired) {
       await this.pause(run, currentRound, assessed.noProgressCount, "REPAIR_NO_PROGRESS");

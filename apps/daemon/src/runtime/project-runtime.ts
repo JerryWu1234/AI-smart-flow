@@ -36,7 +36,7 @@ import {
 import { compileTaskManifest } from "@smartflow/task-manifest";
 import { cleanupGitRunTemporaryState } from "@smartflow/workspace";
 
-import { observeApprovedSource } from "../worker/approved-source.js";
+import { approvedSourceMatches } from "../worker/approved-source.js";
 import { type IpcRequest, type IpcRequestHandler } from "../transport/local-ipc-server.js";
 import { ProjectMutationExecutor } from "./project-mutation-executor.js";
 import { HostTurnCoordinator } from "../review/host-turn-coordinator.js";
@@ -678,8 +678,7 @@ export class ProjectRuntime {
           await this.assertRunArtifacts(store, state, input.jobId);
         }
         if (input.resumeAction === "restore_approved_tasks") {
-          const observation = await observeApprovedSource(state, input.jobId);
-          if (!observation.matches) {
+          if (!(await approvedSourceMatches(state, input.jobId))) {
             throw new ProjectRuntimeError(
               "APPROVED_SOURCE_DRIFT",
               "Approved tasks source has not been restored"

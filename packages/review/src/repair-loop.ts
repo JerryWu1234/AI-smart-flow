@@ -7,17 +7,9 @@ export interface RepairRound {
   relevantPathHashes: Record<string, string>;
 }
 
-export interface RepairTaskContext {
-  parentManifest: TaskManifest;
-  firstTaskNumber?: number;
-  noProgressThreshold?: number;
-}
-
 export interface RepairAssessment {
   noProgressCount: number;
   pauseRequired: boolean;
-  repairTasks: string[];
-  authorizedCriterionIds: string[];
 }
 
 export interface RepairScopeAssessment {
@@ -133,7 +125,7 @@ export function assessRepairProgress(
   previous: RepairRound,
   current: RepairRound,
   existingNoProgressCount: number,
-  context: RepairTaskContext
+  noProgressThreshold = 15
 ): RepairAssessment {
   const currentProblems = stableProblems(current);
   const previousProblems = stableProblems(previous);
@@ -142,19 +134,8 @@ export function assessRepairProgress(
   const noProgressCount = currentProblems.size === 0 || problemsReduced || pathsChanged
     ? 0
     : existingNoProgressCount + 1;
-  const firstTaskNumber = context.firstTaskNumber ?? 900;
-  const repairTasks = renderRepairTaskLines(
-    context.parentManifest,
-    current.tasks,
-    firstTaskNumber
-  );
-  const authorizedCriterionIds = [...new Set(
-    current.tasks.filter((task) => task.issues.length > 0).map((task) => task.id)
-  )].sort();
   return {
     noProgressCount,
-    pauseRequired: noProgressCount >= (context.noProgressThreshold ?? 15),
-    repairTasks,
-    authorizedCriterionIds
+    pauseRequired: noProgressCount >= noProgressThreshold
   };
 }

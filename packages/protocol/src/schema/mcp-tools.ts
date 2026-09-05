@@ -230,7 +230,6 @@ export const reviewTurnOutputSchema = z.discriminatedUnion("kind", [
   }
 });
 
-export type ExecuteInput = z.infer<typeof executeInputSchema>;
 export type DaemonExecuteInput = z.infer<typeof daemonExecuteInputSchema>;
 export type ExecuteOutput = z.infer<typeof executeOutputSchema>;
 export type ResumeInput = z.infer<typeof resumeInputSchema>;
